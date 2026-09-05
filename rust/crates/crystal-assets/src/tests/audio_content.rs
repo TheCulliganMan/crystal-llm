@@ -3435,19 +3435,13 @@
         data.apply_content_pack_payload(
             ContentPackCategory::TypeEffectiveness,
             serde_json::json!({
-                "matchups": {
-                    "FIRE": {
-                        "GRASS": { "numerator": 2, "denominator": 1 }
-                    },
-                    "ELECTRIC": {
-                        "GROUND": { "numerator": 0, "denominator": 1 }
-                    }
-                },
-                "foresight_matchups": {
-                    "NORMAL": {
-                        "GHOST": { "numerator": 0, "denominator": 1 }
-                    }
-                }
+                "matchups": [
+                    { "attacker": "FIRE", "defender": "GRASS", "multiplier": { "numerator": 2, "denominator": 1 } },
+                    { "attacker": "ELECTRIC", "defender": "GROUND", "multiplier": { "numerator": 0, "denominator": 1 } }
+                ],
+                "foresight_matchups": [
+                    { "attacker": "NORMAL", "defender": "GHOST", "multiplier": { "numerator": 0, "denominator": 1 } }
+                ]
             }),
         )
         .expect("apply type effectiveness payload");
@@ -3455,19 +3449,13 @@
         assert_eq!(
             data.type_effectiveness,
             serde_json::from_value::<TypeEffectivenessTable>(serde_json::json!({
-                "matchups": {
-                    "FIRE": {
-                        "GRASS": { "numerator": 2, "denominator": 1 }
-                    },
-                    "ELECTRIC": {
-                        "GROUND": { "numerator": 0, "denominator": 1 }
-                    }
-                },
-                "foresight_matchups": {
-                    "NORMAL": {
-                        "GHOST": { "numerator": 0, "denominator": 1 }
-                    }
-                }
+                "matchups": [
+                    { "attacker": "FIRE", "defender": "GRASS", "multiplier": { "numerator": 2, "denominator": 1 } },
+                    { "attacker": "ELECTRIC", "defender": "GROUND", "multiplier": { "numerator": 0, "denominator": 1 } }
+                ],
+                "foresight_matchups": [
+                    { "attacker": "NORMAL", "defender": "GHOST", "multiplier": { "numerator": 0, "denominator": 1 } }
+                ]
             }))
             .expect("type effectiveness fixture should parse")
         );
@@ -3477,16 +3465,12 @@
     fn content_pack_payloads_reject_duplicate_type_effectiveness_table() {
         let mut data = GameDataSet::default();
         let payload = serde_json::json!({
-            "matchups": {
-                "FIRE": {
-                    "GRASS": { "numerator": 2, "denominator": 1 }
-                }
-            },
-            "foresight_matchups": {
-                "NORMAL": {
-                    "GHOST": { "numerator": 0, "denominator": 1 }
-                }
-            }
+            "matchups": [
+                { "attacker": "FIRE", "defender": "GRASS", "multiplier": { "numerator": 2, "denominator": 1 } }
+            ],
+            "foresight_matchups": [
+                { "attacker": "NORMAL", "defender": "GHOST", "multiplier": { "numerator": 0, "denominator": 1 } }
+            ]
         });
         data.apply_content_pack_payload(ContentPackCategory::TypeEffectiveness, payload.clone())
             .expect("initial type effectiveness table should load");
@@ -3509,18 +3493,18 @@
             .apply_content_pack_payload(
                 ContentPackCategory::TypeEffectiveness,
                 serde_json::json!({
-                    "matchups": {
-                        "FIRE ": {
-                            "GRASS": { "numerator": 2, "denominator": 1 }
-                        }
-                    },
-                    "foresight_matchups": {}
+                    "matchups": [
+                        { "attacker": "FIRE ", "defender": "GRASS", "multiplier": { "numerator": 2, "denominator": 1 } }
+                    ],
+                    "foresight_matchups": [
+                        { "attacker": "NORMAL", "defender": "GHOST", "multiplier": { "numerator": 0, "denominator": 1 } }
+                    ]
                 }),
             )
             .expect_err("malformed type effectiveness attacker ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("type effectiveness foresight_matchups must be explicit"),
+            format!("{error:#}").contains("type effectiveness attacker"),
             "{error:#}"
         );
 
@@ -3528,18 +3512,18 @@
             .apply_content_pack_payload(
                 ContentPackCategory::TypeEffectiveness,
                 serde_json::json!({
-                    "matchups": {
-                        "FIRE": {
-                            "GRA SS": { "numerator": 2, "denominator": 1 }
-                        }
-                    },
-                    "foresight_matchups": {}
+                    "matchups": [
+                        { "attacker": "FIRE", "defender": "GRA SS", "multiplier": { "numerator": 2, "denominator": 1 } }
+                    ],
+                    "foresight_matchups": [
+                        { "attacker": "NORMAL", "defender": "GHOST", "multiplier": { "numerator": 0, "denominator": 1 } }
+                    ]
                 }),
             )
             .expect_err("malformed type effectiveness defender ids must fail during pack load");
 
         assert!(
-            format!("{error:#}").contains("type effectiveness foresight_matchups must be explicit"),
+            format!("{error:#}").contains("type effectiveness defender"),
             "{error:#}"
         );
     }
@@ -3552,12 +3536,12 @@
             .apply_content_pack_payload(
                 ContentPackCategory::TypeEffectiveness,
                 serde_json::json!({
-                    "matchups": {
-                        "FIRE": {
-                            "GRASS": { "numerator": 2, "denominator": 0 }
-                        }
-                    },
-                    "foresight_matchups": {}
+                    "matchups": [
+                        { "attacker": "FIRE", "defender": "GRASS", "multiplier": { "numerator": 2, "denominator": 0 } }
+                    ],
+                    "foresight_matchups": [
+                        { "attacker": "NORMAL", "defender": "GHOST", "multiplier": { "numerator": 0, "denominator": 1 } }
+                    ]
                 }),
             )
             .expect_err("zero denominator type effectiveness must fail during pack load");
@@ -4506,7 +4490,7 @@
             },
             escape_rope: FieldEscapeItemRule {
                 item_id: "ESCAPE_ROPE".to_string(),
-                escape_rope_mode: "ESCAPE_ROPE".to_string(),
+                escape_rope_mode: "DIG_WARP".to_string(),
             },
             repel: crystal_core::systems::field_moves::FieldRepelItemRule {},
             bicycle: FieldItemRule {

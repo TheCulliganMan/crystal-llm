@@ -6287,7 +6287,6 @@ fn modpack_manifest_supports_typed_pokemon_and_map_additions() {
                 battle_capture_ball: None,
                 battle_focus_energy: None,
                 battle_stat_drop_guard: None,
-                battle_stat_drop_guard_turns: None,
                 confusion_heal: None,
                 repel_steps: None,
                 escape_rope_mode: None,
@@ -6668,6 +6667,38 @@ fn verifier_rejects_runtime_spawn_point_map_name_mismatches() {
 }
 
 #[test]
+fn verifier_rejects_fly_destinations_without_exact_spawn_and_landmark_rows() {
+    let data = GameDataSet {
+        fly_destinations: [(
+            "ENGINE_FLYPOINT_MISSING".to_string(),
+            FlyDestination {
+                flypoint_flag: "ENGINE_FLYPOINT_OTHER".to_string(),
+                destination_spawn_identifier: 27,
+                label: "LANDMARK_MISSING".to_string(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..GameDataSet::default()
+    };
+
+    let report = verify_game_data(
+        &AssetRoot::new(repository_root_for_tests()),
+        &data,
+        &PlayabilityRules::default(),
+    );
+    let codes = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert!(codes.contains("fly_destination_flag_mismatch"));
+    assert!(codes.contains("unknown_fly_destination_spawn"));
+    assert!(codes.contains("unknown_fly_destination_landmark"));
+}
+
+#[test]
 fn verifier_rejects_runtime_spawn_points_outside_declared_runtime_bounds() {
     let data = GameDataSet {
         runtime_map_metadata: [(
@@ -6887,23 +6918,23 @@ fn runtime_mutation_protocol_round_trips_map_reentry_queue_drain() {
 }
 
 #[test]
-fn runtime_mutation_protocol_rejects_framed_v48_payload_without_compatibility_decode() {
+fn runtime_mutation_protocol_rejects_framed_v49_payload_without_compatibility_decode() {
     let current = encode_runtime_mutation_command_payload(
         &RuntimeMutationCommand::ResolveBlackoutToLastSpawn,
     )
     .expect("encode current command payload");
-    let v48 = RuntimeCommandPayload::new(
-        "crystal_runtime_mutation_command_v48",
+    let v49 = RuntimeCommandPayload::new(
+        "crystal_runtime_mutation_command_v49",
         current.bytes().to_vec(),
     )
     .expect("construct well-formed legacy schema payload");
 
-    let error = decode_runtime_mutation_command_payload(&v48)
-        .expect_err("v48 command frames have no compatibility shim");
+    let error = decode_runtime_mutation_command_payload(&v49)
+        .expect_err("v49 command frames have no compatibility shim");
 
     assert!(
             error.to_string().contains(
-                "schema 'crystal_runtime_mutation_command_v48' does not match expected 'crystal_runtime_mutation_command_v49'"
+                "schema 'crystal_runtime_mutation_command_v49' does not match expected 'crystal_runtime_mutation_command_v50'"
             ),
             "{error:#}"
         );

@@ -9,6 +9,49 @@ fn require_consumed_divider_trace(context: &str, divider: &ReplayDivider) -> Res
     Ok(())
 }
 
+fn item_happiness_change_code(item: &Item) -> Option<&'static str> {
+    if item.vitamin_stat.is_some() {
+        return Some("HAPPINESS_USEDITEM");
+    }
+    if item.script_name != "X_ACCURACY" && item.battle_stat_boost_stat.is_some() {
+        return Some("HAPPINESS_USEDXITEM");
+    }
+    match item.script_name.as_str() {
+        "HEAL_POWDER" | "ENERGYPOWDER" => Some("HAPPINESS_BITTERPOWDER"),
+        "ENERGY_ROOT" => Some("HAPPINESS_ENERGYROOT"),
+        "REVIVAL_HERB" => Some("HAPPINESS_REVIVALHERB"),
+        _ => None,
+    }
+}
+
+fn is_gym_leader_class(trainer_class: &str) -> bool {
+    matches!(
+        trainer_class,
+        "FALKNER"
+            | "WHITNEY"
+            | "BUGSY"
+            | "MORTY"
+            | "PRYCE"
+            | "JASMINE"
+            | "CHUCK"
+            | "CLAIR"
+            | "WILL"
+            | "BRUNO"
+            | "KAREN"
+            | "KOGA"
+            | "CHAMPION"
+            | "RED"
+            | "BROCK"
+            | "MISTY"
+            | "LT_SURGE"
+            | "ERIKA"
+            | "JANINE"
+            | "SABRINA"
+            | "BLAINE"
+            | "BLUE"
+    )
+}
+
 fn apply_normal_vblank_divider_trace(
     state: &mut GameState,
     vblanks: u32,
@@ -1206,9 +1249,28 @@ impl GameDataSet {
     }
 
     pub fn runtime_spawn_point(&self, spawn_identifier: u16) -> Result<&RuntimeSpawnPoint> {
+        anyhow::ensure!(
+            spawn_identifier
+                < crystal_core::systems::special_routines::CRYSTAL_NUM_SPAWN_POINTS,
+            "spawn point {spawn_identifier} is outside Crystal's SpawnPoints table"
+        );
         self.runtime_spawn_points
             .get(&spawn_identifier.to_string())
             .with_context(|| format!("compiled game pack missing spawn point {spawn_identifier}"))
+    }
+
+    fn home_spawn_identifier(&self) -> Result<u16> {
+        let value = self
+            .story_event_script_constants
+            .global
+            .get("SPAWN_HOME")
+            .context("compiled pack missing source constant SPAWN_HOME")?;
+        let identifier = u16::try_from(*value)
+            .with_context(|| format!("compiled source constant SPAWN_HOME={value} is not a u16"))?;
+        self.runtime_spawn_point(identifier).with_context(|| {
+            format!("compiled source constant SPAWN_HOME={identifier} has no runtime spawn point")
+        })?;
+        Ok(identifier)
     }
 
     pub fn runtime_spawn_points(&self) -> &BTreeMap<String, RuntimeSpawnPoint> {
@@ -1234,6 +1296,27 @@ impl GameDataSet {
             );
         }
         Ok(spawn)
+    }
+
+    fn optional_runtime_spawn_identifier_for_map_constant(
+        &self,
+        map_constant: &str,
+    ) -> Result<Option<u16>> {
+        let mut matches = self
+            .runtime_spawn_points
+            .values()
+            .filter(|spawn| spawn.map_constant == map_constant);
+        let Some(spawn) = matches.next() else {
+            return Ok(None);
+        };
+        if let Some(other) = matches.next() {
+            anyhow::bail!(
+                "compiled game pack has multiple spawn points for {map_constant}: {} and {}",
+                spawn.identifier,
+                other.identifier
+            );
+        }
+        Ok(Some(spawn.identifier))
     }
 
     pub fn map_module(&self, map_name: &str) -> Result<&MapModule> {
@@ -1702,7 +1785,7 @@ impl GameDataSet {
             startbattle_command_index,
             resume_command_index,
         };
-        activate_static_wild_battle_start(state, &start, &origin).map_err(|error| {
+        activate_static_wild_battle_start(state, &start, &origin, &self.items).map_err(|error| {
             anyhow::anyhow!(
                 "activate scripted wild battle at {map_name}/{source_script}:{startbattle_command_index}: {error:?}"
             )
@@ -1716,8 +1799,8 @@ impl GameDataSet {
         state.battle_active_party_index = first_available_battle_party_index(state);
         state.battle_active_enemy_party_index = Some(0);
         state.battle_rewarded_enemy_party_indices.clear();
+        state.battle_evolvable_party_indices.clear();
         state.battle_escape_attempts = 0;
-        state.battle_player_stat_drop_guard_turns = 0;
         state.battle_pay_day_money = 0;
         set_script_battle_result_accumulator(state);
         state.random_state = start.random_state_after;
@@ -1781,10 +1864,27 @@ impl GameDataSet {
                 "start scripted trainer battle at {map_name}/{source_script}:{startbattle_command_index}"
             )
         })?;
+        let gym_battle_happiness = match &start {
+            TrainerBattleStartStatus::Started(started)
+                if is_gym_leader_class(&started.trainer_class) =>
+            {
+                Some(self.happiness_change("HAPPINESS_GYMBATTLE")?)
+            }
+            TrainerBattleStartStatus::Started(_)
+            | TrainerBattleStartStatus::AlreadyDefeated { .. } => None,
+        };
         if is_trainer_table {
             set_running_trainer_battle_script(state, false);
         }
-        activate_trainer_battle_start_status(state, &start)
+        if let Some(changes) = gym_battle_happiness {
+            for pokemon in state.storage.party.pokemon.iter_mut().flatten() {
+                if pokemon.hp > 0 {
+                    core_apply_happiness_change(pokemon, changes);
+                }
+            }
+            state.sync_party_from_storage();
+        }
+        activate_trainer_battle_start_status(state, &start, &self.items)
             .context("activate scripted trainer battle")?;
         Ok(start)
     }
@@ -4992,8 +5092,8 @@ impl GameDataSet {
                     command.source_script, command.command_index
                 )
             })?;
-            let spawn = self.runtime_spawn_point_for_map_constant(map_constant)?;
-            next_state.last_spawn_identifier = Some(spawn.identifier);
+            self.map_name_for_constant(map_constant)?;
+            next_state.last_spawn_map_constant = Some(map_constant.clone());
         }
         if command.command == "changemapblocks" {
             let blocks_label = command.args.first().with_context(|| {
@@ -7089,6 +7189,30 @@ impl GameDataSet {
                     self.transition_pending_script_warp(state, session, music_ids)?,
                 )
             }
+            RuntimeMutationCommand::TransitionToSpawnPoint {
+                spawn_identifier,
+                map_setup,
+            } => {
+                let spawn = self.runtime_spawn_point(spawn_identifier)?;
+                let mut next_state = state.clone();
+                let mut next_session = session.clone();
+                self.transition_overworld_session_with_mode(
+                    &mut next_state,
+                    &mut next_session,
+                    &spawn.map_name,
+                    runtime_spawn_expected_tile(spawn),
+                    MovementMode::Normal,
+                    &map_setup,
+                    SpawnMemoryUpdate::Preserve,
+                    music_ids,
+                )?;
+                *state = next_state;
+                *session = next_session;
+                RuntimeMutationResult::SpawnPointTransitioned {
+                    spawn_identifier,
+                    map_name: spawn.map_name.clone(),
+                }
+            }
             RuntimeMutationCommand::ApplyMapSetupCallbacks { map_setup } => {
                 let map_name = session.map.name.clone();
                 self.apply_map_setup_callbacks(state, session, &map_name, &map_setup)?;
@@ -8086,7 +8210,7 @@ impl GameDataSet {
             }
             RuntimeMutationCommand::UseFlashFieldMove(command) => {
                 RuntimeMutationResult::FlashFieldMoveUsed(
-                    self.use_flash_field_move(state, command.party_index)?,
+                    self.use_flash_field_move(state, &session.map.name, command.party_index)?,
                 )
             }
             RuntimeMutationCommand::UseSurfFieldMove(command) => {
@@ -8306,10 +8430,13 @@ impl GameDataSet {
                 RuntimeMutationResult::ActiveWildCaptureCompleted(completion)
             }
             RuntimeMutationCommand::SwitchActiveBattleParty(command) => {
-                RuntimeMutationResult::ActiveBattlePartySwitched(
-                    switch_active_battle_party_index(state, command.party_index)
-                        .map_err(|error| anyhow::anyhow!("switch active battle party: {error}"))?,
+                let outcome = switch_active_battle_party_index(
+                    state,
+                    command.party_index,
+                    &self.items,
                 )
+                    .map_err(|error| anyhow::anyhow!("switch active battle party: {error}"))?;
+                RuntimeMutationResult::ActiveBattlePartySwitched(outcome)
             }
             RuntimeMutationCommand::ResolveActiveBattleTurn(command) => {
                 let mut next_state = state.clone();
@@ -8375,10 +8502,7 @@ impl GameDataSet {
                     let move_calls_for_selector = std::rc::Rc::clone(&move_calls_observed);
                     let mut select_enemy_move = move |combat: &BattleCombatState,
                                                       rng: &mut dyn BattleRandomSource|
-                          -> std::result::Result<
-                        usize,
-                        BattleTurnError,
-                    > {
+                          -> std::result::Result<EnemyMoveSelection, BattleTurnError> {
                         struct CountingRandom<'a> {
                             inner: &'a mut dyn BattleRandomSource,
                             calls: &'a std::cell::Cell<u16>,
@@ -8405,7 +8529,7 @@ impl GameDataSet {
                             recorded_limit: move_random_calls,
                         };
                         let actual = if let Some(ai_move_flags) = trainer_ai_move_flags {
-                            self.select_trainer_enemy_move_slot(
+                            self.select_trainer_enemy_move_with_scratch(
                                 combat,
                                 ai_move_flags,
                                 &mut counting,
@@ -8416,13 +8540,17 @@ impl GameDataSet {
                                 }
                             })?
                         } else {
-                            core_select_wild_enemy_move_slot(combat, &mut counting)
+                            EnemyMoveSelection {
+                                slot: core_select_wild_enemy_move_slot(combat, &mut counting),
+                                ai_damage_register: 0,
+                            }
                         };
-                        if actual != selected_move_slot {
+                        if actual.slot != selected_move_slot {
                             let battle_kind = if replaying_wild_ai { "wild" } else { "trainer" };
                             return Err(BattleTurnError::EnemyActionSelectionFailed {
                                 error: format!(
-                                    "recorded {battle_kind} enemy move slot {selected_move_slot} does not match recomputed slot {actual}"
+                                    "recorded {battle_kind} enemy move slot {selected_move_slot} does not match recomputed slot {}",
+                                    actual.slot
                                 ),
                             });
                         }
@@ -9304,17 +9432,6 @@ impl GameDataSet {
             }
             RuntimeMutationCommand::WarpToSpawnPoint => {
                 let outcome = self.apply_special_routine(state, "WarpToSpawnPoint", music_ids)?;
-                let spawn_identifier = state
-                    .last_spawn_identifier
-                    .context("spawn-point transition has no saved spawn identifier")?;
-                let spawn = self.runtime_spawn_point(spawn_identifier)?;
-                state.script_runtime.pending_script_warp = Some(ScriptWarpRequest {
-                    target_map: spawn.map_name.clone(),
-                    tile: runtime_spawn_expected_tile(spawn),
-                    facing: None,
-                    source_script: "WarpToSpawnPoint".to_string(),
-                    command_index: 0,
-                });
                 RuntimeMutationResult::SpawnPointWarped(outcome)
             }
             RuntimeMutationCommand::HealPartySpecial => {
@@ -11073,9 +11190,16 @@ impl GameDataSet {
                     (None, map_name, tile)
                 } else {
                     self.apply_special_routine(state, "WarpToSpawnPoint", music_ids)?;
-                    let spawn_identifier = state
-                        .last_spawn_identifier
-                        .context("whiteout has no saved spawn identifier")?;
+                    let saved_spawn_identifier = match state.last_spawn_map_constant.as_deref() {
+                        Some(map_constant) => {
+                            self.optional_runtime_spawn_identifier_for_map_constant(map_constant)?
+                        }
+                        None => None,
+                    };
+                    let spawn_identifier = match saved_spawn_identifier {
+                        Some(identifier) => identifier,
+                        None => self.home_spawn_identifier()?,
+                    };
                     let spawn = self.runtime_spawn_point(spawn_identifier)?;
                     let map_name = spawn.map_name.clone();
                     let tile = runtime_spawn_expected_tile(spawn);
@@ -11085,7 +11209,7 @@ impl GameDataSet {
                         session,
                         &map_name,
                         tile,
-                        SpawnMemoryUpdate::Set(spawn_identifier),
+                        SpawnMemoryUpdate::Preserve,
                         music_ids,
                     )?;
                     (Some(spawn_identifier), map_name, tile)
@@ -11867,7 +11991,7 @@ impl GameDataSet {
         self.commit_overworld_snapshot(
             &mut state,
             &overworld,
-            SpawnMemoryUpdate::Set(spawn.identifier),
+            SpawnMemoryUpdate::Preserve,
         );
         let map_name = overworld.map.name.clone();
         overworld.player.mode =
@@ -11880,7 +12004,7 @@ impl GameDataSet {
         self.commit_overworld_snapshot(
             &mut state,
             &overworld,
-            SpawnMemoryUpdate::Set(spawn.identifier),
+            SpawnMemoryUpdate::Preserve,
         );
         overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         Ok((state, overworld))
@@ -14804,7 +14928,8 @@ impl GameDataSet {
         let item = self.item(item_id)?;
         Self::require_field_usable_item_in_bag(state, item_id, item, "repel")?;
         let item_use = self.use_bag_item(state, item_id, ItemUseContext::Field)?;
-        let repel = apply_repel_item_use(state, item_id, steps);
+        let repel = apply_repel_item_use(state, item_id, steps)
+            .map_err(|error| anyhow::anyhow!("apply field repel item {item_id}: {error:?}"))?;
         Ok(FieldRepelItemUseOutcome {
             item_use,
             repel_steps_before: repel.repel_steps_before,
@@ -15109,6 +15234,8 @@ impl GameDataSet {
         }
         let destination =
             self.saved_dig_warp_destination(state, &format!("field escape item {item_id}"))?;
+        apply_escape_rope_chamber_effect(state, &source_map)
+            .map_err(|error| anyhow::anyhow!("apply Escape Rope chamber effect: {error}"))?;
         let item_use = self.use_bag_item(state, item_id, ItemUseContext::Field)?;
         Ok(FieldEscapeRopeUseOutcome {
             item_use,
@@ -15678,6 +15805,7 @@ impl GameDataSet {
     pub fn use_flash_field_move(
         &self,
         state: &mut GameState,
+        source_map: &str,
         party_index: usize,
     ) -> Result<FieldMoveFlagOutcome> {
         self.require_no_active_battle(state, "FLASH field move")?;
@@ -15692,6 +15820,10 @@ impl GameDataSet {
             !outcome.was_set && outcome.is_set,
             "cannot prepare FLASH because its source status bit is already active"
         );
+        let map = self.map_module(source_map)?;
+        apply_flash_map_effect(state, source_map, map.attributes.palette.as_deref())
+            .map_err(anyhow::Error::new)
+            .context("validate FLASH source map")?;
         state
             .script_runtime
             .memory
@@ -15867,6 +15999,17 @@ impl GameDataSet {
     ) -> Result<FlyFieldMoveOutcome> {
         self.require_no_active_battle(state, "FLY field move")?;
         let fly_rule = self.validate_fly_field_move(state, source_map, party_index)?;
+        let destination_rule = self
+            .fly_destinations
+            .get(flypoint_flag)
+            .with_context(|| format!("FLY destination flag {flypoint_flag} is not defined"))?;
+        anyhow::ensure!(
+            destination_rule.flypoint_flag == flypoint_flag
+                && destination_rule.destination_spawn_identifier == destination_spawn_identifier,
+            "FLY request {flypoint_flag}/{destination_spawn_identifier} does not match compiled destination {}/{}",
+            destination_rule.flypoint_flag,
+            destination_rule.destination_spawn_identifier
+        );
         if !state
             .flags
             .is_engine_flag_set(flypoint_flag)
@@ -16017,9 +16160,17 @@ impl GameDataSet {
     ) -> Result<TeleportFieldMoveOutcome> {
         self.require_no_active_battle(state, "TELEPORT field move")?;
         let teleport_rule = self.validate_teleport_field_move(state, source_map, party_index)?;
-        let destination_spawn_identifier = state
-            .last_spawn_identifier
-            .with_context(|| "TELEPORT field move has no saved spawn identifier")?;
+        let last_spawn_map_constant = state
+            .last_spawn_map_constant
+            .as_deref()
+            .with_context(|| "TELEPORT field move has no saved spawn map")?;
+        let destination_spawn_identifier = self
+            .optional_runtime_spawn_identifier_for_map_constant(last_spawn_map_constant)?
+            .with_context(|| {
+                format!(
+                    "TELEPORT saved spawn map {last_spawn_map_constant} is not in SpawnPoints"
+                )
+            })?;
         let destination_spawn = self.runtime_spawn_point(destination_spawn_identifier)?;
         Ok(TeleportFieldMoveOutcome {
             actor_party_index: teleport_rule.actor_party_index,
@@ -16089,9 +16240,7 @@ impl GameDataSet {
             pending.destination_warp_index,
             pending.flypoint_flag.as_ref(),
         ) {
-            (Some(spawn_identifier), None, Some(_)) | (Some(spawn_identifier), None, None) => {
-                SpawnMemoryUpdate::Set(spawn_identifier)
-            }
+            (Some(_), None, Some(_)) | (Some(_), None, None) => SpawnMemoryUpdate::Preserve,
             (None, Some(_), None) => SpawnMemoryUpdate::Preserve,
             _ => anyhow::bail!("pending field travel has an invalid destination shape"),
         };
@@ -16130,9 +16279,38 @@ impl GameDataSet {
         if item.revive_hp_percent.is_some() {
             crate::nuzlocke::ensure_can_restore_hp(self.nuzlocke_rules, pokemon)?;
         }
-        core_apply_active_battle_item_effect(pokemon, item, consumed)
+        let outcome = core_apply_active_battle_item_effect(pokemon, item, consumed)
             .map_err(anyhow::Error::new)
-            .with_context(|| format!("use item {item_id}"))
+            .with_context(|| format!("use item {item_id}"))?;
+        if let Some(code) = item_happiness_change_code(item) {
+            core_apply_happiness_change(pokemon, self.happiness_change(code)?);
+        }
+        Ok(outcome)
+    }
+
+    fn apply_player_active_battle_combat_item_effect(
+        &self,
+        combat: &mut BattleCombatState,
+        item_id: &str,
+        consumed: bool,
+    ) -> Result<BattleItemOutcome> {
+        let item = self.item(item_id)?;
+        let outcome = apply_active_battle_item_effect_to_combat(
+            combat,
+            BattleSide::Player,
+            item,
+            consumed,
+            &self.battle_stat_multipliers,
+        )
+        .map_err(|error| anyhow::anyhow!("{error:?}"))
+        .with_context(|| format!("use item {item_id}"))?;
+        if let Some(code) = item_happiness_change_code(item) {
+            core_apply_happiness_change(
+                &mut combat.player,
+                self.happiness_change(code)?,
+            );
+        }
+        Ok(outcome)
     }
 
     pub fn apply_battle_pp_item_effect(
@@ -16164,17 +16342,28 @@ impl GameDataSet {
         item_id: &str,
         party_index: usize,
     ) -> Result<(ItemUseOutcome, BattleItemOutcome)> {
-        let x_accuracy = self.item(item_id)?.script_name == "X_ACCURACY";
+        let item = self.item(item_id)?;
         let active = state.battle_active_party_index == Some(party_index);
+        anyhow::ensure!(
+            item.battle_menu != "ITEMMENU_CLOSE" || active,
+            "use battle item {item_id}: ITEMMENU_CLOSE requires the active battle Pokemon"
+        );
+        let x_accuracy = item.script_name == "X_ACCURACY";
         let mut combat = active_battle_combat_state(state)
             .with_context(|| format!("use battle item {item_id} in active battle"))?;
+        let active_x_item = active
+            && item.script_name != "X_ACCURACY"
+            && item.battle_stat_boost_stat.is_some();
         if active && x_accuracy && combat.player_x_accuracy {
             anyhow::bail!("use battle item {item_id}: X Accuracy is already active");
         }
-        let combat_status_before = active.then(|| combat.player.status.clone());
         if active {
-            let mut combat_preview = combat.player.clone();
-            self.apply_active_battle_item_effect(&mut combat_preview, item_id, false)?;
+            let mut combat_preview = combat.clone();
+            self.apply_player_active_battle_combat_item_effect(
+                &mut combat_preview,
+                item_id,
+                false,
+            )?;
         }
         let mut preview = clone_active_battle_party_pokemon(state, party_index)
             .map_err(|error| anyhow::anyhow!("use battle item {item_id}: {error:?}"))?;
@@ -16183,10 +16372,20 @@ impl GameDataSet {
         let item_use = self.use_bag_item(state, item_id, ItemUseContext::Battle)?;
         let pokemon = require_active_battle_party_pokemon_mut(state, party_index)
             .map_err(|error| anyhow::anyhow!("use battle item {item_id}: {error:?}"))?;
+        // XItemEffect mutates wBattleMonStatLevels, not the selected party
+        // structure. Happiness is mirrored separately by ChangeHappiness.
+        let stored_stat_boosts_before = active_x_item.then(|| pokemon.stat_boosts.clone());
         let stored_item =
             self.apply_active_battle_item_effect(pokemon, item_id, item_use.consumed)?;
+        if let Some(stat_boosts) = stored_stat_boosts_before {
+            pokemon.stat_boosts = stat_boosts;
+        }
         let battle_item = if active {
-            self.apply_active_battle_item_effect(&mut combat.player, item_id, item_use.consumed)?
+            self.apply_player_active_battle_combat_item_effect(
+                &mut combat,
+                item_id,
+                item_use.consumed,
+            )?
         } else {
             stored_item
         };
@@ -16198,11 +16397,18 @@ impl GameDataSet {
             format!("active combat party is missing battle item target index {party_index}")
         })?;
         *combat_party_slot = stored;
-        if active {
-            if combat_status_before.flatten().is_some() && combat.player.status.is_none() {
-                combat.player_toxic_turns = 0;
-                combat.player_nightmare_source = None;
-            }
+        if active && !item.status_heals.is_empty() {
+            combat.player_toxic_turns = 0;
+            combat.player_nightmare_source = None;
+            combat.player_badge_before_status = true;
+            crystal_core::battle::turn::recalculate_loaded_stats(
+                &mut combat,
+                BattleSide::Player,
+                &self.battle_stat_multipliers,
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("recalculate player stats after battle item {item_id}: {error:?}")
+            })?;
         }
         if active && x_accuracy {
             combat.player_x_accuracy = true;
@@ -16258,7 +16464,7 @@ impl GameDataSet {
         consumed: bool,
     ) -> Result<PartyItemOutcome> {
         let item = self.item(item_id)?;
-        if item.revive_hp_percent.is_some() && self.nuzlocke_rules.permadeath {
+        if item.party_revive_hp_percent.is_some() && self.nuzlocke_rules.permadeath {
             anyhow::ensure!(
                 !party
                     .pokemon
@@ -16268,7 +16474,7 @@ impl GameDataSet {
                 "Nuzlocke permadeath prevents reviving fainted Pokemon"
             );
         }
-        core_apply_party_wide_item_effect(party, item, consumed)
+        core_apply_party_wide_item_effect(party, item, &self.moves, consumed)
             .map_err(anyhow::Error::new)
             .with_context(|| format!("use whole-party item {item_id}"))
     }
@@ -16277,6 +16483,7 @@ impl GameDataSet {
         &self,
         pokemon: &mut Pokemon,
         item_id: &str,
+        level_up_happiness: BattleLevelUpHappinessContext,
         time_of_day: TimeOfDay,
         consumed: bool,
     ) -> Result<BattleItemOutcome> {
@@ -16296,6 +16503,7 @@ impl GameDataSet {
                 &self.growth_rates,
                 &self.battle_reward_rules,
                 &self.evolutions,
+                level_up_happiness,
                 time_of_day,
                 consumed,
             )
@@ -16304,6 +16512,9 @@ impl GameDataSet {
         }
         .map_err(anyhow::Error::new)
         .with_context(|| format!("use party item {item_id}"))?;
+        if let Some(code) = item_happiness_change_code(item) {
+            core_apply_happiness_change(pokemon, self.happiness_change(code)?);
+        }
         if item.revive_hp_percent.is_some() && outcome.hp_before == 0 && outcome.hp_after > 0 {
             pokemon.status = None;
             pokemon.sleep_turns = 0;
@@ -16326,7 +16537,7 @@ impl GameDataSet {
             .filter(|candidate| !candidate.consumable)
             .filter_map(|candidate| candidate.tmhm_move.clone())
             .collect();
-        core_teach_tmhm_move(
+        let outcome = core_teach_tmhm_move(
             pokemon,
             item,
             &self.moves,
@@ -16335,7 +16546,14 @@ impl GameDataSet {
             consumed,
         )
         .map_err(anyhow::Error::new)
-        .with_context(|| format!("use TM/HM {item_id}"))
+        .with_context(|| format!("use TM/HM {item_id}"))?;
+        if item.consumable {
+            core_apply_happiness_change(
+                pokemon,
+                self.happiness_change("HAPPINESS_LEARNMOVE")?,
+            );
+        }
+        Ok(outcome)
     }
 
     pub fn use_bag_item_on_party_pokemon(
@@ -16345,13 +16563,20 @@ impl GameDataSet {
         party_index: usize,
         time_of_day: TimeOfDay,
     ) -> Result<(ItemUseOutcome, BattleItemOutcome)> {
+        let level_up_happiness = self.level_up_happiness_context(state)?;
         let mut preview = clone_field_party_pokemon(state, party_index)
             .map_err(|error| anyhow::anyhow!("use party item {item_id}: {error:?}"))?;
         if preview.is_egg {
             anyhow::bail!("use party item {item_id}: Eggs can't use that");
         }
         let preview_effect =
-            self.apply_party_pokemon_item_effect(&mut preview, item_id, time_of_day, false)?;
+            self.apply_party_pokemon_item_effect(
+                &mut preview,
+                item_id,
+                level_up_happiness,
+                time_of_day,
+                false,
+            )?;
         self.require_no_existing_pending_move_learn_for_item_effect(
             state,
             party_index,
@@ -16362,9 +16587,24 @@ impl GameDataSet {
         let pokemon = require_field_party_pokemon_mut(state, party_index)
             .map_err(|error| anyhow::anyhow!("use party item {item_id}: {error:?}"))?;
         let item_effect =
-            self.apply_party_pokemon_item_effect(pokemon, item_id, time_of_day, item_use.consumed)?;
+            self.apply_party_pokemon_item_effect(
+                pokemon,
+                item_id,
+                level_up_happiness,
+                time_of_day,
+                item_use.consumed,
+            )?;
         self.queue_item_pending_move_learn(state, party_index, &item_effect)
             .with_context(|| format!("queue pending move learn for party item {item_id}"))?;
+        if item_effect.evolution_target.is_some()
+            && item_effect.evolution_cancel_snapshot.is_none()
+        {
+            let evolved_pokemon = state.storage.party.pokemon[party_index]
+                .as_ref()
+                .context("evolved party Pokemon disappeared")?
+                .clone();
+            state.pokedex.record_caught_pokemon(&evolved_pokemon);
+        }
         state.sync_party_from_storage();
         Ok((item_use, item_effect))
     }
@@ -16452,6 +16692,17 @@ impl GameDataSet {
         action: &str,
     ) -> Result<Option<EvolutionReport>> {
         if !resolution.defer_level_evolution {
+            return Ok(None);
+        }
+        if let (
+            BattleMemory::Trainer { enemy_party, .. },
+            Some(active_enemy_index),
+        ) = (&state.battle, state.battle_active_enemy_party_index)
+            && enemy_party
+                .iter()
+                .enumerate()
+                .any(|(index, pokemon)| index != active_enemy_index && pokemon.hp > 0)
+        {
             return Ok(None);
         }
         let time_of_day = state.time.time_of_day;
@@ -16561,7 +16812,15 @@ impl GameDataSet {
         if let Some(pending_move_learn) = pending_move_learn {
             state.pending_move_learn = Some(pending_move_learn);
         }
+        if report.cancel_snapshot.is_none() {
+            let evolved_pokemon = state.storage.party.pokemon[party_index]
+                .as_ref()
+                .context("deferred evolved party Pokemon disappeared")?
+                .clone();
+            state.pokedex.record_caught_pokemon(&evolved_pokemon);
+        }
         state.sync_party_from_storage();
+        state.battle_evolvable_party_indices.remove(&party_index);
         rebase_pending_move_learns_for_party(state, party_index, true);
         sync_active_combat_player_party_from_storage(state);
         Ok(report)
@@ -17164,24 +17423,18 @@ impl GameDataSet {
         &self,
         state: &GameState,
         item_id: &str,
-    ) -> Result<u8> {
+    ) -> Result<()> {
         let item = self.item(item_id)?;
-        let turns = validate_battle_stat_drop_guard_item(item).map_err(|error| {
+        validate_battle_stat_drop_guard_item(item).map_err(|error| {
             anyhow::anyhow!("validate battle stat drop guard item {item_id}: {error:?}")
         })?;
-        require_active_battle_for_state_item(state)
-            .map_err(|error| anyhow::anyhow!("use battle state item {item_id}: {error}"))?;
-        Ok(turns)
-    }
-
-    pub fn apply_battle_stat_drop_guard_item(
-        &self,
-        state: &mut GameState,
-        item_id: &str,
-    ) -> Result<BattleStatDropGuardOutcome> {
-        let turns = self.require_battle_stat_drop_guard_item_context(state, item_id)?;
-        apply_battle_stat_drop_guard_turns(state, turns)
-            .map_err(|error| anyhow::anyhow!("use battle state item {item_id}: {error}"))
+        let combat = active_battle_combat_state(state)
+            .with_context(|| format!("use battle state item {item_id}"))?;
+        anyhow::ensure!(
+            !combat.player_mist_active,
+            "use battle state item {item_id}: stat drop guard is already active"
+        );
+        Ok(())
     }
 
     pub fn use_bag_guard_spec_in_active_battle(
@@ -17192,12 +17445,16 @@ impl GameDataSet {
         let mut staged_state = state.clone();
         self.require_battle_stat_drop_guard_item_context(&staged_state, item_id)?;
         let item_use = self.use_bag_item(&mut staged_state, item_id, ItemUseContext::Battle)?;
-        let guard = self.apply_battle_stat_drop_guard_item(&mut staged_state, item_id)?;
+        let mut combat = active_battle_combat_state(&staged_state)
+            .with_context(|| format!("use battle state item {item_id}"))?;
+        let mist_active_before = combat.player_mist_active;
+        combat.player_mist_active = true;
+        staged_state.script_runtime.active_battle_combat = Some(combat);
         *state = staged_state;
         Ok(BattleStateItemUseOutcome {
             item_use,
-            stat_drop_guard_turns_before: guard.turns_before,
-            stat_drop_guard_turns_after: guard.turns_after,
+            mist_active_before,
+            mist_active_after: true,
         })
     }
 
@@ -17599,11 +17856,13 @@ impl GameDataSet {
         combat.obedience_badges = state.badges.johto;
         combat.kanto_badges = state.badges.kanto;
         combat.badge_boosts_enabled = badge_boosts_enabled;
+        combat.amulet_coin_active = state.battle_amulet_coin_active;
         if matches!(player_action, BattleAction::Run)
             && active_battle_type(state).is_some_and(battle_type_blocks_escape)
         {
             combat.force_switch_blocked = true;
         }
+        self.apply_player_item_happiness_before_battle_turn(&mut combat, &player_action)?;
         let input = BattleTurnInput {
             player: player_action,
             enemy: enemy_action,
@@ -17672,6 +17931,41 @@ impl GameDataSet {
             }
         }
         Ok(outcome)
+    }
+
+    fn apply_player_item_happiness_before_battle_turn(
+        &self,
+        combat: &mut BattleCombatState,
+        action: &BattleAction,
+    ) -> Result<()> {
+        if battle_action_locked_before_menu(combat, BattleSide::Player) {
+            return Ok(());
+        }
+        let (party_index, item_id) = match action {
+            BattleAction::Item { item_id } => (combat.player_party_index, item_id.as_str()),
+            BattleAction::PartyItem {
+                item_id,
+                party_index,
+                ..
+            } => (*party_index, item_id.as_str()),
+            _ => return Ok(()),
+        };
+        let Some(item) = self.items.get(item_id) else {
+            // The core turn validator owns the canonical unknown-item error.
+            return Ok(());
+        };
+        let Some(code) = item_happiness_change_code(item) else {
+            return Ok(());
+        };
+        let changes = self.happiness_change(code)?;
+        let pokemon = combat.player_party.get_mut(party_index).with_context(|| {
+            format!("battle item happiness party index {party_index} is outside the player party")
+        })?;
+        core_apply_happiness_change(pokemon, changes);
+        if party_index == combat.player_party_index {
+            combat.player.happiness = pokemon.happiness;
+        }
+        Ok(())
     }
 
     fn active_battle_player_party(state: &GameState) -> Result<Vec<Pokemon>> {
@@ -18137,8 +18431,22 @@ impl GameDataSet {
         ai_flags: u32,
         rng: &mut dyn BattleRandomSource,
     ) -> Result<usize> {
+        Ok(self
+            .select_trainer_enemy_move_with_scratch(combat, ai_flags, rng)?
+            .slot)
+    }
+
+    pub fn select_trainer_enemy_move_with_scratch(
+        &self,
+        combat: &BattleCombatState,
+        ai_flags: u32,
+        rng: &mut dyn BattleRandomSource,
+    ) -> Result<EnemyMoveSelection> {
         if battle_action_locked_before_menu(combat, BattleSide::Enemy) {
-            return Ok(core_select_wild_enemy_move_slot(combat, rng));
+            return Ok(EnemyMoveSelection {
+                slot: core_select_wild_enemy_move_slot(combat, rng),
+                ai_damage_register: 0,
+            });
         }
         let enemy_moves = battle_moves(combat, BattleSide::Enemy);
         let disabled = combat
@@ -18155,8 +18463,12 @@ impl GameDataSet {
             })
             .collect::<BTreeSet<_>>();
         if usable_slots.is_empty() {
-            return Ok(0);
+            return Ok(EnemyMoveSelection {
+                slot: 0,
+                ai_damage_register: 0,
+            });
         }
+        let mut ai_damage_register = 0;
         let move_data_by_slot = enemy_moves
             .iter()
             .take(4)
@@ -18339,7 +18651,9 @@ impl GameDataSet {
             for move_data in &move_data_by_slot {
                 priority_damage_by_slot.push(match move_data {
                     Some(move_data) if move_data.effect == "PRIORITY_HIT" => {
-                        Some(self.trainer_ai_damage_for_move(combat, move_data, rng)?)
+                        let damage = self.trainer_ai_damage_for_move(combat, move_data, rng)?;
+                        ai_damage_register = damage;
+                        Some(damage)
                     }
                     Some(_) | None => None,
                 });
@@ -18373,11 +18687,15 @@ impl GameDataSet {
             let mut evaluations = Vec::with_capacity(move_data_by_slot.len());
             for move_data in &move_data_by_slot {
                 evaluations.push(match move_data {
-                    Some(move_data) => Some(crystal_core::battle::ai::TrainerAiDamageEvaluation {
-                        effect: move_data.effect.as_str(),
-                        power: move_data.power,
-                        damage: self.trainer_ai_damage_for_move(combat, move_data, rng)?,
-                    }),
+                    Some(move_data) => {
+                        let damage = self.trainer_ai_damage_for_move(combat, move_data, rng)?;
+                        ai_damage_register = damage;
+                        Some(crystal_core::battle::ai::TrainerAiDamageEvaluation {
+                            effect: move_data.effect.as_str(),
+                            power: move_data.power,
+                            damage,
+                        })
+                    }
                     None => None,
                 });
             }
@@ -18422,6 +18740,7 @@ impl GameDataSet {
                     rng,
                 ) {
                     let damage = self.trainer_ai_damage_for_move(combat, move_data, rng)?;
+                    ai_damage_register = damage;
                     *score += crystal_core::battle::ai::trainer_risky_ko_score_delta(
                         damage,
                         combat.player.hp,
@@ -18438,7 +18757,10 @@ impl GameDataSet {
         loop {
             let slot = usize::from(rng.battle_random_byte() & 3);
             if best.contains(&slot) {
-                return Ok(slot);
+                return Ok(EnemyMoveSelection {
+                    slot,
+                    ai_damage_register,
+                });
             }
         }
     }
@@ -18995,6 +19317,7 @@ impl GameDataSet {
         time_of_day: TimeOfDay,
     ) -> Result<BattleRewardOutcome> {
         let mut staged_state = state.clone();
+        let level_up_happiness = self.level_up_happiness_context(&staged_state)?;
         let outcome = core_claim_active_trainer_battle_rewards(
             &mut staged_state,
             &self.battle_reward_rules,
@@ -19003,6 +19326,8 @@ impl GameDataSet {
             &self.learnsets,
             &self.growth_rates,
             &self.evolutions,
+            &self.battle_stat_multipliers,
+            level_up_happiness,
             time_of_day,
         )
         .map_err(|error| anyhow::anyhow!("claim trainer battle rewards: {error:?}"))?;
@@ -19028,6 +19353,7 @@ impl GameDataSet {
         S::Error: std::fmt::Display,
     {
         let mut staged_state = state.clone();
+        let level_up_happiness = self.level_up_happiness_context(&staged_state)?;
         let battle_end = self.active_battle_end_context(&staged_state)?;
         let pay_day_money = self.active_battle_pay_day_payout(&staged_state);
         self.claim_active_battle_pay_day_money(&mut staged_state, pay_day_money)?;
@@ -19039,6 +19365,7 @@ impl GameDataSet {
             &self.learnsets,
             &self.growth_rates,
             &self.evolutions,
+            level_up_happiness,
             time_of_day,
             divider,
         )
@@ -19060,6 +19387,41 @@ impl GameDataSet {
         }
         *state = staged_state;
         Ok(outcome)
+    }
+
+    pub fn level_up_happiness_context(
+        &self,
+        state: &GameState,
+    ) -> Result<BattleLevelUpHappinessContext> {
+        let map_name = match &state.overworld {
+            crystal_core::state::OverworldMemory::Active { map_name, .. } => map_name,
+            crystal_core::state::OverworldMemory::Inactive => match &state.battle {
+                BattleMemory::Wild { map_name, .. } => map_name,
+                BattleMemory::StaticWild { .. }
+                | BattleMemory::Trainer { .. }
+                | BattleMemory::Inactive => {
+                    anyhow::bail!("level-up happiness requires an active map")
+                }
+            },
+        };
+        let current_landmark = u8::try_from(self.pokegear_landmark_for_map(map_name)?.id)
+            .with_context(|| format!("battle map {map_name} landmark exceeds one byte"))?;
+        Ok(BattleLevelUpHappinessContext {
+            current_landmark,
+            gain_level: self.happiness_change("HAPPINESS_GAINLEVEL")?,
+            gain_level_at_home: self.happiness_change("HAPPINESS_GAINLEVELATHOME")?,
+        })
+    }
+
+    pub fn happiness_change(&self, code: &str) -> Result<[i16; 3]> {
+        self.happiness_data
+            .as_ref()
+            .context("item and battle rewards require exported happiness changes")?
+            .changes
+            .values()
+            .find(|entry| entry.code == code)
+            .with_context(|| format!("happiness changes missing {code}"))
+            .map(|entry| [entry.low, entry.mid, entry.high])
     }
 
     pub fn claim_active_wild_battle_rewards_now<S>(
@@ -20091,7 +20453,6 @@ impl GameDataSet {
                     has_cleanse_tag: Self::party_has_cleanse_tag(state),
                     active_repel_item,
                     lead_party_level: leading_usable_party_level(state),
-                    lead_ability: leading_usable_party_ability(state),
                     land_encounters_on_any_land,
                     ..EncounterCheckOptions::default()
                 },
@@ -20605,7 +20966,8 @@ impl GameDataSet {
             .script_runtime
             .memory
             .insert("wBattleScriptFlags".to_string(), "0".to_string());
-        activate_wild_battle_start(state, &battle).context("activate exact wild battle")?;
+        activate_wild_battle_start(state, &battle, &self.items)
+            .context("activate exact wild battle")?;
         crate::nuzlocke::register_wild_encounter(
             self.nuzlocke_rules,
             state,
@@ -20615,8 +20977,8 @@ impl GameDataSet {
         state.battle_active_party_index = first_available_battle_party_index(state);
         state.battle_active_enemy_party_index = Some(0);
         state.battle_rewarded_enemy_party_indices.clear();
+        state.battle_evolvable_party_indices.clear();
         state.battle_escape_attempts = 0;
-        state.battle_player_stat_drop_guard_turns = 0;
         state.battle_pay_day_money = 0;
         Ok(battle)
     }
@@ -22061,7 +22423,8 @@ impl GameDataSet {
             .script_runtime
             .memory
             .insert("wBattleScriptFlags".to_string(), "0".to_string());
-        activate_wild_battle_start(state, &battle).context("activate exact fishing battle")?;
+        activate_wild_battle_start(state, &battle, &self.items)
+            .context("activate exact fishing battle")?;
         crate::nuzlocke::register_wild_encounter(
             self.nuzlocke_rules,
             state,
@@ -22071,8 +22434,8 @@ impl GameDataSet {
         state.battle_active_party_index = first_available_battle_party_index(state);
         state.battle_active_enemy_party_index = Some(0);
         state.battle_rewarded_enemy_party_indices.clear();
+        state.battle_evolvable_party_indices.clear();
         state.battle_escape_attempts = 0;
-        state.battle_player_stat_drop_guard_turns = 0;
         state.battle_pay_day_money = 0;
         Ok(battle)
     }
@@ -22476,6 +22839,19 @@ impl GameDataSet {
         };
 
         let destination_constant = self.map_constant(&transition.destination.map_name)?;
+        let source_environment = self.map_environment(&trigger.map_name)?;
+        let destination_environment =
+            self.map_environment(&transition.destination.map_name)?;
+        let destination_tileset = self.map_tileset_name(&transition.destination.map_name)?;
+        if matches!(source_environment, "ROUTE" | "TOWN")
+            && matches!(
+                destination_environment,
+                "INDOOR" | "CAVE" | "DUNGEON" | "GATE"
+            )
+            && matches!(destination_tileset, "pokecenter" | "pokecom_center")
+        {
+            state.last_spawn_map_constant = Some(source_constant.to_string());
+        }
         let source_is_link_room = LINK_ROOM_CONSTANTS.contains(&source_constant);
         let destination_is_link_room = LINK_ROOM_CONSTANTS.contains(&destination_constant);
         let moving_between_link_room_and_center = (source_constant == "POKECENTER_2F"
@@ -25243,29 +25619,21 @@ fn trainer_ai_type_matchup(
 ) -> crystal_core::battle::ai::TrainerAiTypeMatchup {
     let mut effectiveness_num = 1_u32;
     let mut effectiveness_den = 1_u32;
-    for defender_type in defender_types
-        .iter()
-        .map(String::as_str)
-        .filter(|defender_type| *defender_type != "NONE")
-    {
-        if let Some(multiplier) = identified
-            .then(|| {
-                table
-                    .foresight_matchups
-                    .get(move_type)
-                    .and_then(|defenders| defenders.get(defender_type))
-            })
-            .flatten()
-            .or_else(|| {
-                table
-                    .matchups
-                    .get(move_type)
-                    .and_then(|defenders| defenders.get(defender_type))
-            })
+    for entry in table.matchups.iter().chain(
+        (!identified)
+            .then_some(table.foresight_matchups.iter())
+            .into_iter()
+            .flatten(),
+    ) {
+        if entry.attacker == move_type
+            && defender_types
+                .iter()
+                .any(|defender| defender != "NONE" && defender == &entry.defender)
         {
-            effectiveness_num = effectiveness_num.saturating_mul(u32::from(multiplier.numerator));
+            effectiveness_num = effectiveness_num
+                .saturating_mul(u32::from(entry.multiplier.numerator));
             effectiveness_den =
-                effectiveness_den.saturating_mul(u32::from(multiplier.denominator.max(1)));
+                effectiveness_den.saturating_mul(u32::from(entry.multiplier.denominator.max(1)));
         }
     }
     if effectiveness_num == 0 {

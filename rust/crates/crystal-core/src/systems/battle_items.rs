@@ -8,13 +8,14 @@ use crate::models::{
 };
 use crate::state::{BattleMemory, GameState};
 use crate::systems::battle_rewards::{
-    BattleRewardError, BattleRewardRules, apply_direct_level_gain,
+    BattleLevelUpHappinessContext, BattleRewardError, BattleRewardRules, apply_direct_level_gain,
 };
 use crate::systems::evolution::{
-    EvolutionContext, EvolutionError, EvolutionEvent, EvolutionReport, EvolutionTable, LinkMode,
-    check_and_evolve,
+    EVERSTONE_ITEM_ID, EvolutionContext, EvolutionError, EvolutionEvent, EvolutionReport,
+    EvolutionTable, LinkMode, check_and_evolve,
 };
 use crate::systems::experience::GrowthRateCatalog;
+use crate::systems::field_moves::ESCAPE_ROPE_MODE_DIG_WARP;
 use crate::systems::learnsets::SpeciesLearnsets;
 use crate::world::encounters::TimeOfDay;
 
@@ -47,18 +48,23 @@ pub struct BattleItemStageChange {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PartyItemReviveChange {
+pub struct PartyItemRecoveryChange {
     pub party_index: usize,
     pub pokemon_id: String,
     pub hp_before: u16,
     pub hp_after: u16,
+    pub status_before: Option<String>,
+    pub status_after: Option<String>,
+    pub sleep_turns_before: u8,
+    pub sleep_turns_after: u8,
+    pub pp_changes: Vec<BattleItemPpChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PartyItemOutcome {
     pub item_id: String,
-    pub revive_changes: Vec<PartyItemReviveChange>,
+    pub recovery_changes: Vec<PartyItemRecoveryChange>,
     pub consumed: bool,
 }
 
@@ -103,6 +109,8 @@ pub const ITEM_EFFECT_BEHAVIOR_RESTORE_PP: &str = "RESTORE_PP";
 pub const ITEM_EFFECT_BEHAVIOR_PARTY_REVIVE: &str = "PARTY_REVIVE";
 pub const ITEM_EFFECT_BEHAVIOR_RARE_CANDY: &str = "RARE_CANDY";
 pub const ITEM_EFFECT_BEHAVIOR_EVOLUTION_STONE: &str = "EVOLUTION_STONE";
+const VITAMIN_STAT_EXP_GAIN: u16 = 10 << 8;
+const VITAMIN_STAT_EXP_LIMIT: u16 = 100 << 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -147,6 +155,8 @@ pub enum BattleItemError {
     InvalidHealAmount { item_id: String, amount: i16 },
     #[error("battle item {item_id} cannot heal a fainted Pokemon")]
     TargetFainted { item_id: String },
+    #[error("battle item {item_id} cannot be used on an Egg")]
+    TargetEgg { item_id: String },
     #[error("battle item {item_id} declares STATUS_HEAL without status_heals")]
     MissingStatusHeals { item_id: String },
     #[error("battle item {item_id} declares REVIVE without revive_hp_percent")]
@@ -225,10 +235,6 @@ pub enum BattleItemError {
     MissingBattleStatDropGuard { item_id: String },
     #[error("battle item {item_id} has invalid battle_stat_drop_guard false")]
     InvalidBattleStatDropGuard { item_id: String },
-    #[error("battle item {item_id} declares battle stat drop guard without turns")]
-    MissingBattleStatDropGuardTurns { item_id: String },
-    #[error("battle item {item_id} has invalid battle stat drop guard turns {turns}")]
-    InvalidBattleStatDropGuardTurns { item_id: String, turns: u8 },
     #[error("cannot use battle item without an active battle")]
     InactiveBattle,
     #[error("cannot use wild battle escape item in trainer battle {trainer_id}")]
@@ -283,10 +289,9 @@ pub enum ItemPayloadIssue {
     InvalidBattleStatBoostStages { stages: u8 },
     MissingBattleStatDropGuard,
     InvalidBattleStatDropGuard,
-    MissingBattleStatDropGuardTurns,
-    InvalidBattleStatDropGuardTurns { turns: u8 },
     InvalidBattleEscapeMode { mode: String },
     InvalidBattleCaptureBall,
+    InvalidEscapeRopeMode { mode: String },
     InvalidRepelSteps { steps: u16 },
     InvalidBattleFocusEnergy,
     InvalidConfusionHeal,
@@ -388,16 +393,16 @@ pub fn item_payload_issues_with_known_field_rules(
             amount: item.parameter,
         });
     }
-    push_percent_issue(
-        item.revive_hp_percent,
-        |percent| ItemPayloadIssue::InvalidReviveHpPercent { percent },
-        &mut issues,
-    );
-    push_percent_issue(
-        item.party_revive_hp_percent,
-        |percent| ItemPayloadIssue::InvalidPartyReviveHpPercent { percent },
-        &mut issues,
-    );
+    if let Some(percent) = item.revive_hp_percent
+        && !matches!(percent, 50 | 100)
+    {
+        issues.push(ItemPayloadIssue::InvalidReviveHpPercent { percent });
+    }
+    if let Some(percent) = item.party_revive_hp_percent
+        && percent != 100
+    {
+        issues.push(ItemPayloadIssue::InvalidPartyReviveHpPercent { percent });
+    }
     if item.pp_restore_scope.is_some() || item.pp_restore_points.is_some() {
         match item.pp_restore_scope.as_deref() {
             Some("MOVE" | "POKEMON") => {}
@@ -406,12 +411,15 @@ pub fn item_payload_issues_with_known_field_rules(
             }),
             None => issues.push(ItemPayloadIssue::MissingPpRestoreScope),
         }
-        if let Some(0) = item.pp_restore_points {
-            issues.push(ItemPayloadIssue::InvalidPpRestorePoints { points: 0 });
+        if let Some(points) = item.pp_restore_points
+            && (!matches!(points, 5 | 10)
+                || (item.pp_restore_scope.as_deref() == Some("POKEMON") && points == 5))
+        {
+            issues.push(ItemPayloadIssue::InvalidPpRestorePoints { points });
         }
     }
     if let Some(stages) = item.pp_up_stages {
-        if !(1..=3).contains(&stages) {
+        if stages != 1 {
             issues.push(ItemPayloadIssue::InvalidPpUpStages { stages });
         }
     }
@@ -427,18 +435,18 @@ pub fn item_payload_issues_with_known_field_rules(
             None => issues.push(ItemPayloadIssue::MissingVitaminStat),
         }
         match item.vitamin_stat_exp {
-            Some(amount) if amount > 0 => {}
+            Some(VITAMIN_STAT_EXP_GAIN) => {}
             Some(amount) => issues.push(ItemPayloadIssue::InvalidVitaminStatExp { amount }),
             None => issues.push(ItemPayloadIssue::MissingVitaminStatExp),
         }
-        match (item.vitamin_max_stat_exp, item.vitamin_stat_exp) {
-            (Some(max), Some(amount)) if max >= amount && max > 0 => {}
-            (Some(max), _) => issues.push(ItemPayloadIssue::InvalidVitaminMaxStatExp { max }),
-            (None, _) => issues.push(ItemPayloadIssue::MissingVitaminMaxStatExp),
+        match item.vitamin_max_stat_exp {
+            Some(VITAMIN_STAT_EXP_LIMIT) => {}
+            Some(max) => issues.push(ItemPayloadIssue::InvalidVitaminMaxStatExp { max }),
+            None => issues.push(ItemPayloadIssue::MissingVitaminMaxStatExp),
         }
     }
     if let Some(level_gain) = item.rare_candy_level_gain {
-        if level_gain == 0 {
+        if level_gain != 1 {
             issues.push(ItemPayloadIssue::InvalidRareCandyLevelGain { level_gain });
         }
     }
@@ -451,23 +459,13 @@ pub fn item_payload_issues_with_known_field_rules(
             None => issues.push(ItemPayloadIssue::MissingBattleStatBoostStat),
         }
         match item.battle_stat_boost_stages {
-            Some(stages) if (1..=6).contains(&stages) => {}
+            Some(1) => {}
             Some(stages) => issues.push(ItemPayloadIssue::InvalidBattleStatBoostStages { stages }),
             None => issues.push(ItemPayloadIssue::MissingBattleStatBoostStages),
         }
     }
     if let Some(false) = item.battle_stat_drop_guard {
         issues.push(ItemPayloadIssue::InvalidBattleStatDropGuard);
-    }
-    if item.battle_stat_drop_guard.is_none() && item.battle_stat_drop_guard_turns.is_some() {
-        issues.push(ItemPayloadIssue::MissingBattleStatDropGuard);
-    }
-    if item.battle_stat_drop_guard.is_some() || item.battle_stat_drop_guard_turns.is_some() {
-        match item.battle_stat_drop_guard_turns {
-            Some(turns) if turns > 0 => {}
-            Some(turns) => issues.push(ItemPayloadIssue::InvalidBattleStatDropGuardTurns { turns }),
-            None => issues.push(ItemPayloadIssue::MissingBattleStatDropGuardTurns),
-        }
     }
     if let Some(mode) = item.battle_escape_mode.as_deref() {
         if mode != "WILD_BATTLE" {
@@ -479,8 +477,17 @@ pub fn item_payload_issues_with_known_field_rules(
     if let Some(false) = item.battle_capture_ball {
         issues.push(ItemPayloadIssue::InvalidBattleCaptureBall);
     }
-    if let Some(0) = item.repel_steps {
-        issues.push(ItemPayloadIssue::InvalidRepelSteps { steps: 0 });
+    if let Some(mode) = item.escape_rope_mode.as_deref()
+        && mode != ESCAPE_ROPE_MODE_DIG_WARP
+    {
+        issues.push(ItemPayloadIssue::InvalidEscapeRopeMode {
+            mode: mode.to_string(),
+        });
+    }
+    if let Some(steps) = item.repel_steps
+        && !matches!(steps, 100 | 200 | 250)
+    {
+        issues.push(ItemPayloadIssue::InvalidRepelSteps { steps });
     }
     if let Some(false) = item.battle_focus_energy {
         issues.push(ItemPayloadIssue::InvalidBattleFocusEnergy);
@@ -628,18 +635,6 @@ pub fn item_reference_issues(item: &Item, move_ids: &BTreeSet<String>) -> Vec<It
     issues
 }
 
-fn push_percent_issue(
-    percent: Option<u8>,
-    issue: impl FnOnce(u8) -> ItemPayloadIssue,
-    issues: &mut Vec<ItemPayloadIssue>,
-) {
-    if let Some(percent) = percent {
-        if !(1..=100).contains(&percent) {
-            issues.push(issue(percent));
-        }
-    }
-}
-
 pub fn validate_battle_escape_item(item: &Item) -> Result<&str, BattleItemError> {
     let mode = item.battle_escape_mode.as_deref().ok_or_else(|| {
         BattleItemError::MissingBattleEscapeMode {
@@ -673,7 +668,7 @@ pub fn apply_battle_escape_item_use(state: &mut GameState) -> Result<(), BattleI
     Ok(())
 }
 
-pub fn validate_battle_stat_drop_guard_item(item: &Item) -> Result<u8, BattleItemError> {
+pub fn validate_battle_stat_drop_guard_item(item: &Item) -> Result<(), BattleItemError> {
     match item.battle_stat_drop_guard {
         Some(true) => {}
         Some(false) => {
@@ -687,18 +682,7 @@ pub fn validate_battle_stat_drop_guard_item(item: &Item) -> Result<u8, BattleIte
             });
         }
     }
-    let turns = item.battle_stat_drop_guard_turns.ok_or_else(|| {
-        BattleItemError::MissingBattleStatDropGuardTurns {
-            item_id: item.script_name.clone(),
-        }
-    })?;
-    if turns == 0 {
-        return Err(BattleItemError::InvalidBattleStatDropGuardTurns {
-            item_id: item.script_name.clone(),
-            turns,
-        });
-    }
-    Ok(turns)
+    Ok(())
 }
 
 pub fn clone_active_battle_party_pokemon(
@@ -794,6 +778,11 @@ pub fn apply_active_battle_item_effect(
     item: &Item,
     consumed: bool,
 ) -> Result<BattleItemOutcome, BattleItemError> {
+    if pokemon.is_egg {
+        return Err(BattleItemError::TargetEgg {
+            item_id: item.script_name.clone(),
+        });
+    }
     // X Accuracy sets the battle-side SUBSTATUS_X_ACCURACY bit in Crystal; it
     // never changes the Pokemon's accuracy stage.  The owning battle runtime
     // applies that volatile side state after this Pokemon-only validation.
@@ -822,7 +811,7 @@ pub fn apply_active_battle_item_effect(
     }
 }
 
-fn unchanged_battle_item_outcome(
+pub(crate) fn unchanged_battle_item_outcome(
     pokemon: &Pokemon,
     item: &Item,
     consumed: bool,
@@ -860,6 +849,11 @@ pub fn apply_battle_pp_item_effect(
     move_slot: Option<usize>,
     consumed: bool,
 ) -> Result<BattleItemOutcome, BattleItemError> {
+    if pokemon.is_egg {
+        return Err(BattleItemError::TargetEgg {
+            item_id: item.script_name.clone(),
+        });
+    }
     let Some(plan) = battle_pp_item_effect_plan(item) else {
         return Err(BattleItemError::MissingBattleItemPayload {
             item_id: item.script_name.clone(),
@@ -880,6 +874,7 @@ pub fn apply_battle_pp_item_effect(
 pub fn apply_party_wide_item_effect(
     party: &mut Party,
     item: &Item,
+    moves: &BTreeMap<String, Move>,
     consumed: bool,
 ) -> Result<PartyItemOutcome, BattleItemError> {
     let Some(plan) = party_wide_item_effect_plan(item) else {
@@ -889,7 +884,7 @@ pub fn apply_party_wide_item_effect(
     };
     validate_battle_item_effect_plan(&plan)?;
     match plan.behavior_id.as_str() {
-        ITEM_EFFECT_BEHAVIOR_PARTY_REVIVE => apply_sacred_ash(party, item, consumed),
+        ITEM_EFFECT_BEHAVIOR_PARTY_REVIVE => apply_sacred_ash(party, item, moves, consumed),
         _behavior_id => Err(BattleItemError::MissingBattleItemPayload {
             item_id: item.script_name.clone(),
         }),
@@ -1030,6 +1025,7 @@ fn party_wide_item_behavior_id(item: &Item) -> Option<&'static str> {
 fn apply_sacred_ash(
     party: &mut Party,
     item: &Item,
+    moves: &BTreeMap<String, Move>,
     consumed: bool,
 ) -> Result<PartyItemOutcome, BattleItemError> {
     let percent = item.party_revive_hp_percent.ok_or_else(|| {
@@ -1037,44 +1033,77 @@ fn apply_sacred_ash(
             item_id: item.script_name.clone(),
         }
     })?;
-    if percent == 0 || percent > 100 {
+    if percent != 100 {
         return Err(BattleItemError::InvalidPartyReviveHpPercent {
             item_id: item.script_name.clone(),
             percent,
         });
     }
 
-    let mut changes = Vec::new();
-    for (party_index, pokemon) in party.pokemon.iter().enumerate() {
-        let Some(pokemon) = pokemon.as_ref() else {
-            continue;
-        };
-        if pokemon.hp != 0 {
-            continue;
-        }
-        let hp_after = ((u32::from(pokemon.max_hp) * u32::from(percent)) / 100)
-            .clamp(1, u32::from(pokemon.max_hp)) as u16;
-        changes.push(PartyItemReviveChange {
-            party_index,
-            pokemon_id: pokemon.species.id.clone(),
-            hp_before: pokemon.hp,
-            hp_after,
-        });
-    }
-    if changes.is_empty() {
+    if !party
+        .pokemon
+        .iter()
+        .flatten()
+        .any(|pokemon| !pokemon.is_egg && pokemon.hp == 0)
+    {
         return Err(BattleItemError::NoTargetChange {
             item_id: item.script_name.clone(),
         });
     }
-    for change in &changes {
-        if let Some(pokemon) = party.pokemon[change.party_index].as_mut() {
-            pokemon.hp = change.hp_after;
+
+    let mut healed_party = party.clone();
+    let mut recovery_changes = Vec::new();
+    for (party_index, slot) in healed_party.pokemon.iter_mut().enumerate() {
+        let Some(pokemon) = slot.as_mut() else {
+            continue;
+        };
+        if pokemon.is_egg {
+            continue;
         }
+        let hp_before = pokemon.hp;
+        let status_before = pokemon.status.clone();
+        let sleep_turns_before = pokemon.sleep_turns;
+        let mut pp_changes = Vec::new();
+        for (move_slot, learned) in pokemon.moves.iter_mut().enumerate() {
+            validate_runtime_move_id(item, &learned.name)?;
+            let move_data =
+                moves
+                    .get(&learned.name)
+                    .ok_or_else(|| BattleItemError::UnknownMove {
+                        item_id: item.script_name.clone(),
+                        move_id: learned.name.clone(),
+                    })?;
+            let pp_before = learned.current_pp;
+            let pp_after = max_move_pp(move_data.pp, learned.pp_ups);
+            learned.current_pp = pp_after;
+            if pp_after != pp_before {
+                pp_changes.push(BattleItemPpChange {
+                    move_slot,
+                    move_id: learned.name.clone(),
+                    pp_before,
+                    pp_after,
+                });
+            }
+        }
+        pokemon.hp = pokemon.max_hp;
+        clear_status(pokemon);
+        recovery_changes.push(PartyItemRecoveryChange {
+            party_index,
+            pokemon_id: pokemon.species.id.clone(),
+            hp_before,
+            hp_after: pokemon.hp,
+            status_before,
+            status_after: pokemon.status.clone(),
+            sleep_turns_before,
+            sleep_turns_after: pokemon.sleep_turns,
+            pp_changes,
+        });
     }
+    *party = healed_party;
 
     Ok(PartyItemOutcome {
         item_id: item.script_name.clone(),
-        revive_changes: changes,
+        recovery_changes,
         consumed,
     })
 }
@@ -1088,6 +1117,7 @@ pub fn apply_rare_candy_item_effect(
     growth_rates: &GrowthRateCatalog,
     reward_rules: &BattleRewardRules,
     evolutions: &EvolutionTable,
+    level_up_happiness: BattleLevelUpHappinessContext,
     time_of_day: TimeOfDay,
     consumed: bool,
 ) -> Result<BattleItemOutcome, BattleItemError> {
@@ -1096,7 +1126,7 @@ pub fn apply_rare_candy_item_effect(
             .ok_or_else(|| BattleItemError::MissingRareCandyLevelGain {
                 item_id: item.script_name.clone(),
             })?;
-    if level_gain == 0 {
+    if level_gain != 1 {
         return Err(BattleItemError::InvalidRareCandyLevelGain {
             item_id: item.script_name.clone(),
             level_gain,
@@ -1118,6 +1148,7 @@ pub fn apply_rare_candy_item_effect(
         growth_rates,
         reward_rules,
         level_gain,
+        level_up_happiness,
     )
     .map_err(|error| rare_candy_level_up_error(&item.script_name, error))?;
     let evolution_context = EvolutionContext {
@@ -1176,9 +1207,15 @@ pub fn apply_party_special_item_effect(
     growth_rates: &GrowthRateCatalog,
     reward_rules: &BattleRewardRules,
     evolutions: &EvolutionTable,
+    level_up_happiness: BattleLevelUpHappinessContext,
     time_of_day: TimeOfDay,
     consumed: bool,
 ) -> Result<BattleItemOutcome, BattleItemError> {
+    if pokemon.is_egg {
+        return Err(BattleItemError::TargetEgg {
+            item_id: item.script_name.clone(),
+        });
+    }
     let Some(plan) = party_special_item_effect_plan(item, evolutions) else {
         return Err(BattleItemError::MissingBattleItemPayload {
             item_id: item.script_name.clone(),
@@ -1195,6 +1232,7 @@ pub fn apply_party_special_item_effect(
             growth_rates,
             reward_rules,
             evolutions,
+            level_up_happiness,
             time_of_day,
             consumed,
         ),
@@ -1224,6 +1262,13 @@ pub fn apply_evolution_stone_item_effect(
     time_of_day: TimeOfDay,
     consumed: bool,
 ) -> Result<BattleItemOutcome, BattleItemError> {
+    // EvoStoneEffect checks the selected party struct's held item before it
+    // sets wForceEvolution or enters EvolvePokemon.
+    if pokemon.item.as_deref() == Some(EVERSTONE_ITEM_ID) {
+        return Err(BattleItemError::NoTargetChange {
+            item_id: item.script_name.clone(),
+        });
+    }
     let mut changed = pokemon.clone();
     let hp_before = changed.hp;
     let level_before = changed.level;
@@ -1375,6 +1420,11 @@ fn apply_status_heal(
             item_id: item.script_name.clone(),
         });
     }
+    if pokemon.hp == 0 {
+        return Err(BattleItemError::TargetFainted {
+            item_id: item.script_name.clone(),
+        });
+    }
     let status_before = pokemon.status.clone();
     let hp_before = pokemon.hp;
     let Some(status) = pokemon.status.as_deref() else {
@@ -1385,7 +1435,7 @@ fn apply_status_heal(
     if !item
         .status_heals
         .iter()
-        .any(|healed_status| healed_status == status)
+        .any(|healed_status| status_heal_matches(status, healed_status))
     {
         return Err(BattleItemError::NoTargetChange {
             item_id: item.script_name.clone(),
@@ -1439,6 +1489,11 @@ fn apply_full_heal(
             item_id: item.script_name.clone(),
         });
     }
+    if pokemon.hp == 0 {
+        return Err(BattleItemError::TargetFainted {
+            item_id: item.script_name.clone(),
+        });
+    }
 
     let status_before = pokemon.status.clone();
     let hp_before = pokemon.hp;
@@ -1447,7 +1502,7 @@ fn apply_full_heal(
     let heals_current_status = pokemon.status.as_deref().is_some_and(|status| {
         item.status_heals
             .iter()
-            .any(|healed_status| healed_status == status)
+            .any(|healed_status| status_heal_matches(status, healed_status))
     });
     if !heals_current_status && pokemon.confusion_turns == 0 {
         return Err(BattleItemError::NoTargetChange {
@@ -1496,7 +1551,7 @@ fn apply_revive(
             item_id: item.script_name.clone(),
         });
     };
-    if percent == 0 || percent > 100 {
+    if !matches!(percent, 50 | 100) {
         return Err(BattleItemError::InvalidReviveHpPercent {
             item_id: item.script_name.clone(),
             percent,
@@ -1510,8 +1565,7 @@ fn apply_revive(
 
     let status_before = pokemon.status.clone();
     let hp_before = pokemon.hp;
-    let revived_hp = ((u32::from(pokemon.max_hp) * u32::from(percent)) / 100)
-        .clamp(1, u32::from(pokemon.max_hp)) as u16;
+    let revived_hp = ((u32::from(pokemon.max_hp) * u32::from(percent)) / 100) as u16;
     pokemon.hp = revived_hp;
 
     Ok(BattleItemOutcome {
@@ -1552,15 +1606,16 @@ fn apply_restore_pp(
             item_id: item.script_name.clone(),
         });
     };
-    if matches!(item.pp_restore_points, Some(0)) {
-        return Err(BattleItemError::InvalidPpRestorePoints {
-            item_id: item.script_name.clone(),
-            points: 0,
-        });
-    }
-
     let target_slots = match scope {
         "MOVE" => {
+            if let Some(points) = item.pp_restore_points
+                && !matches!(points, 5 | 10)
+            {
+                return Err(BattleItemError::InvalidPpRestorePoints {
+                    item_id: item.script_name.clone(),
+                    points,
+                });
+            }
             let Some(slot) = move_slot else {
                 return Err(BattleItemError::MissingMoveSlot {
                     item_id: item.script_name.clone(),
@@ -1575,6 +1630,14 @@ fn apply_restore_pp(
             vec![slot]
         }
         "POKEMON" => {
+            if let Some(points) = item.pp_restore_points
+                && points != 10
+            {
+                return Err(BattleItemError::InvalidPpRestorePoints {
+                    item_id: item.script_name.clone(),
+                    points,
+                });
+            }
             if move_slot.is_some() {
                 return Err(BattleItemError::UnexpectedMoveSlot {
                     item_id: item.script_name.clone(),
@@ -1675,7 +1738,7 @@ fn apply_pp_up(
         .ok_or_else(|| BattleItemError::MissingPpUpStages {
             item_id: item.script_name.clone(),
         })?;
-    if stages == 0 || stages > 3 {
+    if stages != 1 {
         return Err(BattleItemError::InvalidPpUpStages {
             item_id: item.script_name.clone(),
             stages,
@@ -1698,6 +1761,13 @@ fn apply_pp_up(
             item_id: item.script_name.clone(),
             move_id: learned.name.clone(),
         })?;
+    if learned.name == "SKETCH" {
+        // RestorePPEffect branches to the same PPIsMaxedOutText path for
+        // Sketch before it inspects the packed PP Up count.
+        return Err(BattleItemError::NoTargetChange {
+            item_id: item.script_name.clone(),
+        });
+    }
     if learned.pp_ups >= 3 {
         return Err(BattleItemError::NoTargetChange {
             item_id: item.script_name.clone(),
@@ -1767,7 +1837,7 @@ fn apply_vitamin(
         .ok_or_else(|| BattleItemError::MissingVitaminStatExp {
             item_id: item.script_name.clone(),
         })?;
-    if amount == 0 {
+    if amount != VITAMIN_STAT_EXP_GAIN {
         return Err(BattleItemError::InvalidVitaminStatExp {
             item_id: item.script_name.clone(),
             amount,
@@ -1778,7 +1848,7 @@ fn apply_vitamin(
             .ok_or_else(|| BattleItemError::MissingVitaminMaxStatExp {
                 item_id: item.script_name.clone(),
             })?;
-    if max == 0 || max < amount {
+    if max != VITAMIN_STAT_EXP_LIMIT {
         return Err(BattleItemError::InvalidVitaminMaxStatExp {
             item_id: item.script_name.clone(),
             max,
@@ -1786,19 +1856,20 @@ fn apply_vitamin(
     }
 
     let stat_exp_before = pokemon_stat_exp(pokemon, stat);
-    if stat_exp_before >= max {
+    let stat_exp_high = (stat_exp_before >> 8) as u8;
+    if stat_exp_high >= 100 {
         return Err(BattleItemError::NoTargetChange {
             item_id: item.script_name.clone(),
         });
     }
-    let stat_exp_after = max.min(stat_exp_before.saturating_add(amount));
+    let stat_exp_after =
+        u16::from_be_bytes([stat_exp_high.wrapping_add(10), stat_exp_before as u8]);
     let stat_before = pokemon_stat_value(pokemon, stat);
     let hp_before = pokemon.hp;
-    let max_hp_before = pokemon.max_hp;
     let status_before = pokemon.status.clone();
 
     set_pokemon_stat_exp(pokemon, stat, stat_exp_after);
-    recalculate_pokemon_stats(pokemon, max_hp_before);
+    recalculate_pokemon_stats(pokemon);
     let stat_after = pokemon_stat_value(pokemon, stat);
 
     Ok(BattleItemOutcome {
@@ -1854,7 +1925,7 @@ fn apply_battle_stat_boost(
             item_id: item.script_name.clone(),
         }
     })?;
-    if stages == 0 || stages > 6 {
+    if stages != 1 {
         return Err(BattleItemError::InvalidBattleStatBoostStages {
             item_id: item.script_name.clone(),
             stages,
@@ -1867,9 +1938,10 @@ fn apply_battle_stat_boost(
         }
     })?;
     if stage_before >= 6 {
-        return Err(BattleItemError::NoTargetChange {
-            item_id: item.script_name.clone(),
-        });
+        // XItemEffect calls UseItemText before RaiseStat and does not branch on
+        // wEffectFailed. A capped X Item is still consumed and continues to
+        // ChangeHappiness even though its stat stage does not move.
+        return Ok(unchanged_battle_item_outcome(pokemon, item, consumed));
     }
     let stage_after = (stage_before + stages as i8).min(6);
     let hp_before = pokemon.hp;
@@ -2012,7 +2084,7 @@ fn apply_confusion_heal(
     })
 }
 
-fn battle_stat_boost_stat(stat_id: &str) -> Option<Stat> {
+pub(crate) fn battle_stat_boost_stat(stat_id: &str) -> Option<Stat> {
     match stat_id {
         "ATTACK" => Some(Stat::Attack),
         "DEFENSE" => Some(Stat::Defense),
@@ -2102,7 +2174,7 @@ fn pokemon_stat_value(pokemon: &Pokemon, stat: Stat) -> u16 {
     }
 }
 
-fn recalculate_pokemon_stats(pokemon: &mut Pokemon, max_hp_before: u16) {
+fn recalculate_pokemon_stats(pokemon: &mut Pokemon) {
     let stats = calculate_stats(
         &pokemon.species,
         pokemon.level,
@@ -2121,18 +2193,10 @@ fn recalculate_pokemon_stats(pokemon: &mut Pokemon, max_hp_before: u16) {
     pokemon.speed = stats.speed;
     pokemon.special_attack = stats.special_attack;
     pokemon.special_defense = stats.special_defense;
-    if stats.max_hp > max_hp_before {
-        pokemon.hp = pokemon
-            .hp
-            .saturating_add(stats.max_hp - max_hp_before)
-            .min(stats.max_hp);
-    } else {
-        pokemon.hp = pokemon.hp.min(stats.max_hp);
-    }
 }
 
 fn restore_hp(pokemon: &mut Pokemon, item: &Item) -> Result<(), BattleItemError> {
-    if item.parameter == 0 || item.parameter < -1 {
+    if !matches!(item.parameter, -1 | 10 | 20 | 30 | 50 | 60 | 80 | 100 | 200) {
         return Err(BattleItemError::InvalidHealAmount {
             item_id: item.script_name.clone(),
             amount: item.parameter,
@@ -2160,6 +2224,10 @@ fn restore_hp(pokemon: &mut Pokemon, item: &Item) -> Result<(), BattleItemError>
 fn clear_status(pokemon: &mut Pokemon) {
     pokemon.status = None;
     pokemon.sleep_turns = 0;
+}
+
+fn status_heal_matches(current_status: &str, healed_status: &str) -> bool {
+    current_status == healed_status || (current_status == "BAD_POISON" && healed_status == "POISON")
 }
 
 #[cfg(test)]
@@ -2327,7 +2395,6 @@ mod tests {
             battle_capture_ball: None,
             battle_focus_energy: None,
             battle_stat_drop_guard: None,
-            battle_stat_drop_guard_turns: None,
             confusion_heal: None,
             repel_steps: None,
             escape_rope_mode: None,
@@ -2468,7 +2535,6 @@ mod tests {
         wild.battle_active_enemy_party_index = Some(0);
         wild.battle_rewarded_enemy_party_indices.insert(0);
         wild.battle_escape_attempts = 3;
-        wild.battle_player_stat_drop_guard_turns = 4;
 
         assert_eq!(require_wild_battle_for_escape_item(&wild), Ok(()));
         assert_eq!(apply_battle_escape_item_use(&mut wild), Ok(()));
@@ -2477,7 +2543,6 @@ mod tests {
         assert_eq!(wild.battle_active_enemy_party_index, None);
         assert!(wild.battle_rewarded_enemy_party_indices.is_empty());
         assert_eq!(wild.battle_escape_attempts, 0);
-        assert_eq!(wild.battle_player_stat_drop_guard_turns, 0);
         assert_eq!(wild.battle_result, 2, "Poke Doll escape is base DRAW");
     }
 
@@ -2486,36 +2551,15 @@ mod tests {
         let mut item = test_item("MOD_GUARD", 0);
         item.script_name = "MOD_GUARD".to_string();
         item.battle_stat_drop_guard = Some(true);
-        item.battle_stat_drop_guard_turns = Some(5);
 
-        assert_eq!(
-            validate_battle_stat_drop_guard_item(&item)
-                .expect("payload stat drop guard item accepted"),
-            5
-        );
-
-        item.battle_stat_drop_guard_turns = Some(0);
-        assert_eq!(
-            validate_battle_stat_drop_guard_item(&item).expect_err("zero turns rejected"),
-            BattleItemError::InvalidBattleStatDropGuardTurns {
-                item_id: "MOD_GUARD".to_string(),
-                turns: 0,
-            }
-        );
-
-        assert_eq!(
-            item_payload_issues(&item),
-            vec![ItemPayloadIssue::InvalidBattleStatDropGuardTurns { turns: 0 }]
-        );
+        validate_battle_stat_drop_guard_item(&item).expect("payload stat drop guard item accepted");
 
         item.battle_stat_drop_guard = None;
-        item.battle_stat_drop_guard_turns = Some(5);
         assert_eq!(
-            item_payload_issues(&item),
-            vec![
-                ItemPayloadIssue::MissingBattleStatDropGuard,
-                ItemPayloadIssue::MissingBattleItemPayload,
-            ]
+            validate_battle_stat_drop_guard_item(&item).expect_err("guard flag is required"),
+            BattleItemError::MissingBattleStatDropGuard {
+                item_id: "MOD_GUARD".to_string(),
+            }
         );
     }
 
@@ -2536,6 +2580,7 @@ mod tests {
         item.battle_stat_boost_stages = Some(7);
         item.battle_stat_drop_guard = Some(false);
         item.battle_escape_mode = Some("TRAINER_BATTLE".to_string());
+        item.escape_rope_mode = Some("MOD_WARP".to_string());
         item.repel_steps = Some(0);
         item.battle_focus_energy = Some(false);
         item.confusion_heal = Some(false);
@@ -2574,9 +2619,11 @@ mod tests {
                 },
                 ItemPayloadIssue::InvalidBattleStatBoostStages { stages: 7 },
                 ItemPayloadIssue::InvalidBattleStatDropGuard,
-                ItemPayloadIssue::MissingBattleStatDropGuardTurns,
                 ItemPayloadIssue::InvalidBattleEscapeMode {
                     mode: "TRAINER_BATTLE".to_string(),
+                },
+                ItemPayloadIssue::InvalidEscapeRopeMode {
+                    mode: "MOD_WARP".to_string(),
                 },
                 ItemPayloadIssue::InvalidRepelSteps { steps: 0 },
                 ItemPayloadIssue::InvalidBattleFocusEnergy,
@@ -2591,16 +2638,15 @@ mod tests {
         exact.revive_hp_percent = Some(50);
         exact.party_revive_hp_percent = Some(100);
         exact.pp_restore_scope = Some("MOVE".to_string());
-        exact.pp_restore_points = Some(1);
-        exact.pp_up_stages = Some(3);
+        exact.pp_restore_points = Some(10);
+        exact.pp_up_stages = Some(1);
         exact.vitamin_stat = Some("SPECIAL".to_string());
         exact.vitamin_stat_exp = Some(2560);
         exact.vitamin_max_stat_exp = Some(25600);
         exact.rare_candy_level_gain = Some(1);
         exact.battle_stat_boost_stat = Some("SPECIAL_ATTACK".to_string());
-        exact.battle_stat_boost_stages = Some(6);
+        exact.battle_stat_boost_stages = Some(1);
         exact.battle_stat_drop_guard = Some(true);
-        exact.battle_stat_drop_guard_turns = Some(5);
         exact.battle_escape_mode = Some("WILD_BATTLE".to_string());
         exact.repel_steps = Some(100);
         exact.battle_focus_energy = Some(true);
@@ -2610,6 +2656,19 @@ mod tests {
         exact.tmhm_move = Some("MUD_SLAP".to_string());
 
         assert_eq!(item_payload_issues(&exact), Vec::new());
+
+        exact.repel_steps = Some(75);
+        assert_eq!(
+            item_payload_issues(&exact),
+            vec![ItemPayloadIssue::InvalidRepelSteps { steps: 75 }]
+        );
+        exact.repel_steps = Some(100);
+
+        exact.rare_candy_level_gain = Some(2);
+        assert_eq!(
+            item_payload_issues(&exact),
+            vec![ItemPayloadIssue::InvalidRareCandyLevelGain { level_gain: 2 }]
+        );
     }
 
     #[test]
@@ -3060,6 +3119,14 @@ mod tests {
         }
     }
 
+    fn level_up_happiness() -> BattleLevelUpHappinessContext {
+        BattleLevelUpHappinessContext {
+            current_landmark: 1,
+            gain_level: [5, 3, 2],
+            gain_level_at_home: [10, 6, 4],
+        }
+    }
+
     fn evolution_stone_item(id: &str) -> Item {
         let mut item = test_item("MOD_STONE", 0);
         item.script_name = id.to_string();
@@ -3240,6 +3307,92 @@ mod tests {
     }
 
     #[test]
+    fn battle_items_poison_heal_also_cures_the_modeled_bad_poison_status() {
+        let item = status_item(vec!["POISON"]);
+        let mut pokemon = test_pokemon(35, 35);
+        pokemon.status = Some("BAD_POISON".to_string());
+
+        apply_active_battle_item_effect(&mut pokemon, &item, true)
+            .expect("the poison status bit includes Toxic poisoning");
+
+        assert_eq!(pokemon.status, None);
+    }
+
+    #[test]
+    fn battle_items_status_healers_reject_fainted_pokemon_without_mutation() {
+        for item in [
+            status_item(vec!["POISON"]),
+            full_heal_item(
+                vec!["POISON", "BURN", "FREEZE", "SLEEP", "PARALYSIS"],
+                Some(true),
+            ),
+        ] {
+            let mut pokemon = test_pokemon(0, 35);
+            pokemon.status = Some("POISON".to_string());
+            pokemon.confusion_turns = 3;
+            let before = pokemon.clone();
+
+            assert_eq!(
+                apply_active_battle_item_effect(&mut pokemon, &item, true)
+                    .expect_err("UseStatusHealer rejects a fainted target"),
+                BattleItemError::TargetFainted {
+                    item_id: item.script_name.clone(),
+                }
+            );
+            assert_eq!(pokemon, before);
+        }
+    }
+
+    #[test]
+    fn battle_items_party_entrypoints_reject_eggs() {
+        let mut egg = test_pokemon(20, 35);
+        egg.is_egg = true;
+        let before = egg.clone();
+        assert_eq!(
+            apply_active_battle_item_effect(&mut egg, &test_item("RESTORE_HP", 20), true)
+                .expect_err("UseItem_SelectMon rejects an Egg"),
+            BattleItemError::TargetEgg {
+                item_id: "POTION".to_string(),
+            }
+        );
+        assert_eq!(egg, before);
+
+        let mut pp_egg = before.clone();
+        pp_egg.moves = vec![LearnedMove {
+            name: "TACKLE".to_string(),
+            current_pp: 1,
+            pp_ups: 0,
+        }];
+        let pp_before = pp_egg.clone();
+        let mut ether = test_item("RESTORE_PP", 0);
+        ether.pp_restore_scope = Some("MOVE".to_string());
+        ether.pp_restore_points = Some(10);
+        let moves = BTreeMap::from([(
+            "TACKLE".to_string(),
+            Move {
+                source_index: 1,
+                name: "TACKLE".to_string(),
+                move_type: pokemon_type("NORMAL"),
+                power: 35,
+                accuracy: 95,
+                pp: 35,
+                effect: "NORMAL_HIT".to_string(),
+                effect_chance: 0,
+                stat: None,
+                amount: None,
+            },
+        )]);
+        assert_eq!(
+            apply_battle_pp_item_effect(&mut pp_egg, &ether, &moves, Some(0), true)
+                .expect_err("PP items share UseItem_SelectMon's Egg gate"),
+            BattleItemError::TargetEgg {
+                item_id: "POTION".to_string(),
+            }
+        );
+        assert_eq!(pp_egg, pp_before);
+    }
+
+    #[test]
     fn battle_items_status_heal_clears_sleep_turns_with_sleep_status() {
         let item = status_item(vec!["SLEEP"]);
         let mut pokemon = test_pokemon(35, 35);
@@ -3372,6 +3525,20 @@ mod tests {
     }
 
     #[test]
+    fn battle_items_half_revive_preserves_the_source_zero_floor() {
+        let item = revive_item(Some(50));
+        let mut pokemon = test_pokemon(0, 1);
+
+        let outcome = apply_active_battle_item_effect(&mut pokemon, &item, true)
+            .expect("Revive's shifted zero result is still an accepted use");
+
+        assert_eq!(outcome.hp_before, 0);
+        assert_eq!(outcome.hp_after, 0);
+        assert_eq!(pokemon.hp, 0);
+        assert!(outcome.consumed);
+    }
+
+    #[test]
     fn battle_items_max_revive_uses_exact_full_hp_percent() {
         let item = revive_item(Some(100));
         let mut pokemon = test_pokemon(0, 35);
@@ -3408,6 +3575,18 @@ mod tests {
             }
         );
         assert_eq!(invalid, invalid_before);
+
+        let mut partial = test_pokemon(0, 35);
+        let partial_before = partial.clone();
+        assert_eq!(
+            apply_active_battle_item_effect(&mut partial, &revive_item(Some(25)), true)
+                .expect_err("RevivePokemon has only half-HP and full-HP branches"),
+            BattleItemError::InvalidReviveHpPercent {
+                item_id: "POTION".to_string(),
+                percent: 25,
+            }
+        );
+        assert_eq!(partial, partial_before);
 
         let mut healthy = test_pokemon(35, 35);
         let healthy_before = healthy.clone();
@@ -3575,6 +3754,42 @@ mod tests {
         );
         assert_eq!(bad_scope, bad_scope_before);
 
+        let mut invented_points = pokemon_with_pp(20, 1);
+        let invented_points_before = invented_points.clone();
+        assert_eq!(
+            apply_battle_pp_item_effect(
+                &mut invented_points,
+                &pp_item(Some("MOVE"), Some(7)),
+                &moves,
+                Some(0),
+                true,
+            )
+            .expect_err("RestorePP has only five- and ten-point item branches"),
+            BattleItemError::InvalidPpRestorePoints {
+                item_id: "ETHER".to_string(),
+                points: 7,
+            }
+        );
+        assert_eq!(invented_points, invented_points_before);
+
+        let mut invented_party_points = pokemon_with_pp(20, 1);
+        let invented_party_points_before = invented_party_points.clone();
+        assert_eq!(
+            apply_battle_pp_item_effect(
+                &mut invented_party_points,
+                &pp_item(Some("POKEMON"), Some(5)),
+                &moves,
+                None,
+                true,
+            )
+            .expect_err("MysteryBerry's five-point path selects one move"),
+            BattleItemError::InvalidPpRestorePoints {
+                item_id: "ETHER".to_string(),
+                points: 5,
+            }
+        );
+        assert_eq!(invented_party_points, invented_party_points_before);
+
         let mut missing_slot = pokemon_with_pp(20, 1);
         let missing_slot_before = missing_slot.clone();
         assert_eq!(
@@ -3678,6 +3893,29 @@ mod tests {
     }
 
     #[test]
+    fn battle_items_pp_up_rejects_sketch_without_mutation() {
+        let item = pp_up_item(Some(1));
+        let mut moves = move_catalog();
+        let mut sketch = moves["TACKLE"].clone();
+        sketch.source_index = 166;
+        sketch.name = "SKETCH".to_string();
+        sketch.pp = 1;
+        moves.insert("SKETCH".to_string(), sketch);
+        let mut pokemon = pokemon_with_pp(1, 1);
+        pokemon.moves[0].name = "SKETCH".to_string();
+        let before = pokemon.clone();
+
+        assert_eq!(
+            apply_battle_pp_item_effect(&mut pokemon, &item, &moves, Some(0), true)
+                .expect_err("PP Up cannot be used on Sketch"),
+            BattleItemError::NoTargetChange {
+                item_id: "PP_UP".to_string(),
+            }
+        );
+        assert_eq!(pokemon, before);
+    }
+
+    #[test]
     fn battle_items_pp_up_rejects_missing_invalid_and_maxed_targets_without_mutation() {
         let moves = move_catalog();
         let mut missing = pokemon_with_pp(20, 1);
@@ -3702,6 +3940,24 @@ mod tests {
             }
         );
         assert_eq!(invalid, invalid_before);
+
+        let mut multi_stage = pokemon_with_pp(20, 1);
+        let multi_stage_before = multi_stage.clone();
+        assert_eq!(
+            apply_battle_pp_item_effect(
+                &mut multi_stage,
+                &pp_up_item(Some(2)),
+                &moves,
+                Some(0),
+                true,
+            )
+            .expect_err("Crystal's PP Up increments exactly one packed stage"),
+            BattleItemError::InvalidPpUpStages {
+                item_id: "PP_UP".to_string(),
+                stages: 2,
+            }
+        );
+        assert_eq!(multi_stage, multi_stage_before);
 
         let mut malformed_move = pokemon_with_pp(20, 1);
         malformed_move.moves[0].name = "TACK LE".to_string();
@@ -3759,8 +4015,23 @@ mod tests {
         assert_eq!(outcome.stat_changes[0].stat_after, pokemon.max_hp);
         assert_eq!(pokemon.hp_exp, 2560);
         assert!(pokemon.max_hp >= max_hp_before);
-        assert_eq!(pokemon.hp, outcome.hp_after);
+        assert_eq!(pokemon.hp, hp_before);
+        assert_eq!(outcome.hp_after, hp_before);
         assert!(outcome.consumed);
+    }
+
+    #[test]
+    fn vitamin_checks_and_adds_only_the_stat_exp_high_byte() {
+        let item = vitamin_item(Some("HP"), Some(2560), Some(25600));
+        let mut pokemon = test_pokemon(35, 35);
+        pokemon.hp_exp = 0x63ff;
+
+        let outcome = apply_active_battle_item_effect(&mut pokemon, &item, true)
+            .expect("high stat-exp byte below 100 accepts vitamin");
+
+        assert_eq!(outcome.stat_changes[0].stat_exp_before, 0x63ff);
+        assert_eq!(outcome.stat_changes[0].stat_exp_after, 0x6dff);
+        assert_eq!(pokemon.hp_exp, 0x6dff);
     }
 
     #[test]
@@ -3915,7 +4186,7 @@ mod tests {
                 .collect(),
         );
         let mut pokemon = Pokemon::new_for_tests(species["CHIKORITA"].clone(), 9, Dv::default());
-        pokemon.experience = 9_i32.pow(3);
+        pokemon.experience = 2_000;
         pokemon.moves = vec![LearnedMove {
             name: "TACKLE".to_string(),
             current_pp: 35,
@@ -3932,6 +4203,7 @@ mod tests {
             &growth_rates,
             &reward_rules(),
             &evolutions,
+            level_up_happiness(),
             TimeOfDay::Day,
             true,
         )
@@ -3945,6 +4217,7 @@ mod tests {
         assert_eq!(outcome.evolution_target, None);
         assert_eq!(pokemon.level, 10);
         assert_eq!(pokemon.experience, 10_i32.pow(3));
+        assert_eq!(pokemon.happiness, 75);
         assert!(pokemon.hp > hp_before);
         assert_eq!(pokemon.moves[1].name, "RAZOR_LEAF");
         assert_eq!(pokemon.moves[1].current_pp, 25);
@@ -3989,6 +4262,7 @@ mod tests {
             &growth_rates,
             &reward_rules(),
             &evolutions,
+            level_up_happiness(),
             TimeOfDay::Day,
             true,
         )
@@ -4005,6 +4279,57 @@ mod tests {
         assert_eq!(cancel_snapshot.level, 16);
         assert_eq!(pokemon.species.id, "BAYLEEF");
         assert_eq!(pokemon.level, 16);
+    }
+
+    #[test]
+    fn rare_candy_applies_level_happiness_before_happiness_evolution() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let item = rare_candy_item(Some(1));
+        let species = species_catalog();
+        let moves = rare_candy_moves();
+        let learnsets = [
+            ("CHIKORITA".to_string(), Vec::new()),
+            ("BAYLEEF".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [(
+                "CHIKORITA".to_string(),
+                vec![EvolutionEntry::happiness("BAYLEEF", "TR_ANYTIME")],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut pokemon = Pokemon::new_for_tests(species["CHIKORITA"].clone(), 9, Dv::default());
+        pokemon.experience = 9_i32.pow(3);
+        pokemon.happiness = 218;
+
+        let outcome = apply_rare_candy_item_effect(
+            &mut pokemon,
+            &item,
+            &species,
+            &moves,
+            &learnsets,
+            &growth_rates,
+            &reward_rules(),
+            &evolutions,
+            level_up_happiness(),
+            TimeOfDay::Day,
+            true,
+        )
+        .expect("Rare Candy happiness reaches the evolution threshold");
+
+        assert_eq!(pokemon.happiness, 220);
+        assert_eq!(pokemon.species.id, "BAYLEEF");
+        assert_eq!(outcome.evolution_target.as_deref(), Some("BAYLEEF"));
+        assert_eq!(
+            outcome
+                .evolution_cancel_snapshot
+                .as_deref()
+                .map(|snapshot| snapshot.happiness),
+            Some(220)
+        );
     }
 
     #[test]
@@ -4033,6 +4358,7 @@ mod tests {
                 &growth_rates,
                 &reward_rules(),
                 &evolutions,
+                level_up_happiness(),
                 TimeOfDay::Day,
                 true,
             )
@@ -4055,6 +4381,7 @@ mod tests {
                 &growth_rates,
                 &reward_rules(),
                 &evolutions,
+                level_up_happiness(),
                 TimeOfDay::Day,
                 true,
             )
@@ -4078,6 +4405,7 @@ mod tests {
                 &growth_rates,
                 &reward_rules(),
                 &evolutions,
+                level_up_happiness(),
                 TimeOfDay::Day,
                 true,
             )
@@ -4121,6 +4449,7 @@ mod tests {
             &growth_rates,
             &reward_rules(),
             &evolutions,
+            level_up_happiness(),
             TimeOfDay::Day,
             true,
         )
@@ -4214,6 +4543,43 @@ mod tests {
     }
 
     #[test]
+    fn evolution_stone_is_blocked_by_the_selected_pokemons_everstone() {
+        let item = evolution_stone_item("THUNDERSTONE");
+        let species = species_catalog();
+        let moves = rare_candy_moves();
+        let learnsets = [("RAICHU".to_string(), Vec::new())].into_iter().collect();
+        let evolutions = EvolutionTable(
+            [(
+                "PIKACHU".to_string(),
+                vec![EvolutionEntry::item("RAICHU", "THUNDERSTONE")],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut pokemon = Pokemon::new_for_tests(species["PIKACHU"].clone(), 20, Dv::default());
+        pokemon.item = Some("EVERSTONE".to_string());
+        let before = pokemon.clone();
+
+        assert_eq!(
+            apply_evolution_stone_item_effect(
+                &mut pokemon,
+                &item,
+                &species,
+                &moves,
+                &learnsets,
+                &evolutions,
+                TimeOfDay::Day,
+                true,
+            )
+            .expect_err("EvoStoneEffect rejects an Everstone holder"),
+            BattleItemError::NoTargetChange {
+                item_id: "THUNDERSTONE".to_string(),
+            }
+        );
+        assert_eq!(pokemon, before);
+    }
+
+    #[test]
     fn evolution_stone_rejects_target_move_errors_without_partial_mutation() {
         let item = evolution_stone_item("THUNDERSTONE");
         let species = species_catalog();
@@ -4289,7 +4655,7 @@ mod tests {
     }
 
     #[test]
-    fn battle_stat_boost_items_reject_bad_pack_data_and_capped_stats_without_mutation() {
+    fn battle_stat_boost_items_reject_bad_pack_data_but_consume_at_the_stage_cap() {
         let mut missing_stat = test_pokemon(35, 35);
         let missing_stat_before = missing_stat.clone();
         assert_eq!(
@@ -4341,13 +4707,13 @@ mod tests {
         assert_eq!(
             apply_active_battle_item_effect(
                 &mut invalid_stages,
-                &battle_boost_item("X_ITEM", Some("ATTACK"), Some(0)),
+                &battle_boost_item("X_ITEM", Some("ATTACK"), Some(2)),
                 true,
             )
-            .expect_err("zero stages are invalid"),
+            .expect_err("host-authored multi-stage boosts are invalid"),
             BattleItemError::InvalidBattleStatBoostStages {
                 item_id: "X_ATTACK".to_string(),
-                stages: 0,
+                stages: 2,
             }
         );
         assert_eq!(invalid_stages, invalid_stages_before);
@@ -4355,18 +4721,15 @@ mod tests {
         let mut capped = test_pokemon(35, 35);
         capped.stat_boosts.insert(Stat::Attack, 6);
         let capped_before = capped.clone();
-        assert_eq!(
-            apply_active_battle_item_effect(
-                &mut capped,
-                &battle_boost_item("X_ITEM", Some("ATTACK"), Some(1)),
-                true,
-            )
-            .expect_err("max stage has no effect"),
-            BattleItemError::NoTargetChange {
-                item_id: "X_ATTACK".to_string(),
-            }
-        );
+        let outcome = apply_active_battle_item_effect(
+            &mut capped,
+            &battle_boost_item("X_ITEM", Some("ATTACK"), Some(1)),
+            true,
+        )
+        .expect("source consumes a capped X Item");
         assert_eq!(capped, capped_before);
+        assert!(outcome.battle_stat_stage_changes.is_empty());
+        assert!(outcome.consumed);
     }
 
     #[test]
@@ -4476,43 +4839,88 @@ mod tests {
     }
 
     #[test]
-    fn sacred_ash_revives_all_fainted_party_members_from_pack_percent() {
+    fn sacred_ash_heals_every_non_egg_when_any_party_member_is_fainted() {
         let item = sacred_ash_item(Some(100));
         let mut party = Party::default();
         let mut fainted_a = test_pokemon(0, 35);
         fainted_a.species.id = "CHIKORITA".to_string();
         let mut healthy = test_pokemon(12, 40);
         healthy.species.id = "BAYLEEF".to_string();
+        healthy.status = Some("POISON".to_string());
+        healthy.sleep_turns = 3;
+        healthy.moves = vec![LearnedMove {
+            name: "TACKLE".to_string(),
+            current_pp: 1,
+            pp_ups: 1,
+        }];
         let mut fainted_b = test_pokemon(0, 50);
         fainted_b.species.id = "MEGANIUM".to_string();
+        let mut egg = test_pokemon(0, 20);
+        egg.species.id = "EGG".to_string();
+        egg.is_egg = true;
+        egg.status = Some("POISON".to_string());
         party.pokemon[0] = Some(fainted_a);
         party.pokemon[1] = Some(healthy);
         party.pokemon[2] = Some(fainted_b);
+        party.pokemon[3] = Some(egg.clone());
 
-        let outcome =
-            apply_party_wide_item_effect(&mut party, &item, true).expect("Sacred Ash applies");
+        let outcome = apply_party_wide_item_effect(&mut party, &item, &move_catalog(), true)
+            .expect("Sacred Ash applies");
 
         assert_eq!(outcome.item_id, "MOD_ASH");
         assert_eq!(
-            outcome.revive_changes,
+            outcome.recovery_changes,
             vec![
-                PartyItemReviveChange {
+                PartyItemRecoveryChange {
                     party_index: 0,
                     pokemon_id: "CHIKORITA".to_string(),
                     hp_before: 0,
                     hp_after: 35,
+                    status_before: None,
+                    status_after: None,
+                    sleep_turns_before: 0,
+                    sleep_turns_after: 0,
+                    pp_changes: Vec::new(),
                 },
-                PartyItemReviveChange {
+                PartyItemRecoveryChange {
+                    party_index: 1,
+                    pokemon_id: "BAYLEEF".to_string(),
+                    hp_before: 12,
+                    hp_after: 40,
+                    status_before: Some("POISON".to_string()),
+                    status_after: None,
+                    sleep_turns_before: 3,
+                    sleep_turns_after: 0,
+                    pp_changes: vec![BattleItemPpChange {
+                        move_slot: 0,
+                        move_id: "TACKLE".to_string(),
+                        pp_before: 1,
+                        pp_after: 42,
+                    }],
+                },
+                PartyItemRecoveryChange {
                     party_index: 2,
                     pokemon_id: "MEGANIUM".to_string(),
                     hp_before: 0,
                     hp_after: 50,
+                    status_before: None,
+                    status_after: None,
+                    sleep_turns_before: 0,
+                    sleep_turns_after: 0,
+                    pp_changes: Vec::new(),
                 },
             ]
         );
         assert_eq!(party.pokemon[0].as_ref().expect("slot 0").hp, 35);
-        assert_eq!(party.pokemon[1].as_ref().expect("slot 1").hp, 12);
+        assert_eq!(party.pokemon[1].as_ref().expect("slot 1").hp, 40);
+        assert_eq!(party.pokemon[1].as_ref().expect("slot 1").status, None);
+        assert_eq!(party.pokemon[1].as_ref().expect("slot 1").sleep_turns, 0);
+        assert_eq!(
+            party.pokemon[1].as_ref().expect("slot 1").moves[0].current_pp,
+            42
+        );
         assert_eq!(party.pokemon[2].as_ref().expect("slot 2").hp, 50);
+        assert_eq!(party.pokemon[3].as_ref().expect("slot 3"), &egg);
         assert!(outcome.consumed);
     }
 
@@ -4522,8 +4930,13 @@ mod tests {
         missing.pokemon[0] = Some(test_pokemon(0, 35));
         let missing_before = missing.clone();
         assert_eq!(
-            apply_party_wide_item_effect(&mut missing, &sacred_ash_item(None), true)
-                .expect_err("payload-less item is not a party revive item"),
+            apply_party_wide_item_effect(
+                &mut missing,
+                &sacred_ash_item(None),
+                &move_catalog(),
+                true,
+            )
+            .expect_err("payload-less item is not a party revive item"),
             BattleItemError::MissingBattleItemPayload {
                 item_id: "MOD_ASH".to_string(),
             }
@@ -4534,8 +4947,13 @@ mod tests {
         invalid.pokemon[0] = Some(test_pokemon(0, 35));
         let invalid_before = invalid.clone();
         assert_eq!(
-            apply_party_wide_item_effect(&mut invalid, &sacred_ash_item(Some(0)), true)
-                .expect_err("zero percent is invalid"),
+            apply_party_wide_item_effect(
+                &mut invalid,
+                &sacred_ash_item(Some(0)),
+                &move_catalog(),
+                true,
+            )
+            .expect_err("zero percent is invalid"),
             BattleItemError::InvalidPartyReviveHpPercent {
                 item_id: "MOD_ASH".to_string(),
                 percent: 0,
@@ -4543,12 +4961,38 @@ mod tests {
         );
         assert_eq!(invalid, invalid_before);
 
+        let mut partial = Party::default();
+        partial.pokemon[0] = Some(test_pokemon(0, 35));
+        let partial_before = partial.clone();
+        assert_eq!(
+            apply_party_wide_item_effect(
+                &mut partial,
+                &sacred_ash_item(Some(50)),
+                &move_catalog(),
+                true,
+            )
+            .expect_err("Sacred Ash always routes through full HealParty"),
+            BattleItemError::InvalidPartyReviveHpPercent {
+                item_id: "MOD_ASH".to_string(),
+                percent: 50,
+            }
+        );
+        assert_eq!(partial, partial_before);
+
         let mut healthy = Party::default();
         healthy.pokemon[0] = Some(test_pokemon(35, 35));
+        let mut fainted_egg = test_pokemon(0, 20);
+        fainted_egg.is_egg = true;
+        healthy.pokemon[1] = Some(fainted_egg);
         let healthy_before = healthy.clone();
         assert_eq!(
-            apply_party_wide_item_effect(&mut healthy, &sacred_ash_item(Some(100)), true)
-                .expect_err("no fainted target has no effect"),
+            apply_party_wide_item_effect(
+                &mut healthy,
+                &sacred_ash_item(Some(100)),
+                &move_catalog(),
+                true,
+            )
+            .expect_err("no fainted target has no effect"),
             BattleItemError::NoTargetChange {
                 item_id: "MOD_ASH".to_string(),
             }
@@ -4689,5 +5133,21 @@ mod tests {
             }
         );
         assert_eq!(damaged, damaged_before);
+
+        let mut invented_amount = test_pokemon(17, 35);
+        let invented_amount_before = invented_amount.clone();
+        assert_eq!(
+            apply_active_battle_item_effect(
+                &mut invented_amount,
+                &test_item("RESTORE_HP", 25),
+                true,
+            )
+            .expect_err("HealingHPAmounts has no 25-HP entry"),
+            BattleItemError::InvalidHealAmount {
+                item_id: "POTION".to_string(),
+                amount: 25,
+            }
+        );
+        assert_eq!(invented_amount, invented_amount_before);
     }
 }

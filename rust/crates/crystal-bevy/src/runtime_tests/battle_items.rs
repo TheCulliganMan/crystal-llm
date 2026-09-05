@@ -174,7 +174,7 @@ fn runtime_bag_item_turn_selects_enemy_from_pre_item_state_and_replays_atomicall
                 selector_hp.set(Some(combat.player.hp));
                 runtime
                     .data
-                    .select_trainer_enemy_move_slot(combat, ai_move_flags, rng)
+                    .select_trainer_enemy_move_with_scratch(combat, ai_move_flags, rng)
             },
             |selected_move_slot, _combat, _rng| {
                 Ok(BattleAction::Move {
@@ -313,7 +313,7 @@ fn runtime_party_item_turn_selects_enemy_before_revive_and_replays_atomically() 
                 selector_target_hp.set(combat.player_party.first().map(|pokemon| pokemon.hp));
                 runtime
                     .data
-                    .select_trainer_enemy_move_slot(combat, ai_move_flags, rng)
+                    .select_trainer_enemy_move_with_scratch(combat, ai_move_flags, rng)
             },
             |selected_move_slot, _combat, _rng| {
                 Ok(BattleAction::Move {
@@ -1692,14 +1692,14 @@ fn runtime_save_rejects_references_missing_from_compiled_pack() {
         );
 
     let mut state = GameState::default();
-    state.last_spawn_identifier = Some(99);
+    state.last_spawn_map_constant = Some("MISSING_MAP".to_string());
     let error = runtime
         .save_game(&save_path, state)
-        .expect_err("last spawn identifier must exist in pack");
+        .expect_err("last spawn map must exist in pack");
     let error = format!("{error:#}");
     assert!(
         error.contains(
-            "saved last_spawn_identifier 99 is missing from compiled pack runtime spawn points"
+            "saved last_spawn_map_constant MISSING_MAP is missing from compiled pack map constants"
         ),
         "{error}"
     );

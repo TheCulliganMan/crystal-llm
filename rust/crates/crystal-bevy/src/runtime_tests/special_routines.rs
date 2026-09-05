@@ -962,6 +962,17 @@
         session
             .start_scripted_wild_battle(&runtime, "RuntimeMap", "RuntimeWildScript", 4)
             .expect("scripted wild battle starts");
+        {
+            let combat = session
+                .state
+                .script_runtime
+                .active_battle_combat
+                .as_mut()
+                .expect("active combat");
+            combat.player_toxic_turns = 4;
+            combat.player_nightmare_source = Some(BattleSide::Enemy);
+            combat.player_badge_before_status = false;
+        }
 
         let item_use = session
             .use_bag_item_on_active_battle_pokemon(&runtime, "POTION")
@@ -996,7 +1007,7 @@
     }
 
     #[test]
-    fn runtime_battle_item_x_item_raises_active_party_stat_stage_from_pack_data() {
+    fn runtime_battle_item_x_item_targets_live_transformed_stage_and_not_reserve() {
         let root = temp_repository_root("battle-item-x-attack");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
@@ -1026,6 +1037,12 @@
             .storage
             .register_capture_in_box(0, player)
             .expect("register player");
+        let reserve = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+        session
+            .state
+            .storage
+            .register_capture_in_box(0, reserve)
+            .expect("register reserve");
         session.state.sync_party_from_storage();
         session
             .state
@@ -1035,6 +1052,29 @@
         session
             .start_scripted_wild_battle(&runtime, "RuntimeMap", "RuntimeWildScript", 4)
             .expect("scripted wild battle starts");
+        let mut combat = crystal_core::battle::turn::active_battle_combat_state(&session.state)
+            .expect("materialize combat");
+        let mut copied_stat_boosts = combat.player.stat_boosts.clone();
+        copied_stat_boosts.insert(crystal_core::models::Stat::Attack, 2);
+        combat.player_transform = Some(crystal_core::battle::turn::BattleTransformState {
+            species: combat.enemy.species.clone(),
+            dvs: combat.enemy.dvs,
+            moves: combat.enemy.moves.clone(),
+            stat_boosts: copied_stat_boosts,
+            attack: combat.enemy.attack,
+            defense: combat.enemy.defense,
+            speed: combat.enemy.speed,
+            special_attack: combat.enemy.special_attack,
+            special_defense: combat.enemy.special_defense,
+        });
+        session.state.script_runtime.active_battle_combat = Some(combat);
+
+        let before_reserve_target = session.state.clone();
+        let reserve_error = session
+            .use_bag_item_on_battle_party_pokemon(&runtime, "X_ATTACK", 1)
+            .expect_err("ITEMMENU_CLOSE cannot target a reserve Pokemon");
+        assert!(error_debug(reserve_error).contains("requires the active battle Pokemon"));
+        assert_eq!(session.state, before_reserve_target);
 
         let item_use = session
             .use_bag_item_on_active_battle_pokemon(&runtime, "X_ATTACK")
@@ -1045,14 +1085,15 @@
             item_use.battle_item.battle_stat_stage_changes,
             vec![crystal_core::systems::battle_items::BattleItemStageChange {
                 stat: "ATTACK".to_string(),
-                stage_before: 0,
-                stage_after: 1,
+                stage_before: 2,
+                stage_after: 3,
             }]
         );
         let lead = session.state.storage.party.pokemon[0]
             .as_ref()
             .expect("lead");
-        assert_eq!(lead.stat_boosts[&crystal_core::models::Stat::Attack], 1);
+        assert_eq!(lead.stat_boosts[&crystal_core::models::Stat::Attack], 0);
+        assert_eq!(lead.happiness, 71);
         assert_eq!(
             session
                 .state
@@ -1060,19 +1101,141 @@
                 .active_battle_combat
                 .as_ref()
                 .expect("active combat")
-                .player
+                .player_transform
+                .as_ref()
+                .expect("Transform remains active")
                 .stat_boosts[&crystal_core::models::Stat::Attack],
-            1
+            3
         );
         assert_eq!(
             session.state.bag.quantity(&runtime.data.items["X_ATTACK"]),
             0
         );
+
+        session
+            .state
+            .bag
+            .add_item(&runtime.data.items["X_ATTACK"], 1)
+            .expect("add second X Attack");
+        let (_, item_use, recorded) = session
+            .stage_active_battle_turn_with_enemy_selector(
+                &runtime,
+                BattleAction::Item {
+                    item_id: "X_ATTACK".to_string(),
+                },
+                Some("X_ATTACK"),
+                |_| Ok(BattleAction::Move { slot: 0 }),
+            )
+            .expect("stage X Attack turn");
+        assert!(item_use.expect("Bag item use").consumed);
+        session
+            .apply_runtime_mutation_command(&runtime, recorded.command)
+            .expect("commit X Attack turn");
+        let lead = session.state.storage.party.pokemon[0]
+            .as_ref()
+            .expect("lead after turn");
+        assert_eq!(lead.stat_boosts[&crystal_core::models::Stat::Attack], 0);
+        assert_eq!(lead.happiness, 72);
+        assert_eq!(
+            session
+                .state
+                .script_runtime
+                .active_battle_combat
+                .as_ref()
+                .expect("active combat after recorded turn")
+                .player_transform
+                .as_ref()
+                .expect("Transform remains active after recorded turn")
+                .stat_boosts[&crystal_core::models::Stat::Attack],
+            4
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn runtime_battle_item_x_item_rejects_capped_stat_without_consumption() {
+    fn runtime_x_accuracy_sets_only_its_substatus_and_is_neutral_to_happiness() {
+        let root = temp_repository_root("battle-item-x-accuracy");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_scripted_battles();
+        let mut x_accuracy = runtime_item("X_ACCURACY", item_pocket("ITEM"));
+        x_accuracy.effect = "X_ACCURACY".to_string();
+        // The canonical exporter preserves these table fields even though
+        // XAccuracyEffect is a dedicated substatus routine, not XItemEffect.
+        x_accuracy.battle_stat_boost_stat = Some("ACCURACY".to_string());
+        x_accuracy.battle_stat_boost_stages = Some(1);
+        x_accuracy.field_menu = "ITEMMENU_NOUSE".to_string();
+        x_accuracy.field_usable = false;
+        x_accuracy.battle_menu = "ITEMMENU_CLOSE".to_string();
+        x_accuracy.battle_usable = true;
+        x_accuracy.consumable = true;
+        data.items.insert("X_ACCURACY".to_string(), x_accuracy);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut session = runtime
+            .start_overworld_session(&asset_root, 0)
+            .expect("overworld session");
+        let player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+        session
+            .state
+            .storage
+            .register_capture_in_box(0, player)
+            .expect("register player");
+        session.state.sync_party_from_storage();
+        session
+            .state
+            .bag
+            .add_item(&runtime.data.items["X_ACCURACY"], 2)
+            .expect("add X Accuracy");
+        session
+            .start_scripted_wild_battle(&runtime, "RuntimeMap", "RuntimeWildScript", 4)
+            .expect("scripted wild battle starts");
+
+        let item_use = session
+            .use_bag_item_on_active_battle_pokemon(&runtime, "X_ACCURACY")
+            .expect("use X Accuracy");
+
+        assert!(item_use.item_use.consumed);
+        assert!(item_use.battle_item.battle_stat_stage_changes.is_empty());
+        let lead = session.state.storage.party.pokemon[0]
+            .as_ref()
+            .expect("lead");
+        assert_eq!(lead.happiness, 70);
+        assert_eq!(lead.stat_boosts[&crystal_core::models::Stat::Accuracy], 0);
+        let combat = session
+            .state
+            .script_runtime
+            .active_battle_combat
+            .as_ref()
+            .expect("active combat");
+        assert!(combat.player_x_accuracy);
+        assert_eq!(
+            combat.player.stat_boosts[&crystal_core::models::Stat::Accuracy],
+            0
+        );
+        assert_eq!(
+            session
+                .state
+                .bag
+                .quantity(&runtime.data.items["X_ACCURACY"]),
+            1
+        );
+
+        let before_repeat = session.state.clone();
+        let repeat_error = session
+            .use_bag_item_on_active_battle_pokemon(&runtime, "X_ACCURACY")
+            .expect_err("X Accuracy cannot be used twice");
+        assert!(error_debug(repeat_error).contains("X Accuracy is already active"));
+        assert_eq!(session.state, before_repeat);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_battle_item_x_item_consumes_and_changes_happiness_at_stat_cap() {
         let root = temp_repository_root("battle-item-x-attack-capped");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
@@ -1114,26 +1277,95 @@
         session
             .start_scripted_wild_battle(&runtime, "RuntimeMap", "RuntimeWildScript", 4)
             .expect("scripted wild battle starts");
-        let before = session.state.clone();
-
-        let error = session
+        let item_use = session
             .use_bag_item_on_active_battle_pokemon(&runtime, "X_ATTACK")
-            .expect_err("capped stat rejects X Attack");
+            .expect("source consumes capped X Attack");
 
-        assert!(
-            format!("{error:?}").contains("would not change the target"),
-            "{error:?}"
-        );
-        assert_eq!(session.state, before);
+        assert!(item_use.battle_item.battle_stat_stage_changes.is_empty());
+        let lead = session.state.storage.party.pokemon[0]
+            .as_ref()
+            .expect("lead");
+        assert_eq!(lead.stat_boosts[&crystal_core::models::Stat::Attack], 6);
+        assert_eq!(lead.happiness, 71);
         assert_eq!(
             session.state.bag.quantity(&runtime.data.items["X_ATTACK"]),
-            1
+            0
         );
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn runtime_battle_item_full_restore_heals_and_clears_status() {
+    fn gym_leader_battle_start_changes_only_nonfainted_party_happiness() {
+        let root = temp_repository_root("gym-leader-start-happiness");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_scripted_battles();
+        data.trainers
+            .trainers
+            .get_mut("RIVAL1")
+            .expect("runtime trainer")
+            .trainer_class = "FALKNER".to_string();
+        data.maps
+            .get_mut("RuntimeMap")
+            .expect("runtime map")
+            .scripted_trainer_battles
+            .iter_mut()
+            .find(|battle| battle.source_script == "RuntimeTrainerScript")
+            .expect("runtime trainer battle")
+            .request
+            .trainer_class = "FALKNER".to_string();
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut session = runtime
+            .start_overworld_session(&asset_root, 0)
+            .expect("overworld session");
+        let alive = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+        let mut fainted = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+        fainted.hp = 0;
+        session
+            .state
+            .storage
+            .register_capture_in_box(0, alive)
+            .expect("register alive party member");
+        session
+            .state
+            .storage
+            .register_capture_in_box(0, fainted)
+            .expect("register fainted party member");
+        session.state.sync_party_from_storage();
+
+        session
+            .start_scripted_trainer_battle(
+                &runtime,
+                "RuntimeMap",
+                "RuntimeTrainerScript",
+                8,
+            )
+            .expect("start gym leader battle");
+
+        assert_eq!(
+            session.state.storage.party.pokemon[0]
+                .as_ref()
+                .expect("alive")
+                .happiness,
+            73
+        );
+        assert_eq!(
+            session.state.storage.party.pokemon[1]
+                .as_ref()
+                .expect("fainted")
+                .happiness,
+            70
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_battle_item_full_restore_without_major_status_clears_substatuses() {
         let root = temp_repository_root("battle-item-full-restore");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
@@ -1166,7 +1398,7 @@
         let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
         let full_hp = player.max_hp;
         player.hp = 11;
-        player.status = Some("POISON".to_string());
+        player.status = None;
         session
             .state
             .storage
@@ -1190,10 +1422,7 @@
         assert!(item_use.item_use.consumed);
         assert_eq!(item_use.battle_item.hp_before, 11);
         assert_eq!(item_use.battle_item.hp_after, full_hp);
-        assert_eq!(
-            item_use.battle_item.status_before,
-            Some("POISON".to_string())
-        );
+        assert_eq!(item_use.battle_item.status_before, None);
         assert_eq!(item_use.battle_item.status_after, None);
         let lead = session.state.storage.party.pokemon[0]
             .as_ref()
@@ -1208,6 +1437,9 @@
             .expect("active combat");
         assert_eq!(combat.player.hp, full_hp);
         assert_eq!(combat.player.status, None);
+        assert_eq!(combat.player_toxic_turns, 0);
+        assert_eq!(combat.player_nightmare_source, None);
+        assert!(combat.player_badge_before_status);
         assert_eq!(
             session
                 .state
@@ -1522,6 +1754,62 @@
     }
 
     #[test]
+    fn runtime_field_bitter_medicine_applies_exported_happiness_change() {
+        let root = temp_repository_root("field-item-energypowder");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_scripted_battles();
+        let mut powder = runtime_item("ENERGYPOWDER", item_pocket("ITEM"));
+        powder.effect = "RESTORE_HP".to_string();
+        powder.parameter = 50;
+        powder.field_menu = "ITEMMENU_PARTY".to_string();
+        powder.field_usable = true;
+        powder.consumable = true;
+        data.items.insert("ENERGYPOWDER".to_string(), powder);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut session = runtime
+            .start_overworld_session(&asset_root, 0)
+            .expect("overworld session");
+        let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+        player.hp = 1;
+        player.happiness = 70;
+        session
+            .state
+            .storage
+            .register_capture_in_box(0, player)
+            .expect("register player");
+        session.state.sync_party_from_storage();
+        session
+            .state
+            .bag
+            .add_item(&runtime.data.items["ENERGYPOWDER"], 1)
+            .expect("add EnergyPowder");
+
+        session
+            .use_bag_item_on_party_pokemon(&runtime, "ENERGYPOWDER", 0)
+            .expect("use field EnergyPowder");
+
+        let pokemon = session.state.storage.party.pokemon[0]
+            .as_ref()
+            .expect("player");
+        assert!(pokemon.hp > 1);
+        assert_eq!(pokemon.happiness, 65);
+        assert_eq!(
+            session
+                .state
+                .bag
+                .quantity(&runtime.data.items["ENERGYPOWDER"]),
+            0
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn runtime_field_item_status_heal_uses_exact_modpack_statuses() {
         let root = temp_repository_root("field-item-status");
         write_floor_tileset(&root, "johto");
@@ -1717,6 +2005,7 @@
             .expect("overworld session");
         let mut player = Pokemon::new_for_tests(runtime_species(), 30, Dv::default());
         player.attack_exp = 0;
+        player.hp = 1;
         let attack_before = player.attack;
         session
             .state
@@ -1744,6 +2033,8 @@
             .as_ref()
             .expect("player");
         assert_eq!(pokemon.attack_exp, 2560);
+        assert_eq!(pokemon.happiness, 75);
+        assert_eq!(pokemon.hp, 1);
         assert!(pokemon.attack >= attack_before);
         assert_eq!(
             item_use.item_effect.stat_changes[0].stat_after,
@@ -1887,6 +2178,7 @@
             .as_ref()
             .expect("player");
         assert_eq!(pokemon.level, 10);
+        assert_eq!(pokemon.happiness, 75);
         assert_eq!(
             pokemon.experience,
             calculate_experience(&runtime.data.growth_rates, "GROWTH_MEDIUM_FAST", 10).unwrap()
@@ -2007,16 +2299,24 @@
             .expect("overworld session");
         let player =
             Pokemon::new_for_tests(runtime.data.pokemon["PIKACHU"].clone(), 20, Dv::default());
+        let mut blocked_player = player.clone();
+        blocked_player.nickname = "BLOCKED".to_string();
+        blocked_player.item = Some("EVERSTONE".to_string());
         session
             .state
             .storage
             .register_capture_in_box(0, player)
             .expect("register player");
+        session
+            .state
+            .storage
+            .register_capture_in_box(0, blocked_player)
+            .expect("register Everstone holder");
         session.state.sync_party_from_storage();
         session
             .state
             .bag
-            .add_item(&runtime.data.items["THUNDERSTONE"], 1)
+            .add_item(&runtime.data.items["THUNDERSTONE"], 2)
             .expect("add thunderstone");
 
         let item_use = session
@@ -2042,7 +2342,29 @@
                 .state
                 .bag
                 .quantity(&runtime.data.items["THUNDERSTONE"]),
-            0
+            1
+        );
+
+        let before_refusal = session.state.clone();
+        let error = session
+            .use_bag_item_on_party_pokemon(&runtime, "THUNDERSTONE", 1)
+            .expect_err("Everstone holder rejects evolution stone");
+        assert!(
+            format!("{error:?}").contains("would not change the target"),
+            "{error:?}"
+        );
+        assert_eq!(session.state, before_refusal);
+        let blocked = session.state.storage.party.pokemon[1]
+            .as_ref()
+            .expect("Everstone holder");
+        assert_eq!(blocked.species.id, "PIKACHU");
+        assert_eq!(blocked.item.as_deref(), Some("EVERSTONE"));
+        assert_eq!(
+            session
+                .state
+                .bag
+                .quantity(&runtime.data.items["THUNDERSTONE"]),
+            1
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2135,7 +2457,7 @@
     }
 
     #[test]
-    fn runtime_field_item_sacred_ash_revives_whole_party_from_pack_percent() {
+    fn runtime_field_item_sacred_ash_full_heals_every_non_egg_party_member() {
         let root = temp_repository_root("field-item-sacred-ash");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
@@ -2163,6 +2485,14 @@
         fainted.hp = 0;
         let mut healthy = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
         healthy.hp = 12;
+        healthy.status = Some("POISON".to_string());
+        healthy.sleep_turns = 3;
+        healthy.moves = vec![LearnedMove {
+            name: "TACKLE".to_string(),
+            current_pp: 1,
+            pp_ups: 1,
+        }];
+        let healthy_max_hp = healthy.max_hp;
         session
             .state
             .storage
@@ -2186,8 +2516,18 @@
 
         assert_eq!(item_use.item_use.context, ItemUseContext::Field);
         assert_eq!(item_use.item_effect.item_id, "MOD_ASH");
-        assert_eq!(item_use.item_effect.revive_changes.len(), 1);
-        assert_eq!(item_use.item_effect.revive_changes[0].party_index, 0);
+        assert_eq!(item_use.item_effect.recovery_changes.len(), 2);
+        assert_eq!(item_use.item_effect.recovery_changes[0].party_index, 0);
+        assert_eq!(item_use.item_effect.recovery_changes[1].party_index, 1);
+        assert_eq!(
+            item_use.item_effect.recovery_changes[1].pp_changes,
+            vec![crystal_core::systems::battle_items::BattleItemPpChange {
+                move_slot: 0,
+                move_id: "TACKLE".to_string(),
+                pp_before: 1,
+                pp_after: 42,
+            }]
+        );
         assert_eq!(
             session.state.storage.party.pokemon[0]
                 .as_ref()
@@ -2200,7 +2540,29 @@
                 .as_ref()
                 .expect("slot 1")
                 .hp,
-            12
+            healthy_max_hp
+        );
+        assert_eq!(
+            session.state.storage.party.pokemon[1]
+                .as_ref()
+                .expect("slot 1")
+                .status,
+            None
+        );
+        assert_eq!(
+            session.state.storage.party.pokemon[1]
+                .as_ref()
+                .expect("slot 1")
+                .sleep_turns,
+            0
+        );
+        assert_eq!(
+            session.state.storage.party.pokemon[1]
+                .as_ref()
+                .expect("slot 1")
+                .moves[0]
+                .current_pp,
+            42
         );
         assert_eq!(
             session.state.bag.quantity(&runtime.data.items["MOD_ASH"]),
@@ -2455,6 +2817,13 @@
             session.state.storage.party.pokemon[0]
                 .as_ref()
                 .expect("player")
+                .happiness,
+            71
+        );
+        assert_eq!(
+            session.state.storage.party.pokemon[0]
+                .as_ref()
+                .expect("player")
                 .moves
                 .last()
                 .expect("learned")
@@ -2516,6 +2885,13 @@
 
         assert!(!item_use.item_use.consumed);
         assert_eq!(item_use.learned_move.learned_move, "CUT");
+        assert_eq!(
+            session.state.storage.party.pokemon[0]
+                .as_ref()
+                .expect("player")
+                .happiness,
+            70
+        );
         assert_eq!(session.state.bag.quantity(&runtime.data.items["HM_CUT"]), 1);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2803,6 +3179,45 @@
         let asset_root = AssetRoot::new(&root);
         let mut data = minimal_runtime_data_with_scripted_battles();
         add_runtime_deferred_field_move_global_scripts(&mut data);
+
+        let lit_runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data.clone(), report()),
+            identity(),
+        )
+        .expect("lit-map runtime");
+        let mut lit_session = lit_runtime
+            .start_overworld_session(&asset_root, 0)
+            .expect("lit-map overworld session");
+        let mut lit_flash_user = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+        lit_flash_user.moves = vec![LearnedMove {
+            name: "FLASH".to_string(),
+            current_pp: 20,
+            pp_ups: 0,
+        }];
+        lit_session
+            .state
+            .storage
+            .register_capture_in_box(0, lit_flash_user)
+            .expect("register lit-map Flash user");
+        lit_session.state.sync_party_from_storage();
+        lit_session.state.badges.johto[0] = true;
+        let lit_state_before = lit_session.state.clone();
+        let error = lit_session
+            .use_flash_field_move(&lit_runtime, 0)
+            .expect_err("Flash must reject a non-dark ordinary map");
+        assert!(format!("{error:#}").contains("palette None"), "{error:#}");
+        assert_eq!(lit_session.state, lit_state_before);
+
+        data.maps
+            .get_mut("RuntimeMap")
+            .expect("runtime map")
+            .attributes
+            .palette = Some("dark".to_string());
+        data.map_attributes
+            .get_mut("RuntimeMap")
+            .expect("runtime map attributes")
+            .palette = Some("dark".to_string());
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
             CompiledGamePack::new_unchecked_for_tests(data, report()),
@@ -3271,18 +3686,43 @@
             .state
             .flags
             .set_engine_flag("ENGINE_FLYPOINT_NEW_BARK", true)
-            .expect("set flypoint flag");
+            .expect("set unrelated unlocked flypoint flag");
+        session
+            .state
+            .flags
+            .set_engine_flag("ENGINE_FLYPOINT_FLY_MAP", true)
+            .expect("set destination flypoint flag");
+        session.state.last_spawn_map_constant = Some("RUNTIME_MAP".to_string());
         session.overworld.player.mode = MovementMode::Bike;
         session.state.overworld = OverworldMemory::from_snapshot(&session.overworld.snapshot());
         let source_snapshot = session.overworld.snapshot();
+        let state_before_mismatched_destination = session.state.clone();
+
+        let error = session
+            .use_fly_field_move(&runtime, &asset_root, 0, 14, "ENGINE_FLYPOINT_NEW_BARK")
+            .expect_err("Fly flag and spawn must come from one catalog row");
+        assert!(
+            format!("{error:#}").contains("destination flag ENGINE_FLYPOINT_NEW_BARK is not defined"),
+            "{error:#}"
+        );
+        assert_eq!(session.state, state_before_mismatched_destination);
+
+        let error = session
+            .use_fly_field_move(&runtime, &asset_root, 0, 15, "ENGINE_FLYPOINT_FLY_MAP")
+            .expect_err("Fly spawn must match its catalog flag");
+        assert!(
+            format!("{error:#}").contains("does not match compiled destination"),
+            "{error:#}"
+        );
+        assert_eq!(session.state, state_before_mismatched_destination);
 
         let fly = session
-            .use_fly_field_move(&runtime, &asset_root, 0, 14, "ENGINE_FLYPOINT_NEW_BARK")
+            .use_fly_field_move(&runtime, &asset_root, 0, 14, "ENGINE_FLYPOINT_FLY_MAP")
             .expect("use fly");
 
         assert_eq!(fly.actor_party_index, 0);
         assert_eq!(fly.actor_species, "CHIKORITA");
-        assert_eq!(fly.flypoint_flag, "ENGINE_FLYPOINT_NEW_BARK");
+        assert_eq!(fly.flypoint_flag, "ENGINE_FLYPOINT_FLY_MAP");
         assert_eq!(fly.source_map, "RuntimeMap");
         assert_eq!(fly.destination_spawn_identifier, 14);
         assert_eq!(fly.destination_map, "FlyMap");
@@ -3306,7 +3746,10 @@
         assert_eq!(session.overworld.player.tile, TilePosition::new(1, 1));
         assert_eq!(session.overworld.player.facing, Direction::Down);
         assert_eq!(session.overworld.player.mode, MovementMode::Normal);
-        assert_eq!(session.state.last_spawn_identifier, Some(14));
+        assert_eq!(
+            session.state.last_spawn_map_constant.as_deref(),
+            Some("RUNTIME_MAP")
+        );
         assert!(session.state.script_runtime.pending_field_travel.is_none());
         assert_eq!(
             session.state.overworld,
@@ -3348,7 +3791,7 @@
         let before_snapshot = session.overworld.snapshot();
 
         let error = session
-            .use_fly_field_move(&runtime, &asset_root, 0, 14, "ENGINE_FLYPOINT_NEW_BARK")
+            .use_fly_field_move(&runtime, &asset_root, 0, 14, "ENGINE_FLYPOINT_FLY_MAP")
             .expect_err("unset flypoint rejects fly");
         let error = error_debug(error);
 
@@ -3394,13 +3837,13 @@
         session
             .state
             .flags
-            .set_engine_flag("ENGINE_FLYPOINT_NEW_BARK", true)
+            .set_engine_flag("ENGINE_FLYPOINT_FLY_MAP", true)
             .expect("set flypoint flag");
         let before_state = session.state.clone();
         let before_snapshot = session.overworld.snapshot();
 
         let error = session
-            .use_fly_field_move(&runtime, &asset_root, 0, 14, "ENGINE_FLYPOINT_NEW_BARK")
+            .use_fly_field_move(&runtime, &asset_root, 0, 14, "ENGINE_FLYPOINT_FLY_MAP")
             .expect_err("cave rejects fly");
         let error = error_debug(error);
 
@@ -3439,7 +3882,7 @@
             .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
-        session.state.last_spawn_identifier = Some(21);
+        session.state.last_spawn_map_constant = Some("TELEPORT_MAP".to_string());
         let source_snapshot = session.overworld.snapshot();
 
         let teleport = session
@@ -3469,7 +3912,10 @@
         assert_eq!(committed.move_id, "DIG");
         assert_eq!(session.overworld.map.name, "TeleportMap");
         assert_eq!(session.overworld.player.tile, TilePosition::new(1, 1));
-        assert_eq!(session.state.last_spawn_identifier, Some(21));
+        assert_eq!(
+            session.state.last_spawn_map_constant.as_deref(),
+            Some("TELEPORT_MAP")
+        );
         assert!(session.state.script_runtime.pending_field_travel.is_none());
         assert_eq!(
             session.state.overworld,
@@ -3507,7 +3953,7 @@
             .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
-        session.state.last_spawn_identifier = None;
+        session.state.last_spawn_map_constant = None;
         let before_state = session.state.clone();
         let before_snapshot = session.overworld.snapshot();
 
@@ -3516,8 +3962,21 @@
             .expect_err("missing saved spawn rejects teleport");
         let error = error_debug(error);
 
-        assert!(error.contains("TELEPORT field move has no saved spawn identifier"));
+        assert!(error.contains("TELEPORT field move has no saved spawn map"));
         assert_eq!(session.state, before_state);
+        assert_eq!(session.overworld.snapshot(), before_snapshot);
+
+        session.state.last_spawn_map_constant = Some("NO_SPAWN_MAP".to_string());
+        let before_unrecognized = session.state.clone();
+        let error = session
+            .use_teleport_field_move(&runtime, &asset_root, 0)
+            .expect_err("saved map absent from SpawnPoints rejects teleport");
+        let error = error_debug(error);
+        assert!(
+            error.contains("TELEPORT saved spawn map NO_SPAWN_MAP is not in SpawnPoints"),
+            "{error}"
+        );
+        assert_eq!(session.state, before_unrecognized);
         assert_eq!(session.overworld.snapshot(), before_snapshot);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3554,7 +4013,7 @@
             .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
-        session.state.last_spawn_identifier = Some(21);
+        session.state.last_spawn_map_constant = Some("TELEPORT_MAP".to_string());
         let before_state = session.state.clone();
         let before_snapshot = session.overworld.snapshot();
 
@@ -4580,6 +5039,65 @@
         let error = session
             .use_bag_item_on_party_move(&runtime, "PP_UP", 0, Some(0))
             .expect_err("maxed move rejects PP Up");
+
+        assert!(
+            format!("{error:?}").contains("would not change the target"),
+            "{error:?}"
+        );
+        assert_eq!(session.state, before);
+        assert_eq!(session.state.bag.quantity(&runtime.data.items["PP_UP"]), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_field_item_pp_up_rejects_sketch_without_consumption() {
+        let root = temp_repository_root("field-item-pp-up-sketch");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_scripted_battles();
+        let mut pp_up = runtime_item("PP_UP", item_pocket("ITEM"));
+        pp_up.effect = "MOD_PP_UP".to_string();
+        pp_up.pp_up_stages = Some(1);
+        pp_up.field_menu = "ITEMMENU_PARTY".to_string();
+        pp_up.field_usable = true;
+        pp_up.battle_menu = "ITEMMENU_NOUSE".to_string();
+        pp_up.battle_usable = false;
+        pp_up.consumable = true;
+        data.items.insert("PP_UP".to_string(), pp_up);
+        data.moves
+            .insert("SKETCH".to_string(), runtime_move_named("SKETCH", 1));
+        sync_runtime_move_tables(&mut data);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut session = runtime
+            .start_overworld_session(&asset_root, 0)
+            .expect("overworld session");
+        let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+        player.moves = vec![LearnedMove {
+            name: "SKETCH".to_string(),
+            current_pp: 1,
+            pp_ups: 0,
+        }];
+        session
+            .state
+            .storage
+            .register_capture_in_box(0, player)
+            .expect("register player");
+        session.state.sync_party_from_storage();
+        session
+            .state
+            .bag
+            .add_item(&runtime.data.items["PP_UP"], 1)
+            .expect("add PP Up");
+        let before = session.state.clone();
+
+        let error = session
+            .use_bag_item_on_party_move(&runtime, "PP_UP", 0, Some(0))
+            .expect_err("Sketch rejects PP Up");
 
         assert!(
             format!("{error:?}").contains("would not change the target"),

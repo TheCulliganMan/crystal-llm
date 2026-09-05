@@ -35,7 +35,6 @@ export type ExportedItem = {
   battle_capture_ball: boolean | null;
   battle_focus_energy: boolean | null;
   battle_stat_drop_guard: boolean | null;
-  battle_stat_drop_guard_turns: number | null;
   confusion_heal: boolean | null;
   repel_steps: number | null;
   escape_rope_mode: string | null;
@@ -75,7 +74,6 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     battle_capture_ball: null,
     battle_focus_energy: null,
     battle_stat_drop_guard: null,
-    battle_stat_drop_guard_turns: null,
     confusion_heal: null,
     repel_steps: null,
     escape_rope_mode: null,
@@ -113,7 +111,6 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     battle_capture_ball: null,
     battle_focus_energy: null,
     battle_stat_drop_guard: null,
-    battle_stat_drop_guard_turns: null,
     confusion_heal: null,
     repel_steps: null,
     escape_rope_mode: null,
@@ -151,7 +148,6 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     battle_capture_ball: null,
     battle_focus_energy: null,
     battle_stat_drop_guard: null,
-    battle_stat_drop_guard_turns: null,
     confusion_heal: null,
     repel_steps: null,
     escape_rope_mode: null,
@@ -189,7 +185,6 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     battle_capture_ball: null,
     battle_focus_energy: null,
     battle_stat_drop_guard: null,
-    battle_stat_drop_guard_turns: null,
     confusion_heal: null,
     repel_steps: null,
     escape_rope_mode: null,
@@ -227,7 +222,6 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
     battle_capture_ball: null,
     battle_focus_energy: null,
     battle_stat_drop_guard: null,
-    battle_stat_drop_guard_turns: null,
     confusion_heal: null,
     repel_steps: null,
     escape_rope_mode: null,
@@ -905,14 +899,6 @@ function exactBattleStatDropGuard(
   return guard;
 }
 
-function exactBattleStatDropGuardTurns(attributes: Record<string, string | number>, effect: string): number | null {
-  if (effect !== "GUARD_SPEC") return null;
-  if (typeof attributes.source_name !== "string" || attributes.source_name !== "GUARD_SPEC") {
-    throw new Error(`missing authored battle_stat_drop_guard_turns for stat guard item ${attributes.source_name}`);
-  }
-  return 5;
-}
-
 function parseConfusionHealRules(itemEffectsContent: string): Map<string, boolean> {
   const labels = parseItemEffectLabels(itemEffectsContent);
   const itemName = itemNameForEffectLabel(labels, "BitterBerryEffect");
@@ -1122,7 +1108,6 @@ export function exportItems(): ExportedItem[] {
       battle_capture_ball: exactBattleCaptureBall(effectId),
       battle_focus_energy: exactBattleFocusEnergy(attr, effectId, battleFocusEnergyRules),
       battle_stat_drop_guard: exactBattleStatDropGuard(attr, effectId, battleStatDropGuardRules),
-      battle_stat_drop_guard_turns: exactBattleStatDropGuardTurns(attr, effectId),
       confusion_heal: exactConfusionHeal(attr, effectId, confusionHealRules),
       repel_steps: exactRepelSteps(attr, effectId, repelStepRules),
       escape_rope_mode: exactEscapeRopeMode(attr, effectId, escapeRopeModeRules),

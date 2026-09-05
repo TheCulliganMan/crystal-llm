@@ -2287,6 +2287,14 @@ fn open_visible_options_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
 
 fn close_visible_options_menu(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.options_menu_open = false;
+    let resume_main_menu = runtime_shell.title_menu.as_ref().is_some_and(|title| {
+        title.main_menu_phase_interpreter.is_some() && !title.main_menu_waiting_for_input
+    });
+    if resume_main_menu
+        && let Err(error) = resume_visible_main_menu_after_subprogram(runtime_shell)
+    {
+        record_visible_runtime_system_error(runtime_shell, error);
+    }
     runtime_shell
         .last_audio_events
         .push("closed Options".to_string());
@@ -2562,6 +2570,10 @@ fn close_visible_special_boundary(runtime_shell: &mut BevyRuntimeShell) -> Resul
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
+    complete_visible_accepted_evolution_after_special_boundary(
+        runtime_shell,
+        &boundary.label,
+    )?;
     if matches!(
         runtime_shell.pending_script_party_selection.as_ref(),
         Some(PendingScriptPartySelection::MoveTutor { .. })

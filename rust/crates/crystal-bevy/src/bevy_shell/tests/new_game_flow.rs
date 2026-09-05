@@ -192,7 +192,7 @@ fn npc_trade_runtime_exchanges_matching_party_pokemon() {
 }
 
 #[test]
-fn time_set_directional_input_matches_typescript_phase_rules() {
+fn time_set_directional_input_matches_set_hour_and_set_minutes() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     open_visible_time_set_screen(&mut runtime_shell, VisibleTimeSetNext::OakIntro)
         .expect("open time set");
@@ -214,7 +214,7 @@ fn time_set_directional_input_matches_typescript_phase_rules() {
             .expect("time set pending")
             .hour,
         10,
-        "TypeScript only changes the hour on up/down"
+        "SetHour only changes the hour on Up/Down"
     );
     move_visible_time_set_direction(&mut runtime_shell, VisibleTimeSetDirection::Up)
         .expect("up increments hour");
@@ -246,18 +246,7 @@ fn time_set_directional_input_matches_typescript_phase_rules() {
         time_set.minute = 0;
     }
     move_visible_time_set_direction(&mut runtime_shell, VisibleTimeSetDirection::Right)
-        .expect("right increments minute");
-    assert_eq!(
-        runtime_shell
-            .pending_time_set
-            .as_ref()
-            .expect("time set pending")
-            .minute,
-        1,
-        "TypeScript changes the minute on right"
-    );
-    move_visible_time_set_direction(&mut runtime_shell, VisibleTimeSetDirection::Left)
-        .expect("left decrements minute");
+        .expect("right ignored on minute");
     assert_eq!(
         runtime_shell
             .pending_time_set
@@ -265,8 +254,242 @@ fn time_set_directional_input_matches_typescript_phase_rules() {
             .expect("time set pending")
             .minute,
         0,
-        "TypeScript changes the minute on left"
+        "SetMinutes ignores Right"
     );
+    move_visible_time_set_direction(&mut runtime_shell, VisibleTimeSetDirection::Left)
+        .expect("left ignored on minute");
+    assert_eq!(
+        runtime_shell
+            .pending_time_set
+            .as_ref()
+            .expect("time set pending")
+            .minute,
+        0,
+        "SetMinutes ignores Left"
+    );
+    move_visible_time_set_direction(&mut runtime_shell, VisibleTimeSetDirection::Down)
+        .expect("down wraps minute");
+    assert_eq!(
+        runtime_shell
+            .pending_time_set
+            .as_ref()
+            .expect("time set pending")
+            .minute,
+        59
+    );
+}
+
+#[test]
+fn time_set_held_direction_uses_source_first_and_later_repeat_cadence() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    open_visible_time_set_screen(&mut runtime_shell, VisibleTimeSetNext::OakIntro)
+        .expect("open time set");
+    {
+        let time_set = runtime_shell.pending_time_set.as_mut().expect("time set pending");
+        time_set.phase = VisibleTimeSetPhase::SetHour;
+        time_set.input_delay_frames = 0;
+        time_set.hour = 10;
+        assert_eq!(time_set.direction_first_repeat_frames, 10);
+        assert_eq!(time_set.direction_later_repeat_frames, 5);
+    }
+
+    let mut keys = ButtonInput::<KeyCode>::default();
+    keys.press(KeyCode::ArrowUp);
+    apply_visible_time_set_input_keys(&keys, &mut runtime_shell, 1);
+    assert_eq!(runtime_shell.pending_time_set.as_ref().expect("time set").hour, 11);
+    assert_eq!(runtime_shell.ui_direction_repeat_ticks, 9);
+    keys.clear_just_pressed(KeyCode::ArrowUp);
+
+    for _ in 0..9 {
+        apply_visible_time_set_input_keys(&keys, &mut runtime_shell, 1);
+    }
+    assert_eq!(runtime_shell.pending_time_set.as_ref().expect("time set").hour, 11);
+    assert_eq!(runtime_shell.ui_direction_repeat_ticks, 0);
+    apply_visible_time_set_input_keys(&keys, &mut runtime_shell, 1);
+    assert_eq!(runtime_shell.pending_time_set.as_ref().expect("time set").hour, 12);
+    assert_eq!(runtime_shell.ui_direction_repeat_ticks, 4);
+
+    for _ in 0..4 {
+        apply_visible_time_set_input_keys(&keys, &mut runtime_shell, 1);
+    }
+    assert_eq!(runtime_shell.pending_time_set.as_ref().expect("time set").hour, 12);
+    apply_visible_time_set_input_keys(&keys, &mut runtime_shell, 1);
+    assert_eq!(runtime_shell.pending_time_set.as_ref().expect("time set").hour, 13);
+}
+
+#[test]
+fn init_clock_sets_and_restores_h_in_menu_around_the_complete_dialogue() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.h_in_menu = 7;
+    open_visible_time_set_screen(&mut runtime_shell, VisibleTimeSetNext::OakIntro)
+        .expect("open time set");
+    assert_eq!(runtime_shell.h_in_menu, 1);
+
+    let time_set = runtime_shell
+        .pending_time_set
+        .take()
+        .expect("time set pending");
+    complete_visible_time_set_screen(&mut runtime_shell, time_set).expect("complete time set");
+
+    assert_eq!(runtime_shell.h_in_menu, 7);
+    assert!(runtime_shell.pending_oak_intro.is_some());
+}
+
+#[test]
+fn live_clock_input_keeps_yes_no_directions_and_routes_b_cancel() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    open_visible_time_set_screen(&mut runtime_shell, VisibleTimeSetNext::OakIntro)
+        .expect("open time set");
+    {
+        let time_set = runtime_shell
+            .pending_time_set
+            .as_mut()
+            .expect("time set pending");
+        time_set.phase = VisibleTimeSetPhase::HourConfirm;
+        time_set.yes_no_index = 0;
+    }
+
+    let mut keys = ButtonInput::<KeyCode>::default();
+    keys.press(KeyCode::ArrowDown);
+    apply_visible_time_set_input_keys(&keys, &mut runtime_shell, 1);
+    assert_eq!(
+        runtime_shell
+            .pending_time_set
+            .as_ref()
+            .expect("time set")
+            .yes_no_index,
+        1
+    );
+
+    keys.release(KeyCode::ArrowDown);
+    keys.clear_just_pressed(KeyCode::ArrowDown);
+    keys.press(KeyCode::KeyX);
+    apply_visible_time_set_input_keys(&keys, &mut runtime_shell, 1);
+    let time_set = runtime_shell.pending_time_set.as_ref().expect("time set");
+    assert_eq!(time_set.phase, VisibleTimeSetPhase::SetHour);
+    assert_eq!(time_set.input_delay_frames, time_set.selection_delay_frames);
+}
+
+#[test]
+fn time_set_selector_delay_and_b_button_match_source_loops() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    open_visible_time_set_screen(&mut runtime_shell, VisibleTimeSetNext::OakIntro)
+        .expect("open time set");
+    {
+        let time_set = runtime_shell.pending_time_set.as_mut().expect("time set pending");
+        time_set.phase = VisibleTimeSetPhase::SetHour;
+        time_set.input_delay_frames = time_set.selection_delay_frames;
+    }
+
+    move_visible_time_set_direction(&mut runtime_shell, VisibleTimeSetDirection::Up)
+        .expect("input ignored during DelayFrames");
+    press_visible_time_set_a_button(&mut runtime_shell).expect("A ignored during DelayFrames");
+    press_visible_time_set_b_button(&mut runtime_shell).expect("B ignored by SetHour");
+    let time_set = runtime_shell.pending_time_set.as_ref().expect("time set pending");
+    assert_eq!(time_set.phase, VisibleTimeSetPhase::SetHour);
+    assert_eq!(time_set.hour, 10);
+    assert_eq!(time_set.selection_delay_frames, 10);
+
+    for _ in 0..10 {
+        tick_visible_time_set_screen(&mut runtime_shell).expect("tick source delay");
+    }
+    press_visible_time_set_b_button(&mut runtime_shell).expect("B ignored after delay");
+    assert_eq!(
+        runtime_shell.pending_time_set.as_ref().expect("time set pending").phase,
+        VisibleTimeSetPhase::SetHour
+    );
+    move_visible_time_set_direction(&mut runtime_shell, VisibleTimeSetDirection::Up)
+        .expect("Up accepted after DelayFrames");
+    assert_eq!(
+        runtime_shell.pending_time_set.as_ref().expect("time set pending").hour,
+        11
+    );
+}
+
+#[test]
+fn time_set_dialogue_and_reactions_execute_exported_text_commands() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    open_visible_time_set_screen(&mut runtime_shell, VisibleTimeSetNext::OakIntro)
+        .expect("open source-driven time set");
+    let time_set = runtime_shell.pending_time_set.as_ref().expect("time set pending");
+    assert_eq!(time_set.wake_pages.len(), 3);
+    assert_eq!(
+        time_set.wake_pages[0],
+        "………………………………\n………………………………"
+    );
+    assert_eq!(time_set.wake_pages[1], "Zzz… Hm? Wha…?\nYou woke me up!");
+    assert_eq!(time_set.wake_pages[2], "Will you check the\nclock for me?");
+    assert_eq!(time_set.hour_prompt, "What time is it?");
+    assert_eq!(time_set.minute_prompt, "How many minutes?");
+
+    let program = runtime_shell.runtime.title_presentation_program();
+    assert_eq!(
+        visible_time_set_reaction_pages(program, 10, 0).expect("10 AM response"),
+        ["DAY 10:00!\nI overslept!"]
+    );
+    assert_eq!(
+        visible_time_set_reaction_pages(program, 11, 5).expect("11 AM response"),
+        ["DAY 11:05!\nYikes! I over-", "Yikes! I over-\nslept!"]
+    );
+
+    let source = include_str!("../title_menu.rs");
+    assert!(!source.contains("Zzz... Hm? Wha... ?"));
+    assert!(!source.contains("No wonder it's so\\ndark!"));
+}
+
+#[test]
+fn time_set_startup_executes_init_clock_transfer_and_palette_timing() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    open_visible_time_set_screen(&mut runtime_shell, VisibleTimeSetNext::OakIntro)
+        .expect("open source-driven time set");
+    let time_set = runtime_shell.pending_time_set.as_ref().expect("time set pending");
+    assert_eq!(time_set.phase, VisibleTimeSetPhase::StartupDelay);
+    assert_eq!(time_set.startup_delay_frames, 8);
+    assert_eq!(time_set.startup_palette_steps, 4);
+    assert_eq!(time_set.startup_palette_step_frames, 8);
+    assert_eq!(time_set.startup_load_frames, 7);
+    assert!(runtime_shell.music_fade.as_ref().is_some_and(|fade| {
+        fade.target_music == "MUSIC_NONE" && fade.rate == 16 && !fade.fading_in
+    }));
+
+    for _ in 0..7 {
+        tick_visible_time_set_screen(&mut runtime_shell).expect("tick initial DelayFrames");
+    }
+    assert_eq!(
+        runtime_shell.pending_time_set.as_ref().expect("time set").phase,
+        VisibleTimeSetPhase::StartupDelay
+    );
+    tick_visible_time_set_screen(&mut runtime_shell).expect("enter first fade-out palette");
+    assert_eq!(
+        runtime_shell.pending_time_set.as_ref().expect("time set").phase,
+        VisibleTimeSetPhase::StartupFadeOut
+    );
+    for _ in 0..32 {
+        tick_visible_time_set_screen(&mut runtime_shell).expect("tick four fade-out palettes");
+    }
+    assert_eq!(
+        runtime_shell.pending_time_set.as_ref().expect("time set").phase,
+        VisibleTimeSetPhase::StartupLoad
+    );
+    for _ in 0..7 {
+        tick_visible_time_set_screen(&mut runtime_shell).expect("tick tile and BG transfers");
+    }
+    assert_eq!(
+        runtime_shell.pending_time_set.as_ref().expect("time set").phase,
+        VisibleTimeSetPhase::StartupFadeIn
+    );
+    for _ in 0..31 {
+        tick_visible_time_set_screen(&mut runtime_shell).expect("tick reveal palettes");
+    }
+    assert_eq!(
+        runtime_shell.pending_time_set.as_ref().expect("time set").phase,
+        VisibleTimeSetPhase::StartupFadeIn,
+        "OakTimeWokeUpText must not print before all 79 setup frames finish"
+    );
+    tick_visible_time_set_screen(&mut runtime_shell).expect("finish reveal palettes");
+    let time_set = runtime_shell.pending_time_set.as_ref().expect("time set");
+    assert_eq!(time_set.phase, VisibleTimeSetPhase::WakeDialogue);
+    assert_eq!(time_set.visible_chars, 0);
 }
 
 #[test]
@@ -479,12 +702,13 @@ fn oak_intro_renders_real_oak_wooper_and_player_portraits() {
 
     {
         let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        let program = runtime_shell.runtime.title_presentation_program().clone();
         let oak_intro = runtime_shell
             .pending_oak_intro
             .as_mut()
             .expect("Oak intro pending");
         oak_intro.scene_index = 1;
-        start_visible_oak_intro_scene(oak_intro);
+        start_visible_oak_intro_scene(oak_intro, &program).expect("start Wooper portrait");
     }
     app.update();
     {
@@ -508,12 +732,13 @@ fn oak_intro_renders_real_oak_wooper_and_player_portraits() {
             .shell
             .set_player_gender(PLAYER_GENDER_FEMALE)
             .expect("set Kris gender");
+        let program = runtime_shell.runtime.title_presentation_program().clone();
         let oak_intro = runtime_shell
             .pending_oak_intro
             .as_mut()
             .expect("Oak intro pending");
         oak_intro.scene_index = 3;
-        start_visible_oak_intro_scene(oak_intro);
+        start_visible_oak_intro_scene(oak_intro, &program).expect("start player portrait");
     }
     app.update();
     {
@@ -557,8 +782,124 @@ fn new_game_name_choice_does_not_render_the_uninitialized_bedroom() {
 }
 
 #[test]
+fn new_game_name_menu_and_preset_picture_motion_execute_exported_source() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    open_visible_name_choice(&mut runtime_shell).expect("open source player-name menu");
+    let choice = runtime_shell.pending_name_choice.as_ref().expect("name choice");
+    assert_eq!(choice.options, ["NEW NAME", "CHRIS", "MAT", "ALLAN", "JON"]);
+    assert_eq!(choice.selected, 0);
+    assert_eq!(choice.player_phase, Some(VisiblePlayerNameChoicePhase::SlideRight));
+    let menu = choice.player_menu.as_ref().expect("source name menu");
+    assert_eq!((menu.left, menu.top, menu.right, menu.bottom), (0, 0, 10, 11));
+    assert_eq!(menu.title, "NAME");
+    assert_eq!(menu.title_indent, 2);
+    assert_eq!(menu.motion_steps, 8);
+    assert_eq!(menu.motion_frames_per_step, 5);
+    assert_eq!(menu.custom_fade_out_frames, 24);
+    assert_eq!((menu.custom_fade_out_steps, menu.custom_fade_out_frames_per_step), (3, 8));
+    assert_eq!(menu.custom_bg_map_wait_frames, 4);
+    assert_eq!(menu.custom_fade_in_frames, 24);
+    assert_eq!((menu.custom_fade_in_steps, menu.custom_fade_in_frames_per_step), (3, 8));
+    assert_eq!(
+        (
+            menu.custom_player_x,
+            menu.custom_player_y,
+            menu.custom_player_width,
+            menu.custom_player_height,
+        ),
+        (6, 4, 7, 7)
+    );
+    press_visible_b_button(&mut runtime_shell).expect("STATICMENU_DISABLE_B");
+    assert!(runtime_shell.pending_name_choice.is_some());
+
+    move_visible_name_choice(&mut runtime_shell, 1).expect("ignore movement during slide");
+    assert_eq!(runtime_shell.pending_name_choice.as_ref().expect("choice").selected, 0);
+    for _ in 0..39 {
+        tick_visible_player_name_choice(&mut runtime_shell).expect("tick MovePlayerPicRight");
+    }
+    assert_eq!(
+        runtime_shell.pending_name_choice.as_ref().expect("choice").player_phase,
+        Some(VisiblePlayerNameChoicePhase::SlideRight)
+    );
+    tick_visible_player_name_choice(&mut runtime_shell).expect("finish MovePlayerPicRight");
+    move_visible_name_choice(&mut runtime_shell, 1).expect("choose CHRIS");
+    confirm_visible_name_choice(&mut runtime_shell).expect("accept CHRIS");
+    assert_eq!(
+        runtime_shell.pending_name_choice.as_ref().expect("return slide").player_phase,
+        Some(VisiblePlayerNameChoicePhase::SlideLeft)
+    );
+    assert!(runtime_shell.shell.snapshot().expect("snapshot").trainer.player_name.is_empty());
+    for _ in 0..39 {
+        tick_visible_player_name_choice(&mut runtime_shell).expect("tick MovePlayerPicLeft");
+    }
+    assert!(runtime_shell.shell.snapshot().expect("snapshot").trainer.player_name.is_empty());
+    tick_visible_player_name_choice(&mut runtime_shell).expect("finish MovePlayerPicLeft");
+    assert_eq!(runtime_shell.shell.snapshot().expect("snapshot").trainer.player_name, "CHRIS");
+    assert!(runtime_shell.pending_name_choice.is_none());
+    assert!(runtime_shell.pending_oak_intro.is_some());
+}
+
+#[test]
+fn custom_player_name_returns_through_exact_source_fades_and_bg_wait() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    open_visible_name_choice(&mut runtime_shell).expect("open source player-name menu");
+    for _ in 0..40 {
+        tick_visible_player_name_choice(&mut runtime_shell).expect("finish MovePlayerPicRight");
+    }
+    confirm_visible_name_choice(&mut runtime_shell).expect("choose NEW NAME");
+    let input = runtime_shell.pending_name_input.as_mut().expect("NamingScreen");
+    input.value = "GOLD".to_string();
+    confirm_visible_player_name_input(&mut runtime_shell).expect("finish NamingScreen");
+    assert!(runtime_shell.pending_name_input.is_none());
+    assert_eq!(
+        runtime_shell.pending_name_choice.as_ref().expect("custom return").player_phase,
+        Some(VisiblePlayerNameChoicePhase::CustomFadeOut)
+    );
+    for _ in 0..23 {
+        tick_visible_player_name_choice(&mut runtime_shell).expect("RotateThreePalettesRight");
+    }
+    assert_eq!(
+        runtime_shell.pending_name_choice.as_ref().expect("custom return").player_phase,
+        Some(VisiblePlayerNameChoicePhase::CustomFadeOut)
+    );
+    tick_visible_player_name_choice(&mut runtime_shell).expect("finish fade out");
+    assert_eq!(
+        runtime_shell.pending_name_choice.as_ref().expect("custom return").player_phase,
+        Some(VisiblePlayerNameChoicePhase::CustomBgMapWait)
+    );
+    for _ in 0..3 {
+        tick_visible_player_name_choice(&mut runtime_shell).expect("WaitBGMap");
+    }
+    assert_eq!(
+        runtime_shell.pending_name_choice.as_ref().expect("custom return").player_phase,
+        Some(VisiblePlayerNameChoicePhase::CustomBgMapWait)
+    );
+    tick_visible_player_name_choice(&mut runtime_shell).expect("finish WaitBGMap");
+    assert_eq!(
+        runtime_shell.pending_name_choice.as_ref().expect("custom return").player_phase,
+        Some(VisiblePlayerNameChoicePhase::CustomFadeIn)
+    );
+    for _ in 0..23 {
+        tick_visible_player_name_choice(&mut runtime_shell).expect("RotateThreePalettesLeft");
+    }
+    assert!(runtime_shell.shell.snapshot().expect("snapshot").trainer.player_name.is_empty());
+    tick_visible_player_name_choice(&mut runtime_shell).expect("finish fade in");
+    assert_eq!(runtime_shell.shell.snapshot().expect("snapshot").trainer.player_name, "GOLD");
+    assert!(runtime_shell.pending_name_choice.is_none());
+    assert!(runtime_shell.pending_oak_intro.is_some());
+}
+
+#[test]
 fn oak_intro_fade_phases_gate_text_and_clear_sprite_on_fade_out() {
     let mut runtime_shell = core_modular_title_shell_for_test();
+    let oak_text_pages = visible_oak_text_groups(
+        runtime_shell.runtime.title_presentation_program(),
+        0,
+        "PLAYER",
+    )
+    .expect("OakText1 pages")[0]
+        .1
+        .clone();
     runtime_shell.intro_screen = None;
     runtime_shell.title_menu = None;
     open_visible_oak_intro_sequence(&mut runtime_shell).expect("open Oak intro");
@@ -570,10 +911,11 @@ fn oak_intro_fade_phases_gate_text_and_clear_sprite_on_fade_out() {
         assert_eq!(oak_intro.scene_state, "oak_intro_1");
         assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::FadeIn);
         assert_eq!(oak_intro.fade_alpha, 255);
+        assert_eq!(oak_intro.fade_total_frames, 6 * 10);
         assert!(oak_intro.current_text.is_empty());
     }
 
-    for _ in 0..(4 * VISIBLE_OAK_INTRO_FADE_FRAME_DELAY) {
+    for _ in 0..(6 * 10) {
         tick_visible_oak_intro(&mut runtime_shell).expect("tick Oak fade-in");
     }
     {
@@ -583,10 +925,10 @@ fn oak_intro_fade_phases_gate_text_and_clear_sprite_on_fade_out() {
             .expect("Oak intro pending after fade-in");
         assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::Text);
         assert_eq!(oak_intro.fade_alpha, 0);
-        assert_eq!(oak_intro.current_text, VISIBLE_OAK_INTRO_SCENES[0].2[0]);
+        assert_eq!(oak_intro.current_text, oak_text_pages[0]);
     }
 
-    for _ in 0..VISIBLE_OAK_INTRO_SCENES[0].2.len() {
+    for _ in 0..oak_text_pages.len() {
         finish_current_oak_intro_page_for_test(&mut runtime_shell);
     }
     {
@@ -597,9 +939,10 @@ fn oak_intro_fade_phases_gate_text_and_clear_sprite_on_fade_out() {
         assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::FadeOut);
         assert_eq!(oak_intro.current_sprite.as_deref(), Some("OAK"));
         assert_eq!(oak_intro.fade_alpha, 0);
+        assert_eq!(oak_intro.fade_total_frames, 3 * 8);
     }
 
-    for _ in 0..(3 * VISIBLE_OAK_INTRO_FADE_FRAME_DELAY) {
+    for _ in 0..(3 * 8) {
         tick_visible_oak_intro(&mut runtime_shell).expect("tick Oak fade-out");
     }
     {
@@ -615,18 +958,91 @@ fn oak_intro_fade_phases_gate_text_and_clear_sprite_on_fade_out() {
 }
 
 #[test]
+fn oak_intro_portrait_timing_is_read_from_the_exported_operation() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let mut program = runtime_shell.runtime.title_presentation_program().clone();
+    let portrait = program
+        .subprograms
+        .iter_mut()
+        .find(|subprogram| subprogram.id == "oak_speech")
+        .and_then(|subprogram| subprogram.phases.iter_mut().find(|phase| phase.id == "speech"))
+        .and_then(|phase| {
+            phase
+                .operations
+                .iter_mut()
+                .find(|operation| operation.op == "present_intro_portrait")
+        })
+        .expect("first OakSpeech portrait operation");
+    portrait
+        .fields
+        .get_mut("fade")
+        .expect("Oak portrait fade metadata")["frames_per_word"] = serde_json::json!(3);
+
+    let mut oak_intro = empty_visible_oak_intro_sequence(VisibleOakIntroMode::Intro);
+    start_visible_oak_intro_scene(&mut oak_intro, &program).expect("start mutated Oak portrait");
+
+    assert_eq!(oak_intro.fade_total_frames, 6 * 3);
+}
+
+#[test]
+fn oak_intro_text_pages_execute_the_exported_source_commands() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let oak_text2 = visible_oak_text_groups(
+        runtime_shell.runtime.title_presentation_program(),
+        1,
+        "PLAYER",
+    )
+    .expect("Wooper text command groups");
+    assert_eq!(
+        oak_text2[0].1,
+        [
+            "This world is in-\nhabited by crea-",
+            "habited by crea-\ntures that we call",
+            "tures that we call\nPOKéMON.",
+        ]
+    );
+
+    open_visible_oak_final_sequence(&mut runtime_shell, "CHRIS")
+        .expect("open source-driven OakText7");
+    let oak_intro = runtime_shell
+        .pending_oak_intro
+        .as_ref()
+        .expect("OakText7 pending");
+    let pages = std::iter::once(oak_intro.current_text.as_str())
+        .chain(oak_intro.text_queue.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(pages.len(), 8);
+    assert_eq!(pages[0], "CHRIS, are you\nready?");
+    assert_eq!(pages[7], "I'll be seeing you\nlater!");
+    assert!(pages.iter().all(|page| !page.contains("<PLAYER>")));
+
+    let source = include_str!("../title_menu.rs");
+    assert!(!source.contains("Hello! Sorry to"));
+    assert!(!source.contains("Your very own\\n#MON story"));
+}
+
+#[test]
 fn oak_intro_queues_wooper_cry_from_pack_metadata() {
     let mut runtime_shell = core_modular_title_shell_for_test();
+    let text_groups = visible_oak_text_groups(
+        runtime_shell.runtime.title_presentation_program(),
+        1,
+        "PLAYER",
+    )
+    .expect("Wooper OakSpeech text groups");
+    let oak_text2_pages = text_groups[0].1.clone();
+    let oak_text4_pages = text_groups[2].1.clone();
     runtime_shell.intro_screen = None;
     runtime_shell.title_menu = None;
     open_visible_oak_intro_sequence(&mut runtime_shell).expect("open Oak intro");
     {
+        let program = runtime_shell.runtime.title_presentation_program().clone();
         let oak_intro = runtime_shell
             .pending_oak_intro
             .as_mut()
             .expect("Oak intro pending");
         oak_intro.scene_index = 1;
-        start_visible_oak_intro_scene(oak_intro);
+        start_visible_oak_intro_scene(oak_intro, &program).expect("start Wooper portrait");
     }
 
     {
@@ -635,7 +1051,10 @@ fn oak_intro_queues_wooper_cry_from_pack_metadata() {
             .as_ref()
             .expect("Wooper intro pending");
         assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::WipeIn);
-        assert_eq!(oak_intro.wipe_window_x, 0);
+        assert_eq!(oak_intro.wipe_window_x, 0x77);
+        assert_eq!(oak_intro.wipe_delta, -8);
+        assert_eq!(oak_intro.wipe_stop_before, -1);
+        assert!(oak_intro.wipe_initial_wait);
         assert!(oak_intro.current_text.is_empty());
     }
     assert!(
@@ -646,7 +1065,7 @@ fn oak_intro_queues_wooper_cry_from_pack_metadata() {
         "Wooper cry must not be queued before the wipe and first text group"
     );
 
-    for _ in 0..=VISIBLE_OAK_WIPE_END_X / VISIBLE_OAK_WIPE_STEP_PIXELS {
+    for _ in 0..16 {
         tick_visible_oak_intro(&mut runtime_shell).expect("tick Wooper wipe");
     }
     {
@@ -656,17 +1075,18 @@ fn oak_intro_queues_wooper_cry_from_pack_metadata() {
             .expect("Wooper intro pending after wipe");
         assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::TextOne);
         assert!(!oak_intro.wipe_active);
-        assert_eq!(oak_intro.current_text, VISIBLE_OAK_INTRO_SCENES[1].2[0]);
+        assert_eq!(oak_intro.wipe_window_x, 0x07);
+        assert_eq!(oak_intro.current_text, oak_text2_pages[0]);
     }
 
-    finish_current_oak_intro_page_for_test(&mut runtime_shell);
-    {
+    for expected in oak_text2_pages.iter().skip(1) {
+        finish_current_oak_intro_page_for_test(&mut runtime_shell);
         let oak_intro = runtime_shell
             .pending_oak_intro
             .as_ref()
-            .expect("Wooper second page pending");
+            .expect("Wooper continuation page pending");
         assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::TextOne);
-        assert_eq!(oak_intro.current_text, VISIBLE_OAK_INTRO_SCENES[1].2[1]);
+        assert_eq!(&oak_intro.current_text, expected);
     }
     press_visible_oak_intro_a_button(&mut runtime_shell)
         .expect("revealing the final OakText2 page must enter the cry without another prompt");
@@ -677,7 +1097,10 @@ fn oak_intro_queues_wooper_cry_from_pack_metadata() {
             .expect("Wooper cry phase pending");
         assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::Cry);
         assert!(!oak_intro.wooper_cry_queued);
-        assert_eq!(oak_intro.current_text, "#MON.");
+        assert_eq!(
+            &oak_intro.current_text,
+            oak_text2_pages.last().expect("final OakText2 page")
+        );
         assert!(!oak_intro.waiting_for_input);
     }
     assert!(
@@ -710,10 +1133,38 @@ fn oak_intro_queues_wooper_cry_from_pack_metadata() {
         let oak_intro = runtime_shell
             .pending_oak_intro
             .as_ref()
+            .expect("Wooper WaitSFX pending");
+        assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::Cry);
+        assert!(oak_intro.wooper_cry_queued);
+        assert_eq!(
+            &oak_intro.current_text,
+            oak_text2_pages.last().expect("final OakText2 page")
+        );
+        assert!(!oak_intro.waiting_for_input);
+    }
+
+    runtime_shell
+        .pending_audio
+        .retain(|command| !matches!(command.kind, ModpackAudioKind::Cry));
+    runtime_shell.active_transient_kind = Some(ModpackAudioKind::Cry);
+    tick_visible_oak_intro(&mut runtime_shell).expect("tick active Wooper cry");
+    assert_eq!(
+        runtime_shell
+            .pending_oak_intro
+            .as_ref()
+            .expect("active Wooper WaitSFX")
+            .scene_phase,
+        VisibleOakIntroPhase::Cry
+    );
+
+    runtime_shell.active_transient_kind = None;
+    tick_visible_oak_intro(&mut runtime_shell).expect("finish Wooper WaitSFX");
+    {
+        let oak_intro = runtime_shell
+            .pending_oak_intro
+            .as_ref()
             .expect("Wooper text-two pending");
         assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::TextTwo);
-        assert!(oak_intro.wooper_cry_queued);
-        assert_eq!(oak_intro.current_text, "#MON.");
         assert!(oak_intro.waiting_for_input);
     }
 
@@ -724,7 +1175,7 @@ fn oak_intro_queues_wooper_cry_from_pack_metadata() {
         .as_ref()
         .expect("Oak intro must remain open after the Wooper prompt");
     assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::TextTwo);
-    assert_eq!(oak_intro.current_text, VISIBLE_OAK_INTRO_SCENES[1].2[2]);
+    assert_eq!(oak_intro.current_text, oak_text4_pages[0]);
 }
 
 #[test]
@@ -1213,7 +1664,7 @@ fn title_new_game_opens_gender_then_oak_clock_intro_before_name_input() {
             .pending_time_set
             .as_ref()
             .expect("confirmed gender should open Oak intro time set");
-        assert_eq!(time_set.phase, VisibleTimeSetPhase::WakeDialogue);
+        assert_eq!(time_set.phase, VisibleTimeSetPhase::StartupDelay);
         assert_eq!(time_set.next, VisibleTimeSetNext::OakIntro);
         assert_eq!(time_set.wake_index, 0);
         assert_eq!(time_set.hour, 10);
@@ -1221,6 +1672,17 @@ fn title_new_game_opens_gender_then_oak_clock_intro_before_name_input() {
         assert!(runtime_shell.pending_oak_intro.is_none());
         assert!(runtime_shell.pending_name_input.is_none());
         assert_eq!(runtime_shell.last_error, None);
+    }
+
+    {
+        let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        for _ in 0..79 {
+            tick_visible_time_set_screen(&mut runtime_shell).expect("run InitClock startup");
+        }
+        assert_eq!(
+            runtime_shell.pending_time_set.as_ref().expect("time set").phase,
+            VisibleTimeSetPhase::WakeDialogue
+        );
     }
 
     complete_time_set_for_test(&mut app);

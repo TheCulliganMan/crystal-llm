@@ -2542,15 +2542,6 @@ fn validate_manifest_item(item: &Item) -> Result<()> {
                 "item '{}' has invalid battle_stat_drop_guard false",
                 item.script_name
             ),
-            ItemPayloadIssue::MissingBattleStatDropGuardTurns => anyhow::bail!(
-                "item '{}' must declare explicit battle_stat_drop_guard_turns",
-                item.script_name
-            ),
-            ItemPayloadIssue::InvalidBattleStatDropGuardTurns { turns } => anyhow::bail!(
-                "item '{}' has invalid battle_stat_drop_guard_turns {}",
-                item.script_name,
-                turns
-            ),
             ItemPayloadIssue::InvalidBattleEscapeMode { mode } => anyhow::bail!(
                 "item '{}' has invalid battle_escape_mode '{}'",
                 item.script_name,
@@ -2559,6 +2550,11 @@ fn validate_manifest_item(item: &Item) -> Result<()> {
             ItemPayloadIssue::InvalidBattleCaptureBall => anyhow::bail!(
                 "item '{}' has invalid battle_capture_ball false",
                 item.script_name
+            ),
+            ItemPayloadIssue::InvalidEscapeRopeMode { mode } => anyhow::bail!(
+                "item '{}' has invalid escape_rope_mode '{}'",
+                item.script_name,
+                mode
             ),
             ItemPayloadIssue::InvalidRepelSteps { steps } => anyhow::bail!(
                 "item '{}' has invalid repel_steps {}",

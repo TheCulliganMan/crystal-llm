@@ -1369,7 +1369,7 @@ fn format_progress_details(snapshot: &RuntimeShellSnapshot, lines: &mut Vec<Stri
         snapshot.progression.link_draws,
         snapshot.progression.repel_steps_remaining,
         snapshot.progression.active_repel_item,
-        snapshot.progression.last_spawn_identifier
+        snapshot.progression.last_spawn_map_constant
     ));
     lines.push(format!("time={:?}", snapshot.progression.time));
     lines.push(format!(

@@ -2,17 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::battle::abilities::{
-    ability_accuracy_ratio, ability_blocks_attraction, ability_blocks_confusion,
-    ability_blocks_critical_hit, ability_blocks_flinching, ability_blocks_stat_drop,
-    ability_blocks_status, ability_traps_opponent, absorbs_move_type,
-    blocks_opposing_secondary_effects, has_ground_immunity, has_wonder_guard, is_sound_move,
-    move_makes_contact, move_targets_opponent, secondary_effect_chance, weather_speed_multiplier,
-};
 use crate::battle::capture::CaptureOutcome;
 use crate::battle::damage::{
     DamageCalculationError, DamageContext, DamageResult, TypeCategories, TypeEffectivenessTable,
-    TypeMultiplier, Weather, WeatherModifiers, apply_metal_powder_damage_stats, calculate_damage,
+    TypeMultiplier, Weather, WeatherModifiers, apply_held_type_boost_to_quotient,
+    apply_metal_powder_damage_stats, calculate_damage,
     calculate_type_effectiveness_multiplier_with_foresight, is_physical_type,
     truncate_damage_stats,
 };
@@ -22,6 +16,7 @@ use crate::battle::start::{
     update_active_battle_enemy,
 };
 use crate::battle::stats::{BattleStatMultiplierTables, accuracy_stage_multiplier, apply_stage};
+use crate::models::item::is_mail_item_id;
 use crate::models::pokemon::default_stat_boosts;
 use crate::models::{Dv, Item, LearnedMove, Move, Pokemon, PokemonSpecies, PokemonType, Stat};
 use crate::random::BattleRandomSource;
@@ -31,7 +26,8 @@ use crate::systems::battle_escape::{
     attempt_wild_battle_escape_with_loaded_speeds,
 };
 use crate::systems::battle_items::{
-    BattleItemOutcome, apply_active_battle_item_effect, apply_battle_pp_item_effect,
+    BattleItemOutcome, BattleItemStageChange, apply_active_battle_item_effect,
+    apply_battle_pp_item_effect, battle_stat_boost_stat, unchanged_battle_item_outcome,
 };
 use crate::world::encounters::TimeOfDay;
 
@@ -125,6 +121,36 @@ pub struct BattleFutureSightState {
     pub damage: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BattleLoadedStats {
+    pub attack: u16,
+    pub defense: u16,
+    pub speed: u16,
+    pub special_attack: u16,
+    pub special_defense: u16,
+}
+
+impl BattleLoadedStats {
+    fn from_raw(pokemon: &Pokemon) -> Self {
+        Self {
+            attack: pokemon.attack,
+            defense: pokemon.defense,
+            speed: pokemon.speed,
+            special_attack: pokemon.special_attack,
+            special_defense: pokemon.special_defense,
+        }
+    }
+
+    fn apply_status(&mut self, pokemon: &Pokemon) {
+        match pokemon.status.as_deref() {
+            Some("BURN") => self.attack = (self.attack / 2).max(1),
+            Some("PARALYSIS") => self.speed = (self.speed / 4).max(1),
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BattleTransformState {
@@ -158,6 +184,8 @@ pub enum BattleScreen {
 pub struct BattleCombatState {
     pub player: Pokemon,
     pub enemy: Pokemon,
+    pub player_loaded_stats: BattleLoadedStats,
+    pub enemy_loaded_stats: BattleLoadedStats,
     pub player_party: Vec<Pokemon>,
     pub enemy_party: Vec<Pokemon>,
     pub player_party_index: usize,
@@ -237,9 +265,9 @@ pub struct BattleCombatState {
     pub sleep_turn_mask: u8,
     #[serde(default)]
     pub enemy_effect_ai_random_fail: bool,
-    /// The live `wCriticalHit` byte. AI damage scoring reads this before the
-    /// next move's critical command overwrites it, so it intentionally
-    /// survives the turn boundary.
+    /// The live `wCriticalHit` byte. FailureText and CriticalText normally
+    /// clear it, but scripts that skip those commands can carry it across the
+    /// turn boundary into the next AI damage calculation.
     #[serde(default)]
     pub critical_hit_register: u8,
     /// `AI_HealStatus` clears the status byte without recalculating the
@@ -248,6 +276,9 @@ pub struct BattleCombatState {
     pub enemy_burn_attack_penalty_active: bool,
     #[serde(default)]
     pub enemy_paralysis_speed_penalty_active: bool,
+    /// Whether the player's current loaded Attack/Speed words most recently
+    /// applied BadgeStatBoosts before the Burn/Paralysis mutation.
+    pub player_badge_before_status: bool,
     pub player_destiny_bond_active: bool,
     pub enemy_destiny_bond_active: bool,
     pub player_encore: Option<BattleEncoreState>,
@@ -290,29 +321,12 @@ pub struct BattleCombatState {
     pub enemy_transform: Option<BattleTransformState>,
     pub player_type_override: Option<BattleTypeOverride>,
     pub enemy_type_override: Option<BattleTypeOverride>,
-    #[serde(default)]
-    pub player_flash_fire_active: bool,
-    #[serde(default)]
-    pub enemy_flash_fire_active: bool,
-    #[serde(default)]
-    pub player_truant_loafing: bool,
-    #[serde(default)]
-    pub enemy_truant_loafing: bool,
-    #[serde(default)]
-    pub player_active_turns: u8,
-    #[serde(default)]
-    pub enemy_active_turns: u8,
-    /// Trace changes the active BattlePokemon ability only. Keep the party
-    /// species' real ability here so switching and save commits never persist
-    /// the copied ability.
-    #[serde(default)]
-    pub player_trace_original_ability: Option<String>,
-    #[serde(default)]
-    pub enemy_trace_original_ability: Option<String>,
-    #[serde(default)]
-    pub abilities_initialized: bool,
     pub weather_turns: u8,
     pub turn: u32,
+    /// Crystal's sticky wAmuletCoin battle byte. CheckAmuletCoin sets it when
+    /// a player battler holding any HELD_AMULET_COIN item is sent out.
+    #[serde(default)]
+    pub amulet_coin_active: bool,
     /// One-shot trainer consumables already used in this battle. This belongs
     /// to the active combat record rather than script variables: it is battle
     /// state, must survive a native save/reload, and must disappear exactly
@@ -335,9 +349,15 @@ impl BattleCombatState {
         let enemy_paralysis_speed_penalty_active = enemy.status.as_deref() == Some("PARALYSIS");
         let player_party = vec![player.clone()];
         let enemy_party = vec![enemy.clone()];
+        let mut player_loaded_stats = BattleLoadedStats::from_raw(&player);
+        player_loaded_stats.apply_status(&player);
+        let mut enemy_loaded_stats = BattleLoadedStats::from_raw(&enemy);
+        enemy_loaded_stats.apply_status(&enemy);
         Self {
             player,
             enemy,
+            player_loaded_stats,
+            enemy_loaded_stats,
             player_party,
             enemy_party,
             player_party_index: 0,
@@ -398,6 +418,7 @@ impl BattleCombatState {
             critical_hit_register: 0,
             enemy_burn_attack_penalty_active,
             enemy_paralysis_speed_penalty_active,
+            player_badge_before_status: false,
             player_destiny_bond_active: false,
             enemy_destiny_bond_active: false,
             player_encore: None,
@@ -438,17 +459,9 @@ impl BattleCombatState {
             enemy_transform: None,
             player_type_override: None,
             enemy_type_override: None,
-            player_flash_fire_active: false,
-            enemy_flash_fire_active: false,
-            player_truant_loafing: false,
-            enemy_truant_loafing: false,
-            player_active_turns: 0,
-            enemy_active_turns: 0,
-            player_trace_original_ability: None,
-            enemy_trace_original_ability: None,
-            abilities_initialized: false,
             weather_turns: 0,
             turn: 0,
+            amulet_coin_active: false,
             trainer_items_used: BTreeSet::new(),
             obedience_trainer_id: None,
             obedience_badges: [false; 8],
@@ -490,17 +503,38 @@ impl BattleCombatState {
     pub fn with_obedience(mut self, trainer_id: u16, johto_badges: [bool; 8]) -> Self {
         self.obedience_trainer_id = Some(trainer_id);
         self.obedience_badges = johto_badges;
+        self.reload_initial_player_loaded_stats();
         self
     }
 
     pub fn with_kanto_badges(mut self, kanto_badges: [bool; 8]) -> Self {
         self.kanto_badges = kanto_badges;
+        self.reload_initial_player_loaded_stats();
         self
     }
 
     pub fn with_badge_boosts_enabled(mut self, enabled: bool) -> Self {
         self.badge_boosts_enabled = enabled;
+        self.reload_initial_player_loaded_stats();
         self
+    }
+
+    fn reload_initial_player_loaded_stats(&mut self) {
+        let mut stats = BattleLoadedStats::from_raw(&self.player);
+        stats.apply_status(&self.player);
+        for stat in [
+            Stat::Attack,
+            Stat::Defense,
+            Stat::Speed,
+            Stat::SpecialAttack,
+            Stat::SpecialDefense,
+        ] {
+            if badge_boost_active(self, BattleSide::Player, stat) {
+                let value = loaded_stat_mut(&mut stats, stat);
+                *value = value.saturating_add(*value / 8).min(999);
+            }
+        }
+        self.player_loaded_stats = stats;
     }
 
     pub fn with_link_context(
@@ -998,6 +1032,15 @@ pub enum BattleTurnError {
         side: BattleSide,
         item_id: String,
     },
+    BattleItemTargetNotSelectable {
+        side: BattleSide,
+        item_id: String,
+        party_index: usize,
+    },
+    BattleItemRequiresPartyTarget {
+        side: BattleSide,
+        item_id: String,
+    },
     BattleItem {
         side: BattleSide,
         item_id: String,
@@ -1081,19 +1124,6 @@ pub enum BattleEvent {
     MoveUsed {
         side: BattleSide,
         move_name: String,
-    },
-    AbilityPreventedAction {
-        side: BattleSide,
-        ability: String,
-    },
-    PickupFound {
-        party_index: usize,
-        item_id: String,
-    },
-    HeldItemStatsRestored {
-        side: BattleSide,
-        item_id: String,
-        stats: Vec<Stat>,
     },
     Missed {
         side: BattleSide,
@@ -1270,6 +1300,14 @@ pub enum BattleEvent {
         side: BattleSide,
         item_id: String,
         held_effect: String,
+    },
+    HeldItemProtected {
+        side: BattleSide,
+        move_name: String,
+        target: BattleSide,
+        item_id: String,
+        held_effect: String,
+        effect: String,
     },
     StatusHealFailed {
         side: BattleSide,
@@ -1606,6 +1644,10 @@ pub enum BattleEvent {
         move_name: String,
         target: BattleSide,
     },
+    CurseStatsCapped {
+        side: BattleSide,
+        move_name: String,
+    },
     CurseDamage {
         side: BattleSide,
         source: BattleSide,
@@ -1681,6 +1723,11 @@ pub enum BattleEvent {
         move_name: String,
     },
     LockOnApplied {
+        side: BattleSide,
+        move_name: String,
+        target: BattleSide,
+    },
+    LockOnFailed {
         side: BattleSide,
         move_name: String,
         target: BattleSide,
@@ -1984,11 +2031,21 @@ pub enum BattleEvent {
         move_name: String,
         target: BattleSide,
     },
+    PsychUpFailed {
+        side: BattleSide,
+        move_name: String,
+        target: BattleSide,
+    },
     WeatherApplied {
         side: BattleSide,
         move_name: String,
         weather: Weather,
         turns: u8,
+    },
+    WeatherFailed {
+        side: BattleSide,
+        move_name: String,
+        weather: Weather,
     },
     WeatherContinues {
         weather: Weather,
@@ -2099,6 +2156,11 @@ pub enum BattleEvent {
         target_hp_before: u16,
         target_hp_after: u16,
     },
+    PainSplitFailed {
+        side: BattleSide,
+        move_name: String,
+        target: BattleSide,
+    },
     RecoilDamage {
         side: BattleSide,
         move_name: String,
@@ -2142,6 +2204,20 @@ pub enum BattleEvent {
     FocusEnergyFailed {
         side: BattleSide,
         move_name: String,
+    },
+    BellyDrumApplied {
+        side: BattleSide,
+        move_name: String,
+        hp_before: u16,
+        hp_after: u16,
+        attack_stage_before: i8,
+        attack_stage_after: i8,
+    },
+    BellyDrumFailed {
+        side: BattleSide,
+        move_name: String,
+        attack_stage_before: i8,
+        attack_stage_after: i8,
     },
     SleepTurn {
         side: BattleSide,
@@ -2243,9 +2319,6 @@ pub enum OhkoFailureReason {
         accuracy: u8,
         roll: u8,
     },
-    AbilityBlocked {
-        ability: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -2283,6 +2356,7 @@ pub fn active_battle_combat_state(
         combat.obedience_badges = state.badges.johto;
         combat.kanto_badges = state.badges.kanto;
         combat.badge_boosts_enabled = badge_boosts_enabled;
+        combat.amulet_coin_active = state.battle_amulet_coin_active;
         return Ok(combat);
     }
     let active_party_index = require_active_battle_party_index(state)?;
@@ -2356,6 +2430,7 @@ pub fn active_battle_combat_state(
     combat.sleep_turn_mask = sleep_turn_mask;
     combat.enemy_effect_ai_random_fail =
         state.link_session.link_mode == 0 && sleep_turn_mask != 0x03;
+    combat.amulet_coin_active = state.battle_amulet_coin_active;
     Ok(combat)
 }
 
@@ -2365,42 +2440,19 @@ pub fn commit_battle_turn_outcome(
     outcome: &BattleTurnOutcome,
 ) -> Result<(), BattleTurnCommitError> {
     let commit_party_index = outcome.state.player_party_index;
-    let mut persistent_player_party = outcome.state.player_party.clone();
-    let mut persistent_enemy_party = outcome.state.enemy_party.clone();
-    let mut persistent_player = outcome.state.player.clone();
-    let mut persistent_enemy = outcome.state.enemy.clone();
-    restore_traced_ability(
-        &mut persistent_player,
-        outcome.state.player_trace_original_ability.as_deref(),
-    );
-    restore_traced_ability(
-        &mut persistent_enemy,
-        outcome.state.enemy_trace_original_ability.as_deref(),
-    );
-    if let Some(slot) = persistent_player_party.get_mut(commit_party_index) {
-        restore_traced_ability(slot, outcome.state.player_trace_original_ability.as_deref());
-    }
-    if let Some(slot) = persistent_enemy_party.get_mut(outcome.state.enemy_party_index) {
-        restore_traced_ability(slot, outcome.state.enemy_trace_original_ability.as_deref());
-    }
+    let persistent_player_party = outcome.state.player_party.clone();
+    let persistent_enemy_party = outcome.state.enemy_party.clone();
+    let persistent_player = outcome.state.player.clone();
+    let persistent_enemy = outcome.state.enemy.clone();
     validate_player_party_snapshot(state, &persistent_player_party, commit_party_index)?;
     validate_enemy_party_snapshot(
         state,
         &persistent_enemy_party,
         outcome.state.enemy_party_index,
     )?;
+    let persistent_player_moves = persistent_player_party[commit_party_index].moves.clone();
+    let active_player_moves = persistent_player.moves.clone();
     commit_player_party_snapshot(state, &persistent_player_party)?;
-    let preserve_party_only_player_moves = outcome.events.iter().any(|event| {
-        matches!(
-            event,
-            BattleEvent::BattlePartyItemEffect {
-                side: BattleSide::Player,
-                party_index,
-                outcome,
-                ..
-            } if *party_index == commit_party_index && !outcome.pp_changes.is_empty()
-        )
-    });
     let slot = state
         .storage
         .party
@@ -2414,15 +2466,10 @@ pub fn commit_battle_turn_outcome(
             index: commit_party_index,
         });
     }
-    let party_only_moves = preserve_party_only_player_moves
-        .then(|| slot.as_ref().map(|pokemon| pokemon.moves.clone()))
-        .flatten();
     *slot = Some(persistent_player.clone());
-    if let Some(party_only_moves) = party_only_moves {
-        slot.as_mut()
-            .expect("validated active battle party slot became empty")
-            .moves = party_only_moves;
-    }
+    slot.as_mut()
+        .expect("validated active battle party slot became empty")
+        .moves = persistent_player_moves;
     let player_fainted_during_pursuit_switch = outcome.events.iter().any(|event| {
         matches!(
             event,
@@ -2470,23 +2517,17 @@ pub fn commit_battle_turn_outcome(
         apply_party_heal_bell_commit(state, commit_party_index);
     }
     state.sync_party_from_storage();
-    crate::battle::start::activate_amulet_coin_for_active_party(state);
+    state.battle_amulet_coin_active |= outcome.state.amulet_coin_active;
     commit_enemy_party_snapshot(state, &persistent_enemy_party)?;
     state.battle_active_enemy_party_index = Some(outcome.state.enemy_party_index);
     update_active_battle_enemy(state, persistent_enemy)?;
     commit_pay_day_money(state, outcome);
     let mut committed_combat = outcome.state.clone();
-    let mut committed_player = if preserve_party_only_player_moves {
-        persistent_player
-    } else {
-        state.storage.party.pokemon[commit_party_index]
-            .as_ref()
-            .expect("validated active battle party slot became empty")
-            .clone()
-    };
-    if outcome.state.player_trace_original_ability.is_some() {
-        committed_player.species.ability = outcome.state.player.species.ability.clone();
-    }
+    let mut committed_player = state.storage.party.pokemon[commit_party_index]
+        .as_ref()
+        .expect("validated active battle party slot became empty")
+        .clone();
+    committed_player.moves = active_player_moves;
     committed_combat.player = committed_player.clone();
     if let Some(party_slot) = committed_combat.player_party.get_mut(commit_party_index) {
         *party_slot = state.storage.party.pokemon[commit_party_index]
@@ -2503,12 +2544,6 @@ pub fn commit_battle_turn_outcome(
         deactivate_battle_after_draw(state);
     }
     Ok(())
-}
-
-fn restore_traced_ability(pokemon: &mut Pokemon, original_ability: Option<&str>) {
-    if let Some(original_ability) = original_ability {
-        pokemon.species.ability = original_ability.to_string();
-    }
 }
 
 fn apply_battle_faint_happiness(pokemon: &mut Pokemon, enemy_level: u8) {
@@ -2631,10 +2666,8 @@ fn apply_party_heal_bell_commit(state: &mut GameState, active_party_index: usize
         let Some(pokemon) = slot.as_mut() else {
             continue;
         };
-        if pokemon.species.ability != "SOUNDPROOF" {
-            pokemon.status = None;
-            pokemon.sleep_turns = 0;
-        }
+        pokemon.status = None;
+        pokemon.sleep_turns = 0;
     }
 }
 
@@ -2703,7 +2736,19 @@ pub fn resolve_battle_turn_with_items(
 pub type EnemyPostOrderActionSelector<'a> = dyn FnMut(&BattleCombatState, &mut dyn BattleRandomSource) -> Result<BattleAction, BattleTurnError>
     + 'a;
 
-pub type EnemyMoveSelector<'a> = dyn FnMut(&BattleCombatState, &mut dyn BattleRandomSource) -> Result<usize, BattleTurnError>
+/// Result of Crystal's pre-menu `AIChooseMove` pass. `wCurDamage` is shared
+/// scratch WRAM, so the last `AIDamageCalc` result deliberately survives into
+/// the action phase and participates in the documented Counter/item glitch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnemyMoveSelection {
+    pub slot: usize,
+    pub ai_damage_register: u16,
+}
+
+pub type EnemyMoveSelector<'a> = dyn FnMut(
+        &BattleCombatState,
+        &mut dyn BattleRandomSource,
+    ) -> Result<EnemyMoveSelection, BattleTurnError>
     + 'a;
 
 pub type PlayerBallActionExecutor<'a> = dyn FnMut(
@@ -2767,13 +2812,25 @@ pub fn resolve_wild_battle_turn_with_enemy_ai_actions(
 ) -> Result<BattleTurnOutcome, BattleTurnError> {
     if matches!(player_action, BattleAction::Run) {
         let mut start_events = Vec::new();
-        initialize_battle_abilities(&mut state, stat_multipliers, items, rng, &mut start_events)?;
         validate_active_battle_side_can_act(&state, BattleSide::Player, &player_action, true)?;
         clear_turn_last_damage(&mut state);
         for side in between_turn_side_order(state.serial_connection_status) {
-            apply_berserk_gene_start_of_turn(&mut state, side, items, &mut start_events)?;
+            apply_berserk_gene_start_of_turn(
+                &mut state,
+                side,
+                items,
+                stat_multipliers,
+                &mut start_events,
+            )?;
         }
-        let selected_move_slot = select_enemy_move(&state, rng)?;
+        let selection = select_enemy_move(&state, rng)?;
+        let selected_move_slot = selection.slot;
+        seed_counter_damage_from_ai_scratch(
+            &mut state,
+            selection.ai_damage_register,
+            moves,
+            type_categories,
+        )?;
         let selected_action = select_enemy_action(&state, rng)?;
         if !matches!(selected_action, BattleAction::Move { slot } if slot == selected_move_slot) {
             return Err(BattleTurnError::InvalidEnemyPostOrderAction {
@@ -2822,45 +2879,6 @@ pub fn resolve_wild_battle_turn_with_enemy_ai_actions(
         Some((select_enemy_move, select_enemy_action)),
         None,
     )
-}
-
-fn initialize_battle_abilities(
-    state: &mut BattleCombatState,
-    stat_multipliers: &BattleStatMultiplierTables,
-    items: &BTreeMap<String, Item>,
-    rng: &mut dyn BattleRandomSource,
-    events: &mut Vec<BattleEvent>,
-) -> Result<(), BattleTurnError> {
-    if state.abilities_initialized {
-        return Ok(());
-    }
-    let both_order_sensitive =
-        switch_in_ability_is_order_sensitive(active_ability(state, BattleSide::Player))
-            && switch_in_ability_is_order_sensitive(active_ability(state, BattleSide::Enemy));
-    let player_first = if both_order_sensitive {
-        let player_speed = battle_speed(state, BattleSide::Player, stat_multipliers)?;
-        let enemy_speed = battle_speed(state, BattleSide::Enemy, stat_multipliers)?;
-        if player_speed == enemy_speed {
-            rng.battle_random_byte() < 128
-        } else {
-            player_speed > enemy_speed
-        }
-    } else {
-        true
-    };
-    let ability_order = if player_first {
-        [BattleSide::Player, BattleSide::Enemy]
-    } else {
-        [BattleSide::Enemy, BattleSide::Player]
-    };
-    for side in ability_order {
-        apply_switch_in_ability(state, side)?;
-    }
-    for side in [BattleSide::Player, BattleSide::Enemy] {
-        apply_held_white_herb(state, side, items, events)?;
-    }
-    state.abilities_initialized = true;
-    Ok(())
 }
 
 pub fn resolve_battle_turn_with_ball_action_and_enemy_ai_actions(
@@ -2924,19 +2942,26 @@ fn resolve_battle_turn_with_items_for_context(
 ) -> Result<BattleTurnOutcome, BattleTurnError> {
     let mut events = Vec::new();
     let mut acted_before = Vec::new();
-    initialize_battle_abilities(&mut state, stat_multipliers, items, rng, &mut events)?;
     if enemy_ai_actions.is_some() {
         validate_active_battle_side_can_act(&state, BattleSide::Player, &input.player, false)?;
     } else {
         validate_active_battle_turn_input(&state, &input, false, false)?;
     }
+    activate_amulet_coin_for_player_battler(&mut state, items);
     clear_turn_last_damage(&mut state);
     for side in between_turn_side_order(state.serial_connection_status) {
-        apply_berserk_gene_start_of_turn(&mut state, side, items, &mut events)?;
+        apply_berserk_gene_start_of_turn(&mut state, side, items, stat_multipliers, &mut events)?;
     }
     let mut enemy_post_order_action = None;
     if let Some((select_enemy_move, select_enemy_action)) = enemy_ai_actions {
-        let selected_move_slot = select_enemy_move(&state, rng)?;
+        let selection = select_enemy_move(&state, rng)?;
+        let selected_move_slot = selection.slot;
+        seed_counter_damage_from_ai_scratch(
+            &mut state,
+            selection.ai_damage_register,
+            moves,
+            type_categories,
+        )?;
         input.enemy = BattleAction::Move {
             slot: selected_move_slot,
         };
@@ -2982,10 +3007,6 @@ fn resolve_battle_turn_with_items_for_context(
         validate_active_battle_side_can_act(&state, BattleSide::Enemy, &action, false)?;
         input.enemy = action;
     }
-    let player_action_used_move =
-        action_effectively_uses_move(&state, BattleSide::Player, &input.player);
-    let enemy_action_used_move =
-        action_effectively_uses_move(&state, BattleSide::Enemy, &input.enemy);
     let player_action_switched =
         action_effectively_switches(&state, BattleSide::Player, &input.player);
     let enemy_action_switched =
@@ -3035,10 +3056,6 @@ fn resolve_battle_turn_with_items_for_context(
                 &mut execute_ball,
                 &mut events,
             )?;
-            for holder in [BattleSide::Player, BattleSide::Enemy] {
-                apply_held_white_herb(&mut state, holder, items, &mut events)?;
-            }
-            advance_truant_after_move_attempt(&mut state, BattleSide::Player);
         }
         execute_action(
             &mut state,
@@ -3057,8 +3074,12 @@ fn resolve_battle_turn_with_items_for_context(
             &mut execute_ball,
             &mut events,
         )?;
-        for holder in [BattleSide::Player, BattleSide::Enemy] {
-            apply_held_white_herb(&mut state, holder, items, &mut events)?;
+        // AI items/switches execute before the move loop, but
+        // CheckOpponentWentFirst reads the already-decided wEnemyGoesFirst
+        // flag. Expose the enemy as prior only when that ordering flag says it
+        // went first, independent of the host's preexecution timing.
+        if order.first() == Some(&BattleSide::Enemy) {
+            acted_before.push(BattleSide::Enemy);
         }
     }
 
@@ -3110,16 +3131,11 @@ fn resolve_battle_turn_with_items_for_context(
             {
                 apply_post_action_residual_damage(&mut state, side, &mut events);
             }
-            advance_truant_after_move_attempt(&mut state, side);
             continue;
         }
         let action = match side {
             BattleSide::Player => &input.player,
             BattleSide::Enemy => &input.enemy,
-        };
-        let action_used_move = match side {
-            BattleSide::Player => player_action_used_move,
-            BattleSide::Enemy => enemy_action_used_move,
         };
         let action_switched = match side {
             BattleSide::Player => player_action_switched,
@@ -3147,12 +3163,6 @@ fn resolve_battle_turn_with_items_for_context(
                 &mut execute_ball,
                 &mut events,
             )?;
-            for holder in [BattleSide::Player, BattleSide::Enemy] {
-                apply_held_white_herb(&mut state, holder, items, &mut events)?;
-            }
-            if action_used_move {
-                advance_truant_after_move_attempt(&mut state, side);
-            }
         }
         if !(side == BattleSide::Enemy && enemy_trainer_action_preexecuted) {
             end_opponent_action_volatiles(&mut state, side);
@@ -3161,7 +3171,9 @@ fn resolve_battle_turn_with_items_for_context(
             && action_switched
             && acted_before.is_empty()
             && spikes_zero_hp_unchecked(&state, side);
-        acted_before.push(side);
+        if !acted_before.contains(&side) {
+            acted_before.push(side);
+        }
         if !defer_enemy_ai_switch_spikes_faint {
             check_unchecked_spikes_faint_after_action(&mut state, side, &mut events);
         }
@@ -3174,159 +3186,17 @@ fn resolve_battle_turn_with_items_for_context(
     }
 
     if battle_continues_after_actions(&state, &events) {
-        apply_end_turn_effects(&mut state, moves, items, rng, &mut events)?;
+        apply_end_turn_effects(&mut state, moves, items, stat_multipliers, rng, &mut events)?;
     }
     clear_end_turn_flinching(&mut state);
     clear_turn_last_damage(&mut state);
     state.turn = state.turn.saturating_add(1);
-    sync_active_combat_pokemon_into_parties(&mut state, &events)?;
-    if !state.link_battle
-        && state.sleep_turn_mask != 0x03
-        && state.player.hp > 0
-        && state.enemy_party.iter().all(|pokemon| pokemon.hp == 0)
-    {
-        apply_pickup_after_victory(&mut state, rng, &mut events);
-    }
     sync_active_combat_pokemon_into_parties(&mut state, &events)?;
     Ok(BattleTurnOutcome {
         state,
         order,
         events,
     })
-}
-
-fn apply_held_white_herb(
-    state: &mut BattleCombatState,
-    side: BattleSide,
-    items: &BTreeMap<String, Item>,
-    events: &mut Vec<BattleEvent>,
-) -> Result<(), BattleTurnError> {
-    let Some(item_id) = state.pokemon(side).item.clone() else {
-        return Ok(());
-    };
-    let item = items
-        .get(&item_id)
-        .ok_or_else(|| BattleTurnError::UnknownHeldItem {
-            side,
-            item_id: item_id.clone(),
-        })?;
-    if item.held_effect != "HELD_WHITE_HERB" {
-        return Ok(());
-    }
-    let lowered = state
-        .pokemon(side)
-        .stat_boosts
-        .iter()
-        .filter_map(|(stat, stage)| (*stage < 0).then_some(*stat))
-        .collect::<Vec<_>>();
-    if lowered.is_empty() {
-        return Ok(());
-    }
-    let pokemon = state.pokemon_mut(side);
-    for stat in &lowered {
-        pokemon.stat_boosts.insert(*stat, 0);
-    }
-    pokemon.item = None;
-    events.push(BattleEvent::HeldItemStatsRestored {
-        side,
-        item_id,
-        stats: lowered,
-    });
-    Ok(())
-}
-
-fn advance_truant_after_move_attempt(state: &mut BattleCombatState, side: BattleSide) {
-    if active_ability(state, side) != "TRUANT" || state.pokemon(side).hp == 0 {
-        return;
-    }
-    match side {
-        BattleSide::Player => state.player_truant_loafing = !state.player_truant_loafing,
-        BattleSide::Enemy => state.enemy_truant_loafing = !state.enemy_truant_loafing,
-    }
-}
-
-fn switch_in_ability_is_order_sensitive(ability: &str) -> bool {
-    matches!(
-        ability,
-        "AIR_LOCK" | "DRIZZLE" | "DROUGHT" | "FORECAST" | "INTIMIDATE" | "SAND_STREAM" | "TRACE"
-    )
-}
-
-const PICKUP_ITEMS: &[&str] = &[
-    "POTION",
-    "ANTIDOTE",
-    "SUPER_POTION",
-    "GREAT_BALL",
-    "REPEL",
-    "ESCAPE_ROPE",
-    "X_ATTACK",
-    "FULL_HEAL",
-    "ULTRA_BALL",
-    "HYPER_POTION",
-    "RARE_CANDY",
-    "PROTEIN",
-    "REVIVE",
-    "HP_UP",
-    "FULL_RESTORE",
-    "MAX_REVIVE",
-    "PP_UP",
-    "MAX_ELIXER",
-];
-
-const RARE_PICKUP_ITEMS: &[&str] = &[
-    "HYPER_POTION",
-    "NUGGET",
-    "KINGS_ROCK",
-    "FULL_RESTORE",
-    "ETHER",
-    "WHITE_HERB",
-    "TM_REST",
-    "ELIXER",
-    "TM_FOCUS_PUNCH",
-    "LEFTOVERS",
-    "TM_EARTHQUAKE",
-];
-
-const PICKUP_PROBABILITIES: &[u16] = &[30, 40, 50, 60, 70, 80, 90, 94, 98];
-
-fn emerald_random_u16(rng: &mut dyn BattleRandomSource) -> u16 {
-    (u16::from(rng.battle_random_byte()) << 8) | u16::from(rng.battle_random_byte())
-}
-
-fn apply_pickup_after_victory(
-    state: &mut BattleCombatState,
-    rng: &mut dyn BattleRandomSource,
-    events: &mut Vec<BattleEvent>,
-) {
-    for (party_index, pokemon) in state.player_party.iter_mut().enumerate() {
-        if pokemon.is_egg
-            || pokemon.species.ability != "PICKUP"
-            || pokemon.item.is_some()
-            || emerald_random_u16(rng) % 10 != 0
-        {
-            continue;
-        }
-        let roll = emerald_random_u16(rng) % 100;
-        let level_bucket = usize::from(pokemon.level.saturating_sub(1) / 10).min(9);
-        let item_id = if roll >= 98 {
-            RARE_PICKUP_ITEMS[level_bucket + usize::from(99 - roll)]
-        } else {
-            let offset = PICKUP_PROBABILITIES
-                .iter()
-                .position(|threshold| *threshold > roll)
-                .expect("normal Pickup roll is below the final threshold");
-            PICKUP_ITEMS[level_bucket + offset]
-        }
-        .to_string();
-        pokemon.item = Some(item_id.clone());
-        events.push(BattleEvent::PickupFound {
-            party_index,
-            item_id,
-        });
-    }
-    if let Some(active) = state.player_party.get(state.player_party_index) {
-        state.player.item = active.item.clone();
-    }
 }
 
 pub fn resolve_wild_battle_run(
@@ -3336,15 +3206,6 @@ pub fn resolve_wild_battle_run(
     stat_multipliers: &BattleStatMultiplierTables,
     rng: &mut dyn BattleRandomSource,
 ) -> Result<BattleEscapeAttempt, BattleTurnError> {
-    if active_ability(state, BattleSide::Player) == "RUN_AWAY" {
-        return Ok(BattleEscapeAttempt {
-            escaped: true,
-            chance: u16::MAX,
-            roll: None,
-            attempts_before,
-            attempts_after: attempts_before.wrapping_add(1),
-        });
-    }
     let player_speed = battle_speed(state, BattleSide::Player, stat_multipliers)?;
     let enemy_speed = battle_speed(state, BattleSide::Enemy, stat_multipliers)?;
     attempt_wild_battle_escape_with_loaded_speeds(
@@ -3372,6 +3233,7 @@ pub fn resolve_wild_battle_turn_with_items(
     rng: &mut dyn BattleRandomSource,
 ) -> Result<BattleTurnOutcome, BattleTurnError> {
     validate_active_battle_turn_input(&state, &input, true, true)?;
+    activate_amulet_coin_for_player_battler(&mut state, items);
     clear_turn_last_damage(&mut state);
     if matches!(input.enemy, BattleAction::Run) {
         state.turn = state.turn.saturating_add(1);
@@ -3510,7 +3372,7 @@ pub fn resolve_wild_battle_turn_with_items(
     };
 
     if battle_continues_after_actions(&state, &events) {
-        apply_end_turn_effects(&mut state, moves, items, rng, &mut events)?;
+        apply_end_turn_effects(&mut state, moves, items, stat_multipliers, rng, &mut events)?;
     }
     clear_end_turn_flinching(&mut state);
     clear_turn_last_damage(&mut state);
@@ -3705,7 +3567,7 @@ pub fn resolve_battle_enemy_action_with_items(
         }
     }
     if battle_continues_after_actions(&state, &events) {
-        apply_end_turn_effects(&mut state, moves, items, rng, &mut events)?;
+        apply_end_turn_effects(&mut state, moves, items, stat_multipliers, rng, &mut events)?;
     }
     clear_end_turn_flinching(&mut state);
     clear_turn_last_damage(&mut state);
@@ -3866,6 +3728,7 @@ fn execute_action(
             side,
             move_name: recharge_move,
         });
+        clear_turn_last_damage(state);
         return Ok(());
     }
     if let Some(committed_move) = pre_menu_committed_move_name(state, side) {
@@ -4017,18 +3880,6 @@ fn execute_action(
                 });
                 return Ok(());
             }
-            let opposing_ability = active_ability(state, side.other());
-            let target_ability = active_ability(state, side);
-            let target_types = effective_pokemon_types(state, side);
-            if ability_traps_opponent(opposing_ability, target_ability, &target_types) {
-                events.push(BattleEvent::SwitchBlocked {
-                    side,
-                    party_index: *party_index,
-                    source: side.other(),
-                    move_name: opposing_ability.to_string(),
-                });
-                return Ok(());
-            }
             if let Some(trap) = escape_trap_state(state, side) {
                 events.push(BattleEvent::SwitchBlocked {
                     side,
@@ -4038,8 +3889,10 @@ fn execute_action(
                 });
                 return Ok(());
             }
-            clear_side_volatile_conditions(state, side);
-            switch_battle_combat_pokemon(state, side, *party_index)?;
+            switch_battle_combat_pokemon_normally(state, side, *party_index)?;
+            if side == BattleSide::Player {
+                activate_amulet_coin_for_player_battler(state, items);
+            }
             events.push(BattleEvent::Switched {
                 side,
                 party_index: *party_index,
@@ -4054,8 +3907,16 @@ fn execute_action(
             }
             Ok(())
         }
-        BattleAction::Item { item_id } | BattleAction::TrainerItem { item_id, .. } => {
-            execute_item(state, side, item_id, items, events)
+        BattleAction::Item { item_id } => {
+            execute_item(state, side, item_id, items, stat_multipliers, events)
+        }
+        BattleAction::TrainerItem { item_id, .. } => {
+            execute_item(state, side, item_id, items, stat_multipliers, events)?;
+            // AI_TryItem additionally clears this enemy-only history byte
+            // after the common chained-move cleanup in execute_item. It
+            // deliberately leaves LAST_MOVE intact.
+            set_last_counter_move(state, side, None);
+            Ok(())
         }
         BattleAction::PartyItem {
             item_id,
@@ -4069,6 +3930,7 @@ fn execute_action(
             *move_slot,
             moves,
             items,
+            stat_multipliers,
             events,
         ),
         BattleAction::Ball { item_id } => {
@@ -4193,8 +4055,9 @@ fn apply_player_obedience(
             events.push(BattleEvent::DisobedienceIgnoredSleeping {
                 side: BattleSide::Player,
             });
-            clear_last_moves(state, BattleSide::Player);
-            clear_encore_state(state, BattleSide::Player);
+            // IgnoreSleepOnly ends the effect stream directly. It never
+            // reaches EndDisobedience, so prior move history and Encore
+            // remain intact on this one disobedience exit.
             return Ok(ObedienceAction::Stop);
         }
         ObedienceResult::Obey => {}
@@ -4335,11 +4198,72 @@ fn quick_claw_parameter(
     Ok(Some(item.parameter as u8))
 }
 
+/// Apply the Pokemon-local portion of an active battle item against the live
+/// BattleMon representation. Transform owns a copied stat-level array, so X
+/// Items must mutate that array rather than the dormant party Pokemon levels.
+pub fn apply_active_battle_item_effect_to_combat(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    item: &Item,
+    consumed: bool,
+    stat_multipliers: &BattleStatMultiplierTables,
+) -> Result<BattleItemOutcome, BattleTurnError> {
+    if item.script_name == "X_ACCURACY" || item.battle_stat_boost_stat.is_none() {
+        return apply_active_battle_item_effect(state.pokemon_mut(side), item, consumed).map_err(
+            |error| BattleTurnError::BattleItem {
+                side,
+                item_id: item.script_name.clone(),
+                error: error.to_string(),
+            },
+        );
+    }
+
+    let effective = effective_battle_pokemon(state, side);
+    let mut validation = effective.clone();
+    apply_active_battle_item_effect(&mut validation, item, consumed).map_err(|error| {
+        BattleTurnError::BattleItem {
+            side,
+            item_id: item.script_name.clone(),
+            error: error.to_string(),
+        }
+    })?;
+    let stat_id = item
+        .battle_stat_boost_stat
+        .as_deref()
+        .expect("validated X Item lost its stat id");
+    let stat = battle_stat_boost_stat(stat_id).expect("validated X Item lost its stat mapping");
+    let stage_before = battle_stat_boosts(state, side)[&stat];
+    let mut ignored_stat_events = Vec::new();
+    apply_stat_stage_delta_to_target(
+        state,
+        side,
+        &item.script_name,
+        side,
+        stat,
+        1,
+        stat_multipliers,
+        &mut ignored_stat_events,
+    )?;
+    let stage_after = battle_stat_boosts(state, side)[&stat];
+    let mut outcome = unchanged_battle_item_outcome(&effective, item, consumed);
+    if stage_after != stage_before {
+        outcome
+            .battle_stat_stage_changes
+            .push(BattleItemStageChange {
+                stat: stat_id.to_string(),
+                stage_before,
+                stage_after,
+            });
+    }
+    Ok(outcome)
+}
+
 fn execute_item(
     state: &mut BattleCombatState,
     side: BattleSide,
     item_id: &str,
     items: &BTreeMap<String, Item>,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     validate_battle_turn_item_id(side, item_id)?;
@@ -4355,13 +4279,19 @@ fn execute_item(
             item_id: item_id.to_string(),
         });
     }
+    if side == BattleSide::Player && item.battle_menu == "ITEMMENU_PARTY" {
+        return Err(BattleTurnError::BattleItemRequiresPartyTarget {
+            side,
+            item_id: item_id.to_string(),
+        });
+    }
     events.push(BattleEvent::ItemUsed {
         side,
         item_id: item_id.to_string(),
     });
     let confusion_turns_before = state.pokemon(side).confusion_turns;
     let mut outcome = if item.script_name == "X_ACCURACY" {
-        if x_accuracy_active(state, side) {
+        if side == BattleSide::Player && x_accuracy_active(state, side) {
             return Err(BattleTurnError::BattleItem {
                 side,
                 item_id: item_id.to_string(),
@@ -4396,6 +4326,13 @@ fn execute_item(
         set_x_accuracy_active(state, side, true);
         outcome
     } else if item.battle_stat_drop_guard == Some(true) {
+        if side == BattleSide::Player && mist_active(state, side) {
+            return Err(BattleTurnError::BattleItem {
+                side,
+                item_id: item_id.to_string(),
+                error: "stat drop guard is already active".to_string(),
+            });
+        }
         let pokemon = state.pokemon(side);
         let outcome = BattleItemOutcome {
             item_id: item.script_name.clone(),
@@ -4426,14 +4363,15 @@ fn execute_item(
             BattleSide::Enemy => state.enemy_mist_active = true,
         }
         outcome
+    } else if side == BattleSide::Enemy
+        && item.battle_focus_energy == Some(true)
+        && state.enemy.focus_energy
+    {
+        // EnemyUsedDireHit unconditionally sets the bit. Unlike the player's
+        // DireHitEffect menu path, it does not reject an already-set bit.
+        unchanged_battle_item_outcome(&state.enemy, item, false)
     } else {
-        apply_active_battle_item_effect(state.pokemon_mut(side), item, false).map_err(|error| {
-            BattleTurnError::BattleItem {
-                side,
-                item_id: item_id.to_string(),
-                error: error.to_string(),
-            }
-        })?
+        apply_active_battle_item_effect_to_combat(state, side, item, false, stat_multipliers)?
     };
     if side == BattleSide::Enemy && item.script_name == "FULL_HEAL" {
         // EnemyUsedFullHeal calls AI_HealStatus directly and never clears the
@@ -4469,6 +4407,7 @@ fn execute_party_item(
     move_slot: Option<usize>,
     moves: &BTreeMap<String, Move>,
     items: &BTreeMap<String, Item>,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     if side != BattleSide::Player {
@@ -4485,6 +4424,13 @@ fn execute_party_item(
         return Err(BattleTurnError::UnusableItem {
             side,
             item_id: item_id.to_string(),
+        });
+    }
+    if item.battle_menu == "ITEMMENU_CLOSE" {
+        return Err(BattleTurnError::BattleItemTargetNotSelectable {
+            side,
+            item_id: item_id.to_string(),
+            party_index,
         });
     }
     let target = state
@@ -4525,9 +4471,14 @@ fn execute_party_item(
                 }
             }
         } else {
-            let status_before = state.player.status.clone();
             state.player = updated;
-            if status_before.is_some() && state.player.status.is_none() {
+            if !item.status_heals.is_empty() {
+                // Every accepted player status-healing item reaches
+                // HealStatus, even a confusion-only Full Heal or an HP-only
+                // Full Restore. HealStatus clears Toxic/Nightmare and calls
+                // CalcPlayerStats after the party structure is updated.
+                state.player_badge_before_status = true;
+                recalculate_loaded_stats(state, side, stat_multipliers)?;
                 state.player_toxic_turns = 0;
                 state.player_nightmare_source = None;
             }
@@ -4960,6 +4911,7 @@ fn execute_move_slot(
             side,
             move_name: recharge_move,
         });
+        clear_turn_last_damage(state);
         return Ok(());
     }
 
@@ -5011,6 +4963,7 @@ fn execute_move_slot(
         cancel_rollout_lock(state, side);
         state.pokemon_mut(side).rampage_turns = 0;
         reset_bide_state(state, side);
+        clear_turn_last_damage(state);
         return Ok(());
     }
 
@@ -5025,6 +4978,7 @@ fn execute_move_slot(
             cancel_rollout_lock(state, side);
             state.pokemon_mut(side).rampage_turns = 0;
             reset_bide_state(state, side);
+            clear_turn_last_damage(state);
             return Ok(());
         }
     }
@@ -5034,35 +4988,12 @@ fn execute_move_slot(
         cancel_rollout_lock(state, side);
         state.pokemon_mut(side).rampage_turns = 0;
         reset_bide_state(state, side);
+        clear_turn_last_damage(state);
         return Ok(());
     }
 
-    if active_ability(state, side) == "TRUANT" {
-        let loafing = match side {
-            BattleSide::Player => state.player_truant_loafing,
-            BattleSide::Enemy => state.enemy_truant_loafing,
-        };
-        if loafing {
-            events.push(BattleEvent::AbilityPreventedAction {
-                side,
-                ability: "TRUANT".to_string(),
-            });
-            reset_fury_cutter_chain(state, side);
-            cancel_rollout_lock(state, side);
-            state.pokemon_mut(side).rampage_turns = 0;
-            reset_bide_state(state, side);
-            return Ok(());
-        }
-    }
-
     if !automatic_struggle {
-        let pp_cost = if active_ability(state, side.other()) == "PRESSURE"
-            && (move_targets_opponent(&move_name) || move_name == "PERISH_SONG")
-        {
-            2
-        } else {
-            1
-        };
+        let pp_cost = 1;
         let learned_move = battle_moves_mut(state, side)
             .get_mut(slot)
             .ok_or(BattleTurnError::MissingMoveSlot { side, slot })?;
@@ -5076,6 +5007,7 @@ fn execute_move_slot(
         if !forced_move {
             learned_move.current_pp = learned_move.current_pp.saturating_sub(pp_cost);
         }
+        sync_consumed_move_pp_into_party(state, side, slot);
     }
     if move_data.effect == "RAMPAGE" && !rampage_forced {
         let roll = rng.battle_random_byte() & 1;
@@ -5099,10 +5031,10 @@ fn execute_move_slot(
         state.player_used_moves.push(move_name.clone());
     }
     // DisplayUsedMoveText updates both history registers only when the actor is
-    // not in the charging phase. The first half of Fly and the four ordinary
-    // charge effects therefore leaves the previous values intact; the forced
-    // release updates them after CheckCharge clears the flag. Sunny Solarbeam
-    // skips the charging phase and updates immediately.
+    // not in the charging phase. Charge effects run that command after their
+    // charge command instead; BattleCommand_Charge writes both registers on
+    // the first half, while the forced release reaches DisplayUsedMoveText
+    // after CheckCharge clears the flag. Sunny Solarbeam updates immediately.
     let begins_two_turn_charge = (direct_airborne_effect(move_data) && !airborne_forced)
         || (direct_charge_effect(move_data)
             && !charge_forced
@@ -5173,28 +5105,6 @@ fn execute_move_effect(
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    if move_data.effect == "SELFDESTRUCT"
-        && (active_ability(state, BattleSide::Player) == "DAMP"
-            || active_ability(state, BattleSide::Enemy) == "DAMP")
-    {
-        events.push(BattleEvent::NoEffect {
-            side,
-            move_name: move_name.to_string(),
-        });
-        return Ok(());
-    }
-    if active_ability(state, side.other()) == "SOUNDPROOF" && is_sound_move(move_name) {
-        events.push(BattleEvent::NoEffect {
-            side,
-            move_name: move_name.to_string(),
-        });
-        return Ok(());
-    }
-    if move_targets_opponent(move_name)
-        && apply_absorb_ability(state, side, move_name, move_data, events)
-    {
-        return Ok(());
-    }
     if move_data.effect == "RAGE" {
         set_rage_active(state, side, true);
     }
@@ -5222,10 +5132,14 @@ fn execute_move_effect(
             });
         } else {
             set_airborne_move_state(state, side, Some(move_name.to_string()));
+            set_last_move(state, side, Some(move_name.to_string()));
+            set_last_counter_move(state, side, Some(move_name.to_string()));
             events.push(BattleEvent::AirborneStarted {
                 side,
                 move_name: move_name.to_string(),
             });
+            // BattleCommand_Charge finishes its setup with ResetDamage.
+            clear_turn_last_damage(state);
             return Ok(());
         }
     }
@@ -5238,13 +5152,25 @@ fn execute_move_effect(
             });
         } else if !charge_move_skips_charge(state, move_data) {
             set_charging_move_state(state, side, Some(move_name.to_string()));
+            set_last_move(state, side, Some(move_name.to_string()));
+            set_last_counter_move(state, side, Some(move_name.to_string()));
             events.push(BattleEvent::ChargeStarted {
                 side,
                 move_name: move_name.to_string(),
             });
             if move_data.effect == "SKULL_BASH" {
-                apply_stat_stage_delta(state, side, &move_name, Stat::Defense, 1, events)?;
+                apply_stat_stage_delta(
+                    state,
+                    side,
+                    &move_name,
+                    Stat::Defense,
+                    1,
+                    stat_multipliers,
+                    events,
+                )?;
             }
+            // BattleCommand_Charge finishes its setup with ResetDamage.
+            clear_turn_last_damage(state);
             return Ok(());
         }
     }
@@ -5260,10 +5186,59 @@ fn execute_move_effect(
     } else {
         None
     };
+    // These streams run Critical before CheckHit but defer damage variation
+    // until afterward. Thunder also places EffectChance after a successful
+    // check; Rage, Rollout, and Fury Cutter place their power command there.
+    let mut prepared_first_critical = if matches!(
+        move_data.effect.as_str(),
+        "THUNDER" | "RAGE" | "ROLLOUT" | "FURY_CUTTER"
+    ) {
+        let attacker = effective_battle_pokemon(state, side);
+        Some(prepare_critical_hit(
+            state, side, move_name, &attacker, items, rng,
+        )?)
+    } else {
+        None
+    };
+    // These compiled effect streams retain their damage before CheckHit.
+    // Most calculate critical damage, STAB/type, and variation; the fixed-
+    // damage family instead runs ConstantDamage here and ResetTypeMatchup
+    // after the check. Jump Kick's FailureText also reuses retained damage on
+    // a miss. Streams with CheckHit earlier (multi-hit, Present, and trapping)
+    // or other commands split around it stay out of this set.
+    let mut prepared_first_damage_hit = if effect_prepares_damage_before_check_hit(move_data) {
+        match prepare_damage_hit(
+            state,
+            side,
+            move_name,
+            move_data,
+            1,
+            target_switching,
+            stat_multipliers,
+            type_categories,
+            type_effectiveness,
+            weather_modifiers,
+            items,
+            rng,
+            events,
+            None,
+        )? {
+            PreparedDamageHitOutcome::Damage(prepared_hit) => Some(prepared_hit),
+            PreparedDamageHitOutcome::Handled(_) => {
+                unreachable!("Jump Kick cannot resolve as Present")
+            }
+        }
+    } else {
+        None
+    };
     // `BattleCommand_CheckHit` performs these gates before Lock-On is
     // consumed, accuracy is calculated, or BattleRandom is sampled.
-    if bide_release_damage.is_some() || move_effect_uses_check_hit(&move_data.effect) {
+    let uses_check_hit =
+        bide_release_damage.is_some() || move_effect_uses_check_hit(&move_data.effect);
+    if uses_check_hit {
         if dream_eater_fails(state, side, move_data) {
+            clear_turn_last_damage(state);
+            clear_critical_if_failure_text(state, &move_data.effect);
             events.push(BattleEvent::NoEffect {
                 side,
                 move_name: move_name.to_string(),
@@ -5271,29 +5246,55 @@ fn execute_move_effect(
             return Ok(());
         }
         if protect_active(state, side.other()) {
+            if move_data.effect != "JUMP_KICK" {
+                clear_turn_last_damage(state);
+            }
             events.push(BattleEvent::MoveProtected {
                 side,
                 move_name: move_name.to_string(),
                 target: side.other(),
             });
+            apply_post_check_hit_command_failure(
+                state,
+                side,
+                move_name,
+                &move_data.effect,
+                CheckHitFailureKind::Protect,
+                events,
+            );
             if move_data.effect == "SELFDESTRUCT" {
                 // Selfdestruct follows `checkhit` in its effect stream and
                 // therefore still executes after the protected miss.
                 apply_selfdestruct_effect(state, side, move_name, events);
             }
-            apply_jump_kick_crash_effect(state, side, move_name, move_data, events);
+            apply_jump_kick_crash_effect(
+                state,
+                side,
+                move_name,
+                move_data,
+                prepared_first_damage_hit
+                    .as_ref()
+                    .map(|prepared| &prepared.result),
+                events,
+            );
+            clear_critical_if_failure_text(state, &move_data.effect);
             return Ok(());
         }
         if matches!(move_data.effect.as_str(), "LEECH_HIT" | "DREAM_EATER")
             && move_blocked_by_substitute(state, side, move_name, side.other(), events)
         {
+            clear_turn_last_damage(state);
+            clear_critical_if_failure_text(state, &move_data.effect);
             return Ok(());
         }
     }
-    let lock_on_active = lock_on_target_state(state, side) && !direct_lock_on_effect(move_data);
-    let x_accuracy_active = x_accuracy_active(state, side);
+    let lock_on_active =
+        uses_check_hit && lock_on_target_state(state, side) && !direct_lock_on_effect(move_data);
+    let x_accuracy_active = uses_check_hit && x_accuracy_active(state, side);
+    let source_sure_hit = move_data.effect == "ALWAYS_HIT"
+        || (move_data.effect == "THUNDER" && battle_effective_weather(state) == Weather::Rain);
     let mut ordinary_accuracy = u8::MAX;
-    if !x_accuracy_active && !lock_on_active {
+    if uses_check_hit && !x_accuracy_active && !lock_on_active {
         let attacker = effective_battle_pokemon(state, side);
         let defender = effective_battle_pokemon(state, side.other());
         ordinary_accuracy = accuracy_byte_with_weather(
@@ -5305,7 +5306,11 @@ fn execute_move_effect(
             battle_effective_weather(state),
             identified_state(state, side.other()),
         )?;
-        if ordinary_accuracy < u8::MAX {
+        // CheckHit's explicit Lock-On, rain-Thunder, X Accuracy, and
+        // ALWAYS_HIT branches return before the held-item lookup. An ordinary
+        // move whose calculated accuracy happens to be $ff does not: the ROM
+        // subtracts BrightPowder first, then performs its $ff sure-hit check.
+        if !source_sure_hit {
             ordinary_accuracy =
                 apply_brightpowder_accuracy(state, side.other(), items, ordinary_accuracy)?;
         }
@@ -5323,44 +5328,96 @@ fn execute_move_effect(
             target: side.other(),
         });
     }
-    if let Some(airborne_move) = airborne_move_state(state, side.other()).map(ToOwned::to_owned) {
+    if uses_check_hit
+        && let Some(airborne_move) = airborne_move_state(state, side.other()).map(ToOwned::to_owned)
+    {
         let lock_on_hits = lock_on_active
             && (airborne_move == "DIG"
                 || !matches!(move_name, "EARTHQUAKE" | "FISSURE" | "MAGNITUDE"));
         if !lock_on_hits && !move_hits_airborne_target(move_data, &airborne_move) {
+            if move_data.effect != "JUMP_KICK" {
+                clear_turn_last_damage(state);
+            }
             events.push(BattleEvent::AirborneAvoided {
                 side,
                 move_name: move_name.to_string(),
                 target: side.other(),
                 airborne_move,
             });
+            apply_post_check_hit_command_failure(
+                state,
+                side,
+                move_name,
+                &move_data.effect,
+                CheckHitFailureKind::Airborne,
+                events,
+            );
             if move_data.effect == "SELFDESTRUCT" {
                 apply_selfdestruct_effect(state, side, move_name, events);
             }
-            apply_jump_kick_crash_effect(state, side, &move_name, move_data, events);
+            apply_jump_kick_crash_effect(
+                state,
+                side,
+                &move_name,
+                move_data,
+                prepared_first_damage_hit
+                    .as_ref()
+                    .map(|prepared| &prepared.result),
+                events,
+            );
+            clear_critical_if_failure_text(state, &move_data.effect);
             return Ok(());
         }
     }
     if accuracy < u8::MAX {
         let roll = rng.battle_random_byte();
         if roll >= accuracy {
+            if move_data.effect != "JUMP_KICK" {
+                clear_turn_last_damage(state);
+            }
             events.push(BattleEvent::Missed {
                 side,
                 move_name: move_name.to_string(),
                 accuracy,
                 roll,
             });
+            apply_post_check_hit_command_failure(
+                state,
+                side,
+                move_name,
+                &move_data.effect,
+                CheckHitFailureKind::Accuracy,
+                events,
+            );
             if move_data.effect == "SELFDESTRUCT" {
                 apply_selfdestruct_effect(state, side, move_name, events);
             }
-            apply_jump_kick_crash_effect(state, side, &move_name, move_data, events);
+            apply_jump_kick_crash_effect(
+                state,
+                side,
+                &move_name,
+                move_data,
+                prepared_first_damage_hit
+                    .as_ref()
+                    .map(|prepared| &prepared.result),
+                events,
+            );
             reset_fury_cutter_chain(state, side);
             cancel_rollout_lock(state, side);
+            clear_critical_if_failure_text(state, &move_data.effect);
             return Ok(());
         }
     }
+    let mut prepared_first_effect_chance = if move_data.effect == "THUNDER" {
+        Some(sample_pre_damage_effect_chance(state, side, move_data, rng))
+    } else {
+        None
+    };
     // Dream Eater's `checkhit` gate was handled before Lock-On/accuracy above.
     if snore_fails(state, side, move_data) {
+        // Snore's awake-only failure skips FailureText but explicitly calls
+        // ResetDamage before ending its command stream.
+        clear_turn_last_damage(state);
         events.push(BattleEvent::NoEffect {
             side,
             move_name: move_name.to_string(),
@@ -5375,15 +5432,18 @@ fn execute_move_effect(
         apply_selfdestruct_effect(state, side, move_name, events);
     }
     if counter_effect(move_data).is_some() {
+        let opponent_went_first = acted_before.contains(&side.other());
         apply_counter_effect(
             state,
             side,
             &move_name,
             move_data,
             moves,
+            type_categories,
             type_effectiveness,
             items,
             rng,
+            opponent_went_first,
             events,
         )?;
         return Ok(());
@@ -5455,9 +5515,18 @@ fn execute_move_effect(
             return Ok(());
         }
         let existing_status = state.pokemon(target).status.clone();
+        if status == "SLEEP"
+            && held_item_blocks_direct_effect(
+                state, side, &move_name, target, status, items, events,
+            )?
+        {
+            return Ok(());
+        }
         let status_fails_before_ai = match status {
             "SLEEP" => existing_status.as_deref() == Some("SLEEP"),
-            "POISON" | "BAD_POISON" => existing_status.is_some(),
+            "POISON" | "BAD_POISON" => {
+                matches!(existing_status.as_deref(), Some("POISON" | "BAD_POISON"))
+            }
             "PARALYSIS" => existing_status.as_deref() == Some("PARALYSIS"),
             _ => false,
         };
@@ -5466,7 +5535,23 @@ fn execute_move_effect(
                 side,
                 move_name: move_name.to_string(),
                 target,
-                existing_status,
+                existing_status: existing_status.clone(),
+            });
+            return Ok(());
+        }
+        if status != "SLEEP"
+            && held_item_blocks_direct_effect(
+                state, side, &move_name, target, status, items, events,
+            )?
+        {
+            return Ok(());
+        }
+        if matches!(status, "POISON" | "BAD_POISON") && existing_status.is_some() {
+            events.push(BattleEvent::StatusFailed {
+                side,
+                move_name: move_name.to_string(),
+                target,
+                existing_status: existing_status.clone(),
             });
             return Ok(());
         }
@@ -5499,12 +5584,9 @@ fn execute_move_effect(
             return Ok(());
         }
         let sleep_turn_mask = state.sleep_turn_mask;
-        let target_ability = active_ability(state, target).to_string();
-        let defender = state.pokemon_mut(target);
         let applied = apply_status_to_target(
-            defender,
+            state,
             &target_types,
-            &target_ability,
             side,
             &move_name,
             target,
@@ -5520,37 +5602,44 @@ fn execute_move_effect(
             if target == BattleSide::Enemy {
                 recalculate_enemy_status_penalties(state);
             }
-            apply_synchronize(state, side, target, status, rng, events);
             // Sleep/Poison/Burn/Freeze/Paralyze target commands call
             // UseHeldStatusHealingItem immediately after installing the
             // status.  This is distinct from the blanket between-turn
             // HandleHealingItems pass for a status that was already set.
-            apply_held_status_healing(state, target, items, events)?;
+            apply_held_status_healing(state, target, items, stat_multipliers, events)?;
         }
         return Ok(());
     }
     if direct_confusion_effect(move_data) {
         let event_start = events.len();
-        apply_confusion_to_target(state, side, &move_name, rng, events);
+        apply_confusion_to_target(state, side, &move_name, items, rng, events)?;
         if confusion_applied_since(events, event_start, side.other()) {
-            apply_held_status_healing(state, side.other(), items, events)?;
+            apply_held_status_healing(state, side.other(), items, stat_multipliers, events)?;
         }
         return Ok(());
     }
     if direct_swagger_effect(move_data) {
         let event_start = events.len();
-        apply_swagger_effect(state, side, &move_name, rng, events)?;
+        apply_swagger_effect(
+            state,
+            side,
+            &move_name,
+            items,
+            stat_multipliers,
+            rng,
+            events,
+        )?;
         if confusion_applied_since(events, event_start, side.other()) {
-            apply_held_status_healing(state, side.other(), items, events)?;
+            apply_held_status_healing(state, side.other(), items, stat_multipliers, events)?;
         }
         return Ok(());
     }
     if direct_heal_effect(move_data) {
-        apply_direct_heal_effect(state, side, &move_name, move_data, events);
+        apply_direct_heal_effect(state, side, &move_name, move_data, stat_multipliers, events)?;
         return Ok(());
     }
     if direct_heal_bell_effect(move_data) {
-        apply_heal_bell_effect(state, side, &move_name, events);
+        apply_heal_bell_effect(state, side, &move_name, stat_multipliers, events)?;
         return Ok(());
     }
     if direct_pain_split_effect(move_data) {
@@ -5566,15 +5655,15 @@ fn execute_move_effect(
         return Ok(());
     }
     if direct_belly_drum_effect(move_data) {
-        apply_belly_drum_effect(state, side, &move_name, events)?;
+        apply_belly_drum_effect(state, side, &move_name, stat_multipliers, events)?;
         return Ok(());
     }
     if direct_defense_curl_effect(move_data) {
-        apply_defense_curl_effect(state, side, &move_name, events)?;
+        apply_defense_curl_effect(state, side, &move_name, stat_multipliers, events)?;
         return Ok(());
     }
     if direct_curse_effect(move_data) {
-        apply_curse_effect(state, side, &move_name, events)?;
+        apply_curse_effect(state, side, &move_name, stat_multipliers, events)?;
         return Ok(());
     }
     if direct_mist_effect(move_data) {
@@ -5714,6 +5803,7 @@ fn execute_move_effect(
             side,
             &move_name,
             force_switch_ends_battle,
+            items,
             rng,
             acted_before,
             events,
@@ -5765,7 +5855,7 @@ fn execute_move_effect(
         return Ok(());
     }
     if direct_transform_effect(move_data) {
-        apply_transform_effect(state, side, &move_name, events);
+        apply_transform_effect(state, side, &move_name, stat_multipliers, events)?;
         return Ok(());
     }
     if direct_baton_pass_effect(move_data) {
@@ -5775,17 +5865,18 @@ fn execute_move_effect(
             &move_name,
             move_switch_party_index,
             items,
+            stat_multipliers,
             rng,
             events,
         )?;
         return Ok(());
     }
     if direct_reset_stats_effect(move_data) {
-        apply_reset_stats_effect(state, side, &move_name, events);
+        apply_reset_stats_effect(state, side, &move_name, stat_multipliers, events)?;
         return Ok(());
     }
     if direct_psych_up_effect(move_data) {
-        apply_psych_up_effect(state, side, &move_name, events);
+        apply_psych_up_effect(state, side, &move_name, stat_multipliers, events)?;
         return Ok(());
     }
     if direct_foresight_effect(move_data) {
@@ -5800,7 +5891,6 @@ fn execute_move_effect(
             move_data,
             force_switch_ends_battle,
             target_switching,
-            stat_multipliers,
             type_categories,
             type_effectiveness,
             weather_modifiers,
@@ -5815,7 +5905,15 @@ fn execute_move_effect(
         return Ok(());
     }
     if move_data.power == 0
-        && apply_stat_stage_effect(state, side, &move_name, move_data, rng, events)?
+        && apply_stat_stage_effect(
+            state,
+            side,
+            &move_name,
+            move_data,
+            stat_multipliers,
+            rng,
+            events,
+        )?
     {
         return Ok(());
     }
@@ -5851,7 +5949,7 @@ fn execute_move_effect(
     let mut hit_index = 0u8;
     while hit_index < hit_count {
         let event_start = events.len();
-        let damage_result = apply_damage_hit(
+        let damage_result = apply_damage_hit_with_prepared(
             state,
             side,
             &move_name,
@@ -5866,6 +5964,21 @@ fn execute_move_effect(
             items,
             rng,
             events,
+            if hit_index == 0 {
+                prepared_first_damage_hit.take()
+            } else {
+                None
+            },
+            if hit_index == 0 {
+                prepared_first_critical.take()
+            } else {
+                None
+            },
+            if hit_index == 0 {
+                prepared_first_effect_chance.take()
+            } else {
+                None
+            },
         )?;
         let hit_applied = events[event_start..].iter().any(|event| {
             matches!(
@@ -5919,11 +6032,12 @@ fn execute_move_effect(
                 &move_name,
                 side.other(),
                 "POISON",
+                items,
                 rng,
                 events,
-            );
+            )?;
             if status_applied_since(events, event_start, side.other()) {
-                apply_held_status_healing(state, side.other(), items, events)?;
+                apply_held_status_healing(state, side.other(), items, stat_multipliers, events)?;
             }
         }
     }
@@ -5991,6 +6105,22 @@ fn held_item_boosted_move_type(held_effect: &str) -> Option<&'static str> {
     }
 }
 
+fn activate_amulet_coin_for_player_battler(
+    state: &mut BattleCombatState,
+    items: &BTreeMap<String, Item>,
+) {
+    if state.amulet_coin_active {
+        return;
+    }
+    state.amulet_coin_active = state
+        .player
+        .item
+        .as_deref()
+        .and_then(|item_id| items.get(item_id))
+        .is_some_and(|item| item.held_effect == "HELD_AMULET_COIN");
+}
+
+#[cfg(test)]
 fn apply_damage_hit(
     state: &mut BattleCombatState,
     side: BattleSide,
@@ -6007,6 +6137,406 @@ fn apply_damage_hit(
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<DamageHitResult, BattleTurnError> {
+    apply_damage_hit_with_prepared(
+        state,
+        side,
+        move_name,
+        move_data,
+        hit_number,
+        target_switching,
+        target_already_acted,
+        stat_multipliers,
+        type_categories,
+        type_effectiveness,
+        weather_modifiers,
+        items,
+        rng,
+        events,
+        None,
+        None,
+        None,
+    )
+}
+
+fn apply_damage_hit_with_prepared(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    move_name: &str,
+    move_data: &Move,
+    hit_number: u8,
+    target_switching: bool,
+    target_already_acted: bool,
+    stat_multipliers: &BattleStatMultiplierTables,
+    type_categories: &TypeCategories,
+    type_effectiveness: &TypeEffectivenessTable,
+    weather_modifiers: &WeatherModifiers,
+    items: &BTreeMap<String, Item>,
+    rng: &mut dyn BattleRandomSource,
+    events: &mut Vec<BattleEvent>,
+    prepared_hit: Option<PreparedDamageHit>,
+    prepared_critical: Option<PreparedCriticalHit>,
+    prepared_effect_chance: Option<Option<EffectChanceResult>>,
+) -> Result<DamageHitResult, BattleTurnError> {
+    let prepared_hit = if let Some(prepared_hit) = prepared_hit {
+        prepared_hit
+    } else {
+        match prepare_damage_hit(
+            state,
+            side,
+            move_name,
+            move_data,
+            hit_number,
+            target_switching,
+            stat_multipliers,
+            type_categories,
+            type_effectiveness,
+            weather_modifiers,
+            items,
+            rng,
+            events,
+            prepared_critical,
+        )? {
+            PreparedDamageHitOutcome::Damage(prepared_hit) => prepared_hit,
+            PreparedDamageHitOutcome::Handled(result) => return Ok(result),
+        }
+    };
+    let PreparedDamageHit {
+        prepared_move_data,
+        critical,
+        critical_roll,
+        critical_threshold,
+        damage_roll,
+        mut result,
+    } = prepared_hit;
+    if protect_active(state, side.other()) {
+        events.push(BattleEvent::MoveProtected {
+            side,
+            move_name: move_name.to_string(),
+            target: side.other(),
+        });
+        apply_jump_kick_crash_effect(state, side, move_name, move_data, Some(&result), events);
+        clear_critical_if_failure_text(state, &move_data.effect);
+        return Ok(DamageHitResult::Stop);
+    }
+    if move_data.effect == "MAGNITUDE"
+        && airborne_move_state(state, side.other()).is_some_and(|move_name| move_name == "DIG")
+    {
+        result.damage = result.damage.saturating_mul(2);
+        events.push(BattleEvent::EarthquakePower {
+            side,
+            move_name: move_name.to_string(),
+            target_move: "DIG".to_string(),
+            power: prepared_move_data.power.saturating_mul(2),
+        });
+    }
+    if result.type_multiplier.numerator == 0 {
+        events.push(BattleEvent::NoEffect {
+            side,
+            move_name: move_name.to_string(),
+        });
+        clear_critical_if_failure_text(state, &move_data.effect);
+        return Ok(DamageHitResult::NoEffect);
+    }
+
+    // In the compiled effect streams this command is after checkhit but
+    // before move animation/applydamage. It therefore samples even when the
+    // impending damage will faint the target, and it must precede the Focus
+    // Band roll inside applydamage. A pre-existing Substitute makes the
+    // command fail without calling BattleRandom.
+    let pre_damage_effect_chance = match prepared_effect_chance {
+        Some(effect_chance) => effect_chance,
+        None => sample_pre_damage_effect_chance(state, side, move_data, rng),
+    };
+
+    let defender_hp_before = state.pokemon(side.other()).hp;
+    let raw_damage = if move_data.effect == "STOMP" && minimized_state(state, side.other()) {
+        result.damage.saturating_mul(2)
+    } else {
+        result.damage
+    };
+    // ApplyDamage checks Endure first, otherwise samples a held Focus Band,
+    // and only then calls DoEnemyDamage/DoPlayerDamage. Those routines route
+    // the already-clamped wCurDamage into Substitute. Focus Band samples on
+    // every successful application while held, even when the retained damage
+    // is nonlethal or the target has a Substitute.
+    let survival = apply_damage_survival_modifier(state, side.other(), raw_damage, items, rng)?;
+    let applied_damage = survival.damage;
+    if let Some(hit_result) =
+        apply_substitute_damage(state, side, move_name, applied_damage, events)
+    {
+        emit_survival_damage_event(
+            side,
+            side.other(),
+            move_name,
+            raw_damage,
+            survival.held_item,
+            events,
+        );
+        clear_critical_if_critical_text(state, &move_data.effect);
+        // DoSubstituteDamage finishes by resetting wCurDamage. Commands later
+        // in the effect stream still execute: drain and recoil consequently
+        // use their one-HP minimum, while Pay Day still scatters coins.
+        apply_post_damage_hp_effect(
+            state,
+            side,
+            move_name,
+            move_data,
+            0,
+            pre_damage_effect_chance,
+            events,
+        );
+        apply_rage_counter_increment(state, side.other(), events)?;
+        // TrapTarget follows applydamage and BuildOpponentRage in the effect
+        // stream, so a hit that just broke the Substitute can now trap the
+        // exposed target. A surviving Substitute is rejected by the command.
+        if move_data.effect == "TRAP_TARGET" {
+            apply_trap_target_effect(state, side, move_name, rng, events);
+        }
+        if move_data.effect == "DEFENSE_DOWN_HIT" {
+            // This script deliberately has another effectchance after
+            // applydamage. If the hit just broke the Substitute, that second
+            // command now samples and can lower the real target's Defense.
+            let effect_chance = sample_effect_chance_against_target(state, side, move_data, rng);
+            apply_secondary_stat_stage_effect(
+                state,
+                side,
+                move_name,
+                move_data,
+                effect_chance,
+                stat_multipliers,
+                rng,
+                events,
+            )?;
+        }
+        if move_data.effect == "HYPER_BEAM" {
+            set_recharge_move_state(state, side, Some(move_name.to_string()));
+            events.push(BattleEvent::RechargeStarted {
+                side,
+                move_name: move_name.to_string(),
+            });
+        }
+        if state.pokemon(side).hp == 0 {
+            events.push(BattleEvent::Fainted { side });
+            return Ok(DamageHitResult::Stop);
+        }
+        return Ok(hit_result);
+    }
+    let damage = applied_damage.min(defender_hp_before);
+    let applied_result = DamageResult {
+        damage: raw_damage,
+        type_multiplier: result.type_multiplier,
+    };
+    let defender = match side {
+        BattleSide::Player => &mut state.enemy,
+        BattleSide::Enemy => &mut state.player,
+    };
+    defender.hp = defender.hp.saturating_sub(damage);
+    let defender_hp_after = defender.hp;
+    events.push(BattleEvent::Damage {
+        side,
+        move_name: move_name.to_string(),
+        damage,
+        defender_hp_before,
+        defender_hp_after,
+        critical,
+        critical_roll,
+        critical_threshold,
+        roll: damage_roll,
+        result: applied_result,
+    });
+    emit_survival_damage_event(
+        side,
+        side.other(),
+        move_name,
+        raw_damage,
+        survival.held_item,
+        events,
+    );
+    clear_critical_if_critical_text(state, &move_data.effect);
+    if damage > 0 {
+        record_last_damage(
+            state,
+            side.other(),
+            BattleLastDamageState {
+                source: side,
+                move_name: move_name.to_string(),
+                // Counter and Mirror Coat reload the original move-table
+                // record before comparing its base type with SPECIAL. Hidden
+                // Power therefore remains NORMAL/physical for reflection even
+                // when its DV-resolved damage type is special.
+                category: damage_category(type_categories, move_data)?,
+                damage,
+            },
+        );
+        apply_bide_damage_storage(state, side, side.other(), damage, events);
+    }
+    let target_fainted_from_hit = state.pokemon(side.other()).hp == 0;
+    let secondary_stat_handled = if move_data.effect == "RAPID_SPIN" {
+        apply_post_damage_stat_effect(
+            state,
+            side,
+            move_name,
+            move_data,
+            damage,
+            pre_damage_effect_chance,
+            stat_multipliers,
+            rng,
+            events,
+        )?
+    } else if target_fainted_from_hit {
+        move_data.effect == "ALL_UP_HIT" || secondary_stat_hit_effect(move_data)
+    } else {
+        apply_post_damage_stat_effect(
+            state,
+            side,
+            move_name,
+            move_data,
+            damage,
+            pre_damage_effect_chance,
+            stat_multipliers,
+            rng,
+            events,
+        )?
+    };
+    apply_post_damage_hp_effect(
+        state,
+        side,
+        move_name,
+        move_data,
+        applied_damage,
+        pre_damage_effect_chance,
+        events,
+    );
+    apply_direct_damage_faint_events(state, side, side.other(), move_name, events);
+    // Effect streams place buildopponentrage after their post-damage command
+    // and checkfaint. A fainted target ends the stream; a survivor builds Rage
+    // only after drain/recoil and their narration have completed.
+    apply_rage_counter_increment(state, side.other(), events)?;
+    if move_data.effect == "HYPER_BEAM" && damage > 0 {
+        set_recharge_move_state(state, side, Some(move_name.to_string()));
+        events.push(BattleEvent::RechargeStarted {
+            side,
+            move_name: move_name.to_string(),
+        });
+    }
+    if state.pokemon(side).hp == 0
+        && !events.iter().any(|event| {
+            matches!(
+                event,
+                BattleEvent::Fainted {
+                    side: fainted_side
+                } if *fainted_side == side
+            )
+        })
+    {
+        events.push(BattleEvent::Fainted { side });
+        return Ok(DamageHitResult::Stop);
+    }
+    if state.pokemon(side.other()).hp == 0 {
+        return Ok(DamageHitResult::Stop);
+    }
+    if move_defers_post_hit_effects(move_data) {
+        return Ok(DamageHitResult::Continue);
+    } else if move_data.effect == "TRAP_TARGET" {
+        apply_trap_target_effect(state, side, move_name, rng, events);
+    } else if move_data.effect == "TRI_ATTACK" {
+        let event_start = events.len();
+        apply_tri_attack_effect(state, side, move_name, move_data, items, rng, events)?;
+        if status_applied_since(events, event_start, side.other()) {
+            apply_held_status_healing(state, side.other(), items, stat_multipliers, events)?;
+        }
+    } else if let Some((status, _chance_percent)) = secondary_status_effect(move_data) {
+        let event_start = events.len();
+        apply_secondary_status_effect(
+            state,
+            side,
+            move_name,
+            status,
+            pre_damage_effect_chance
+                .expect("damaging status effect script must sample before damage"),
+            items,
+            rng,
+            events,
+        )?;
+        if status_applied_since(events, event_start, side.other()) {
+            apply_held_status_healing(state, side.other(), items, stat_multipliers, events)?;
+        }
+    } else if secondary_confusion_effect(move_data).is_some() {
+        let event_start = events.len();
+        apply_secondary_confusion_effect(
+            state,
+            side,
+            move_name,
+            pre_damage_effect_chance
+                .expect("damaging confusion effect script must sample before damage"),
+            items,
+            rng,
+            events,
+        )?;
+        if confusion_applied_since(events, event_start, side.other()) {
+            apply_held_status_healing(state, side.other(), items, stat_multipliers, events)?;
+        }
+    } else if secondary_flinch_effect(move_data).is_some() {
+        apply_secondary_flinch_effect(
+            state,
+            side,
+            move_name,
+            pre_damage_effect_chance
+                .expect("damaging flinch effect script must sample before damage"),
+            target_already_acted,
+            events,
+        );
+    } else if !secondary_stat_handled {
+        if let Some(effect_chance) = pre_damage_effect_chance {
+            apply_secondary_stat_stage_effect(
+                state,
+                side,
+                move_name,
+                move_data,
+                effect_chance,
+                stat_multipliers,
+                rng,
+                events,
+            )?;
+        }
+    }
+    Ok(DamageHitResult::Continue)
+}
+
+fn prepare_damage_hit(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    move_name: &str,
+    move_data: &Move,
+    hit_number: u8,
+    target_switching: bool,
+    stat_multipliers: &BattleStatMultiplierTables,
+    type_categories: &TypeCategories,
+    type_effectiveness: &TypeEffectivenessTable,
+    weather_modifiers: &WeatherModifiers,
+    items: &BTreeMap<String, Item>,
+    rng: &mut dyn BattleRandomSource,
+    events: &mut Vec<BattleEvent>,
+    prepared_critical: Option<PreparedCriticalHit>,
+) -> Result<PreparedDamageHitOutcome, BattleTurnError> {
+    if move_data.effect == "PRESENT" {
+        // Present is the only DamageStats stream that can jump to
+        // EndMoveEffect without reaching either ApplyDamage or a later reset:
+        // its heal branch. DamageStats itself starts with ResetDamage.
+        clear_turn_last_damage(state);
+    }
+    // Present runs Critical and DamageStats before its embedded STAB command
+    // checks type immunity and before it selects damage versus healing. Stage
+    // the critical result up front so the heal and immune exits still consume
+    // the source byte, while the damage branch reuses it below.
+    let prepared_critical = if move_data.effect == "PRESENT" && prepared_critical.is_none() {
+        let attacker = effective_battle_pokemon(state, side);
+        Some(prepare_critical_hit(
+            state, side, move_name, &attacker, items, rng,
+        )?)
+    } else {
+        prepared_critical
+    };
     let mut prepared_move_data = if move_data.effect == "PRESENT" {
         match apply_present_effect(
             state,
@@ -6022,8 +6552,17 @@ fn apply_damage_hit(
                 prepared.power = power;
                 prepared
             }
-            PresentEffectOutcome::Handled(result) => return Ok(result),
+            PresentEffectOutcome::Handled(result) => {
+                if result == DamageHitResult::NoEffect {
+                    clear_critical_if_failure_text(state, &move_data.effect);
+                }
+                return Ok(PreparedDamageHitOutcome::Handled(result));
+            }
         }
+    } else if move_data.effect == "MAGNITUDE" {
+        // GetMagnitude is between Critical and DamageCalc in this stream.
+        // Retain the exported placeholder until the critical byte is sampled.
+        move_data.clone()
     } else {
         let attacker = match side {
             BattleSide::Player => &state.player,
@@ -6031,13 +6570,8 @@ fn apply_damage_hit(
         };
         damage_move_data(side, move_name, attacker, move_data, rng, events)
     };
-    let post_type_damage_multiplier = apply_state_damage_power_modifiers(
-        state,
-        side,
-        target_switching,
-        &mut prepared_move_data,
-        events,
-    );
+    let post_type_damage_multiplier =
+        apply_state_damage_power_modifiers(state, side, &mut prepared_move_data, events);
     let mut attacker = effective_battle_pokemon(state, side);
     if side == BattleSide::Enemy && attacker.status.as_deref() == Some("BURN") {
         // Enemy battle stats retain whether burn was applied when the struct
@@ -6076,17 +6610,14 @@ fn apply_damage_hit(
         defender.special_defense = user_type2;
         defender.stat_boosts = default_stat_boosts();
     }
-    if protect_active(state, side.other()) {
-        events.push(BattleEvent::MoveProtected {
-            side,
-            move_name: move_name.to_string(),
-            target: side.other(),
-        });
-        apply_jump_kick_crash_effect(state, side, move_name, move_data, events);
-        return Ok(DamageHitResult::Stop);
-    }
     let (critical, critical_roll, critical_threshold, damage_roll, result) =
         if is_fixed_damage_effect(move_data) {
+            // ConstantDamage precedes CheckHit and ResetTypeMatchup in all
+            // four fixed-damage streams. Psywave must therefore complete its
+            // rejection loop even if accuracy, Protect, or type immunity
+            // prevents the retained amount from ever reaching ApplyDamage.
+            let fixed_damage = fixed_damage_amount(&attacker, &defender, move_data, rng)
+                .expect("fixed-damage effect lost its exact amount");
             let type_multiplier = calculate_type_effectiveness_multiplier_with_foresight(
                 type_effectiveness,
                 &move_data.move_type,
@@ -6094,18 +6625,10 @@ fn apply_damage_hit(
                 identified_state(state, side.other()),
             )
             .map_err(BattleTurnError::DamageCalculation)?;
-            let ability_immunity = (prepared_move_data.move_type == "GROUND"
-                && has_ground_immunity(&defender.species.ability))
-                || (has_wonder_guard(&defender.species.ability)
-                    && type_multiplier.numerator <= type_multiplier.denominator);
-            let (damage, type_multiplier) = if type_multiplier.numerator == 0 || ability_immunity {
+            let (damage, type_multiplier) = if type_multiplier.numerator == 0 {
                 (0, TypeMultiplier::zero())
             } else {
-                (
-                    fixed_damage_amount(&attacker, &defender, move_data, rng)
-                        .expect("fixed-damage effect lost its exact amount"),
-                    TypeMultiplier::one(),
-                )
+                (fixed_damage, TypeMultiplier::one())
             };
             (
                 false,
@@ -6125,13 +6648,22 @@ fn apply_damage_hit(
                 items,
                 events,
             )?;
-            let (rolled_critical, critical_roll, critical_threshold) =
-                roll_critical_hit(side, move_name, &attacker, items, rng)?;
-            state.critical_hit_register = u8::from(rolled_critical);
-            let critical =
-                rolled_critical && !ability_blocks_critical_hit(&defender.species.ability);
+            let PreparedCriticalHit {
+                critical: rolled_critical,
+                roll: critical_roll,
+                threshold: critical_threshold,
+            } = if let Some(prepared_critical) = prepared_critical {
+                prepared_critical
+            } else {
+                prepare_critical_hit(state, side, move_name, &attacker, items, rng)?
+            };
+            let critical = rolled_critical;
+            if move_data.effect == "MAGNITUDE" {
+                prepared_move_data.power =
+                    dynamic_move_power(side, move_name, &attacker, move_data, rng, events);
+            }
             let damage_roll = crystal_damage_variation_roll(rng);
-            let result = calculate_damage(
+            let mut result = calculate_damage(
                 &attacker,
                 &defender,
                 &prepared_move_data,
@@ -6171,6 +6703,13 @@ fn apply_damage_hit(
                         && badge_type_boost_active(state, side, &prepared_move_data.move_type),
                     defender_metal_powder: !link_present_registers
                         && ditto_holds_metal_powder(state, side.other()),
+                    attacker_species_item_boost: !link_present_registers
+                        && species_held_attack_boost_active(
+                            state,
+                            side,
+                            is_physical_type(type_categories, &prepared_move_data.move_type)
+                                .map_err(BattleTurnError::DamageCalculation)?,
+                        ),
                     defender_screen: !link_present_registers
                         && active_damage_screen(
                             state,
@@ -6195,9 +6734,41 @@ fn apply_damage_hit(
                     attacker_burn_penalty: !link_present_registers
                         && side == BattleSide::Enemy
                         && state.enemy_burn_attack_penalty_active,
+                    attacker_badge_before_status: side == BattleSide::Player
+                        && state.player_badge_before_status,
+                    attacker_loaded_stat: (!link_present_registers).then(|| {
+                        let stats = loaded_stats(state, side);
+                        if is_physical_type(type_categories, &prepared_move_data.move_type)
+                            .expect("validated move type category")
+                        {
+                            stats.attack
+                        } else {
+                            stats.special_attack
+                        }
+                    }),
+                    defender_loaded_stat: (!link_present_registers).then(|| {
+                        let stats = loaded_stats(state, side.other());
+                        if is_physical_type(type_categories, &prepared_move_data.move_type)
+                            .expect("validated move type category")
+                        {
+                            stats.defense
+                        } else {
+                            stats.special_defense
+                        }
+                    }),
                 },
             )
             .map_err(BattleTurnError::DamageCalculation)?;
+            apply_pre_check_hit_final_damage_modifier(
+                state,
+                side,
+                move_name,
+                move_data,
+                &prepared_move_data,
+                target_switching,
+                &mut result,
+                events,
+            );
             (
                 critical,
                 critical_roll,
@@ -6206,266 +6777,65 @@ fn apply_damage_hit(
                 result,
             )
         };
-    if result.type_multiplier.numerator == 0 {
-        events.push(BattleEvent::NoEffect {
-            side,
-            move_name: move_name.to_string(),
-        });
-        apply_jump_kick_crash_effect(state, side, move_name, move_data, events);
-        return Ok(DamageHitResult::NoEffect);
-    }
-
-    // In the compiled effect streams this command is after checkhit but
-    // before move animation/applydamage. It therefore samples even when the
-    // impending damage will faint the target, and it must precede the Focus
-    // Band roll inside applydamage. A pre-existing Substitute makes the
-    // command fail without calling BattleRandom.
-    let pre_damage_effect_chance = sample_pre_damage_effect_chance(state, side, move_data, rng);
-
-    let defender_hp_before = state.pokemon(side.other()).hp;
-    let raw_damage = if move_data.effect == "STOMP" && minimized_state(state, side.other()) {
-        result.damage.saturating_mul(2)
-    } else {
-        result.damage
-    };
-    if let Some(hit_result) = apply_substitute_damage(state, side, move_name, raw_damage, events) {
-        apply_rage_counter_increment(state, side.other(), events)?;
-        // Pay Day's effect script executes `payday` after `applydamage` even
-        // when applydamage redirected the hit into a Substitute.
-        if move_data.effect == "PAY_DAY" {
-            apply_pay_day_effect(state, side, move_name, events);
-        }
-        if move_data.effect == "DEFENSE_DOWN_HIT" {
-            // This script deliberately has another effectchance after
-            // applydamage. If the hit just broke the Substitute, that second
-            // command now samples and can lower the real target's Defense.
-            let effect_chance = sample_effect_chance_against_target(state, side, move_data, rng);
-            apply_secondary_stat_stage_effect(
-                state,
-                side,
-                move_name,
-                move_data,
-                effect_chance,
-                rng,
-                events,
-            )?;
-        }
-        if move_data.effect == "HYPER_BEAM" {
-            set_recharge_move_state(state, side, Some(move_name.to_string()));
-            events.push(BattleEvent::RechargeStarted {
-                side,
-                move_name: move_name.to_string(),
-            });
-        }
-        return Ok(hit_result);
-    }
-    let mut damage = raw_damage.min(defender_hp_before);
-    if move_data.effect == "FALSE_SWIPE" && defender_hp_before > 1 {
-        damage = damage.min(defender_hp_before - 1);
-    }
-    if endure_active(state, side.other()) && defender_hp_before > 1 {
-        let endured_damage = damage;
-        damage = damage.min(defender_hp_before - 1);
-        if endured_damage != damage {
-            events.push(BattleEvent::EnduredHit {
-                side,
-                move_name: move_name.to_string(),
-                target: side.other(),
-                raw_damage: endured_damage,
-                held_item: None,
-            });
-        }
-    }
-    if damage >= defender_hp_before
-        && defender_hp_before > 1
-        && focus_band_survives(state, side.other(), items, rng)?
-    {
-        let lethal_damage = damage;
-        damage = defender_hp_before - 1;
-        events.push(BattleEvent::EnduredHit {
-            side,
-            move_name: move_name.to_string(),
-            target: side.other(),
-            raw_damage: lethal_damage,
-            held_item: state.pokemon(side.other()).item.clone(),
-        });
-    }
-    let applied_result = DamageResult {
-        damage: raw_damage,
-        type_multiplier: result.type_multiplier,
-    };
-    let defender = match side {
-        BattleSide::Player => &mut state.enemy,
-        BattleSide::Enemy => &mut state.player,
-    };
-    defender.hp = defender.hp.saturating_sub(damage);
-    let defender_hp_after = defender.hp;
-    events.push(BattleEvent::Damage {
-        side,
-        move_name: move_name.to_string(),
-        damage,
-        defender_hp_before,
-        defender_hp_after,
+    Ok(PreparedDamageHitOutcome::Damage(PreparedDamageHit {
+        prepared_move_data,
         critical,
         critical_roll,
         critical_threshold,
-        roll: damage_roll,
-        result: applied_result,
-    });
-    if damage > 0 {
-        record_last_damage(
-            state,
-            side.other(),
-            BattleLastDamageState {
-                source: side,
-                move_name: move_name.to_string(),
-                // Counter and Mirror Coat reload the original move-table
-                // record before comparing its base type with SPECIAL. Hidden
-                // Power therefore remains NORMAL/physical for reflection even
-                // when its DV-resolved damage type is special.
-                category: damage_category(type_categories, move_data)?,
-                damage,
-            },
-        );
-        apply_rage_counter_increment(state, side.other(), events)?;
-        apply_bide_damage_storage(state, side, side.other(), damage, events);
-        apply_contact_ability(state, side, move_name, damage, rng, events);
-        if state.pokemon(side.other()).hp > 0
-            && move_name != "STRUGGLE"
-            && active_ability(state, side.other()) == "COLOR_CHANGE"
-        {
-            let type_override = BattleTypeOverride {
-                type1: prepared_move_data.move_type.clone(),
-                type2: prepared_move_data.move_type.clone(),
-            };
-            match side.other() {
-                BattleSide::Player => state.player_type_override = Some(type_override),
-                BattleSide::Enemy => state.enemy_type_override = Some(type_override),
-            }
-        }
+        damage_roll,
+        result,
+    }))
+}
+
+fn apply_pre_check_hit_final_damage_modifier(
+    state: &BattleCombatState,
+    side: BattleSide,
+    move_name: &str,
+    move_data: &Move,
+    prepared_move_data: &Move,
+    target_switching: bool,
+    result: &mut DamageResult,
+    events: &mut Vec<BattleEvent>,
+) {
+    if move_data.effect == "FALSE_SWIPE" {
+        // BattleCommand_FalseSwipe runs after variation but before CheckHit
+        // and ApplyDamage. Lethal-or-equal damage becomes target HP - 1,
+        // including zero damage when the target is already at one HP. The
+        // retained value is therefore also what a Substitute receives.
+        result.damage = result
+            .damage
+            .min(state.pokemon(side.other()).hp.saturating_sub(1));
+        return;
     }
-    let target_fainted_from_hit = state.pokemon(side.other()).hp == 0;
-    let secondary_stat_handled = if move_data.effect == "RAPID_SPIN" {
-        apply_post_damage_stat_effect(
-            state,
-            side,
-            move_name,
-            move_data,
-            damage,
-            pre_damage_effect_chance,
-            rng,
-            events,
-        )?
-    } else if target_fainted_from_hit {
-        move_data.effect == "ALL_UP_HIT" || secondary_stat_hit_effect(move_data)
-    } else {
-        apply_post_damage_stat_effect(
-            state,
-            side,
-            move_name,
-            move_data,
-            damage,
-            pre_damage_effect_chance,
-            rng,
-            events,
-        )?
-    };
-    apply_post_damage_hp_effect(
-        state,
-        side,
-        move_name,
-        move_data,
-        damage,
-        pre_damage_effect_chance,
-        events,
-    );
-    apply_direct_damage_faint_events(state, side, side.other(), move_name, events);
-    if move_data.effect == "HYPER_BEAM" && damage > 0 {
-        set_recharge_move_state(state, side, Some(move_name.to_string()));
-        events.push(BattleEvent::RechargeStarted {
+
+    if move_data.effect == "PURSUIT" && target_switching {
+        result.damage = result.damage.saturating_mul(2);
+        events.push(BattleEvent::PursuitPower {
             side,
             move_name: move_name.to_string(),
+            target: side.other(),
+            power: prepared_move_data.power.saturating_mul(2),
+        });
+        return;
+    }
+
+    let target_move = airborne_move_state(state, side.other());
+    let doubles_airborne_damage = (matches!(move_data.effect.as_str(), "GUST" | "TWISTER")
+        && target_move == Some("FLY"))
+        || (move_data.effect == "EARTHQUAKE" && target_move == Some("DIG"));
+    if !doubles_airborne_damage {
+        return;
+    }
+
+    result.damage = result.damage.saturating_mul(2);
+    if move_data.effect == "EARTHQUAKE" {
+        events.push(BattleEvent::EarthquakePower {
+            side,
+            move_name: move_name.to_string(),
+            target_move: "DIG".to_string(),
+            power: prepared_move_data.power.saturating_mul(2),
         });
     }
-    if state.pokemon(side).hp == 0
-        && !events.iter().any(|event| {
-            matches!(
-                event,
-                BattleEvent::Fainted {
-                    side: fainted_side
-                } if *fainted_side == side
-            )
-        })
-    {
-        events.push(BattleEvent::Fainted { side });
-        return Ok(DamageHitResult::Stop);
-    }
-    if state.pokemon(side.other()).hp == 0 {
-        return Ok(DamageHitResult::Stop);
-    }
-    if move_defers_post_hit_effects(move_data) {
-        return Ok(DamageHitResult::Continue);
-    } else if move_data.effect == "TRAP_TARGET" {
-        apply_trap_target_effect(state, side, move_name, rng, events);
-    } else if move_data.effect == "TRI_ATTACK" {
-        let event_start = events.len();
-        apply_tri_attack_effect(state, side, move_name, move_data, rng, events);
-        if status_applied_since(events, event_start, side.other()) {
-            apply_held_status_healing(state, side.other(), items, events)?;
-        }
-    } else if let Some((status, _chance_percent)) = secondary_status_effect(move_data) {
-        let event_start = events.len();
-        apply_secondary_status_effect(
-            state,
-            side,
-            move_name,
-            status,
-            pre_damage_effect_chance
-                .expect("damaging status effect script must sample before damage"),
-            rng,
-            events,
-        );
-        if status_applied_since(events, event_start, side.other()) {
-            apply_held_status_healing(state, side.other(), items, events)?;
-        }
-    } else if secondary_confusion_effect(move_data).is_some() {
-        let event_start = events.len();
-        apply_secondary_confusion_effect(
-            state,
-            side,
-            move_name,
-            pre_damage_effect_chance
-                .expect("damaging confusion effect script must sample before damage"),
-            rng,
-            events,
-        );
-        if confusion_applied_since(events, event_start, side.other()) {
-            apply_held_status_healing(state, side.other(), items, events)?;
-        }
-    } else if secondary_flinch_effect(move_data).is_some() {
-        apply_secondary_flinch_effect(
-            state,
-            side,
-            move_name,
-            pre_damage_effect_chance
-                .expect("damaging flinch effect script must sample before damage"),
-            target_already_acted,
-            events,
-        );
-    } else if !secondary_stat_handled {
-        if let Some(effect_chance) = pre_damage_effect_chance {
-            apply_secondary_stat_stage_effect(
-                state,
-                side,
-                move_name,
-                move_data,
-                effect_chance,
-                rng,
-                events,
-            )?;
-        }
-    }
-    Ok(DamageHitResult::Continue)
 }
 
 fn move_defers_post_hit_effects(move_data: &Move) -> bool {
@@ -6518,10 +6888,7 @@ fn apply_kings_rock_flinch(
             parameter: item.parameter,
         });
     }
-    if (rng.battle_random_byte() as i16) < item.parameter
-        && !ability_blocks_flinching(active_ability(state, target))
-        && !blocks_opposing_secondary_effects(active_ability(state, target))
-    {
+    if (rng.battle_random_byte() as i16) < item.parameter {
         set_recharge_move_state(state, target, None);
         state.pokemon_mut(target).flinching = true;
         events.push(BattleEvent::FlinchApplied {
@@ -6592,7 +6959,6 @@ fn apply_beat_up_effect(
     move_data: &Move,
     wild_battle: bool,
     _target_switching: bool,
-    stat_multipliers: &BattleStatMultiplierTables,
     _type_categories: &TypeCategories,
     _type_effectiveness: &TypeEffectivenessTable,
     _weather_modifiers: &WeatherModifiers,
@@ -6600,21 +6966,28 @@ fn apply_beat_up_effect(
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    let only_one_party_member = match side {
-        BattleSide::Player => state.player_party.len() == 1,
-        BattleSide::Enemy => state.enemy_party.len() == 1,
+    let wild_enemy = side == BattleSide::Enemy && wild_battle;
+    let party_slots = if wild_enemy {
+        // The wild-enemy branch never reads OT party data and EndLoop exits
+        // after this one active attacker regardless of the stored party shape.
+        vec![(0, state.enemy.clone())]
+    } else {
+        match side {
+            BattleSide::Player => state.player_party.clone(),
+            BattleSide::Enemy => state.enemy_party.clone(),
+        }
+        .into_iter()
+        .enumerate()
+        .collect::<Vec<_>>()
     };
-    let participants = beat_up_participants(state, side);
-    if participants.is_empty() {
-        events.push(BattleEvent::NoEffect {
-            side,
-            move_name: move_name.to_string(),
-        });
-        // BeatUpFailText returns to the shared tail, so Crystal still executes
-        // King's Rock when every party participant is ineligible.
-        apply_kings_rock_flinch(state, side, move_name, move_data, 1, items, rng, events)?;
-        return Ok(());
-    }
+    let only_one_party_member = wild_enemy || party_slots.len() == 1;
+    let mut participants = if wild_enemy {
+        BTreeMap::from([(0, state.enemy.clone())])
+    } else {
+        beat_up_participants(state, side)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+    };
     if protect_active(state, side.other()) {
         events.push(BattleEvent::MoveProtected {
             side,
@@ -6625,22 +6998,29 @@ fn apply_beat_up_effect(
     }
 
     let mut hit_any = false;
-    for (party_index, participant) in participants {
-        let held_type_boost_percent =
-            held_item_type_boost_percent(state, side, &move_data.move_type, items, events)?;
+    for (party_index, _party_slot) in party_slots {
+        // EndLoop re-enters BattleCommand_BeatUp for every party slot, and
+        // that command starts with ResetDamage before testing eligibility.
+        clear_turn_last_damage(state);
         let active_attacker = effective_battle_pokemon(state, side);
         let (rolled_critical, critical_roll, critical_threshold) =
             roll_critical_hit(side, move_name, &active_attacker, items, rng)?;
         state.critical_hit_register = u8::from(rolled_critical);
-        let critical =
-            rolled_critical && !ability_blocks_critical_hit(active_ability(state, side.other()));
+        let critical = rolled_critical;
+        // BeatUp rejects fainted or statused members only after Critical has
+        // consumed its byte. Failed slots jump directly to EndLoop and do not
+        // execute DamageCalc or DamageVariation.
+        let Some(participant) = participants.remove(&party_index) else {
+            continue;
+        };
+        let held_type_boost_percent =
+            held_item_type_boost_percent(state, side, &move_data.move_type, items, events)?;
         let damage_roll = crystal_damage_variation_roll(rng);
         let result = if side == BattleSide::Enemy && wild_battle {
             calculate_wild_enemy_beat_up_damage(
                 state,
                 side,
                 move_data.power,
-                stat_multipliers,
                 held_type_boost_percent,
                 critical,
                 damage_roll,
@@ -6668,39 +7048,22 @@ fn apply_beat_up_effect(
         });
         let defender_hp_before = state.pokemon(side.other()).hp;
         let raw_damage = result.damage;
-        if apply_substitute_damage(state, side, move_name, raw_damage, events).is_some() {
+        let survival = apply_damage_survival_modifier(state, side.other(), raw_damage, items, rng)?;
+        if apply_substitute_damage(state, side, move_name, survival.damage, events).is_some() {
+            emit_survival_damage_event(
+                side,
+                side.other(),
+                move_name,
+                raw_damage,
+                survival.held_item,
+                events,
+            );
+            state.critical_hit_register = 0;
             hit_any = true;
             apply_rage_counter_increment(state, side.other(), events)?;
             continue;
         }
-        let mut damage = raw_damage.min(defender_hp_before);
-        if endure_active(state, side.other()) && defender_hp_before > 1 {
-            let endured_damage = damage;
-            damage = damage.min(defender_hp_before - 1);
-            if endured_damage != damage {
-                events.push(BattleEvent::EnduredHit {
-                    side,
-                    move_name: move_name.to_string(),
-                    target: side.other(),
-                    raw_damage: endured_damage,
-                    held_item: None,
-                });
-            }
-        }
-        if damage >= defender_hp_before
-            && defender_hp_before > 1
-            && focus_band_survives(state, side.other(), items, rng)?
-        {
-            let lethal_damage = damage;
-            damage = defender_hp_before - 1;
-            events.push(BattleEvent::EnduredHit {
-                side,
-                move_name: move_name.to_string(),
-                target: side.other(),
-                raw_damage: lethal_damage,
-                held_item: state.pokemon(side.other()).item.clone(),
-            });
-        }
+        let damage = survival.damage.min(defender_hp_before);
         let defender_mut = state.pokemon_mut(side.other());
         defender_mut.hp = defender_mut.hp.saturating_sub(damage);
         let defender_hp_after = defender_mut.hp;
@@ -6719,6 +7082,15 @@ fn apply_beat_up_effect(
                 type_multiplier: result.type_multiplier,
             },
         });
+        emit_survival_damage_event(
+            side,
+            side.other(),
+            move_name,
+            raw_damage,
+            survival.held_item,
+            events,
+        );
+        state.critical_hit_register = 0;
         hit_any = true;
         if damage > 0 {
             record_last_damage(
@@ -6740,7 +7112,13 @@ fn apply_beat_up_effect(
         }
     }
 
-    if hit_any && !only_one_party_member {
+    if !hit_any {
+        events.push(BattleEvent::NoEffect {
+            side,
+            move_name: move_name.to_string(),
+        });
+    }
+    if !only_one_party_member {
         // EndLoop's one-party-member branch calls BeatUpFailText and jumps
         // straight to EndMoveEffect, skipping the shared King's Rock tail.
         apply_kings_rock_flinch(state, side, move_name, move_data, 1, items, rng, events)?;
@@ -6765,9 +7143,7 @@ fn calculate_beat_up_damage(
         .saturating_mul(attack)
         / defense
         / 50;
-    if held_type_boost_percent != 0 {
-        damage = damage.saturating_mul(100 + u32::from(held_type_boost_percent)) / 100;
-    }
+    damage = apply_held_type_boost_to_quotient(damage, held_type_boost_percent);
     if critical {
         damage = damage.saturating_mul(2);
     }
@@ -6783,7 +7159,6 @@ fn calculate_wild_enemy_beat_up_damage(
     state: &BattleCombatState,
     side: BattleSide,
     power: u16,
-    stat_multipliers: &BattleStatMultiplierTables,
     held_type_boost_percent: u8,
     critical: bool,
     damage_roll: u8,
@@ -6803,26 +7178,19 @@ fn calculate_wild_enemy_beat_up_damage(
             stat: Stat::SpecialDefense,
         },
     )?;
-    let ignore_stages = critical && defense_stage > attack_stage;
+    let ignore_stages = critical && defense_stage >= attack_stage;
+    // The wild branch jumps to EnemyAttackDamage, which reads the current
+    // wEnemyMonSpclAtk/wBattleMonSpclDef words. Only the qualifying critical
+    // branch replaces them with the untouched raw shadows.
     let mut attack = if ignore_stages {
         attacker.special_attack
     } else {
-        apply_stage(stat_multipliers, attacker.special_attack, attack_stage).ok_or(
-            BattleTurnError::MissingStatMultiplier {
-                side,
-                stage: attack_stage,
-            },
-        )?
+        loaded_stats(state, side).special_attack
     };
     let mut defense = if ignore_stages {
         defender.special_defense
     } else {
-        apply_stage(stat_multipliers, defender.special_defense, defense_stage).ok_or(
-            BattleTurnError::MissingStatMultiplier {
-                side: defender_side,
-                stage: defense_stage,
-            },
-        )?
+        loaded_stats(state, defender_side).special_defense
     };
     if attacker.species.id == "PIKACHU" && attacker.item.as_deref() == Some("LIGHT_BALL") {
         attack = attack.wrapping_mul(2);
@@ -6840,9 +7208,7 @@ fn calculate_wild_enemy_beat_up_damage(
         .saturating_mul(u32::from(attack))
         / u32::from(defense)
         / 50;
-    if held_type_boost_percent != 0 {
-        damage = damage.saturating_mul(100 + u32::from(held_type_boost_percent)) / 100;
-    }
+    damage = apply_held_type_boost_to_quotient(damage, held_type_boost_percent);
     if critical {
         damage = damage.saturating_mul(2);
     }
@@ -6888,6 +7254,26 @@ enum DamageHitResult {
     NoEffect,
     Continue,
     Stop,
+}
+
+struct PreparedDamageHit {
+    prepared_move_data: Move,
+    critical: bool,
+    critical_roll: u8,
+    critical_threshold: u8,
+    damage_roll: u8,
+    result: DamageResult,
+}
+
+struct PreparedCriticalHit {
+    critical: bool,
+    roll: u8,
+    threshold: u8,
+}
+
+enum PreparedDamageHitOutcome {
+    Damage(PreparedDamageHit),
+    Handled(DamageHitResult),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7047,6 +7433,9 @@ fn apply_ohko_effect(
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
+    // BattleCommand_OHKO starts with ResetDamage. Failure paths therefore
+    // cannot expose pre-menu AI damage scratch to a later Counter command.
+    clear_turn_last_damage(state);
     // BattleCommand_OHKO leaves $ff on every failure path and $02 on hit.
     state.critical_hit_register = u8::MAX;
     let mut attacker = state.pokemon(side).clone();
@@ -7066,16 +7455,7 @@ fn apply_ohko_effect(
             side,
             move_name: move_name.to_string(),
         });
-        return Ok(());
-    }
-    if defender.species.ability == "STURDY" {
-        events.push(BattleEvent::OhkoFailed {
-            side,
-            move_name: move_name.to_string(),
-            reason: OhkoFailureReason::AbilityBlocked {
-                ability: "STURDY".to_string(),
-            },
-        });
+        state.critical_hit_register = 0;
         return Ok(());
     }
     if attacker.level < defender.level {
@@ -7087,6 +7467,7 @@ fn apply_ohko_effect(
                 defender_level: defender.level,
             },
         });
+        state.critical_hit_register = 0;
         return Ok(());
     }
     let target = side.other();
@@ -7096,6 +7477,7 @@ fn apply_ohko_effect(
             move_name: move_name.to_string(),
             target,
         });
+        state.critical_hit_register = 0;
         return Ok(());
     }
     let level_delta = attacker.level.saturating_sub(defender.level);
@@ -7127,6 +7509,7 @@ fn apply_ohko_effect(
                     target,
                     airborne_move,
                 });
+                state.critical_hit_register = 0;
                 return Ok(());
             }
         }
@@ -7146,51 +7529,53 @@ fn apply_ohko_effect(
                 },
             )?;
             if !(identified_state(state, target) && defender_evasion >= attacker_accuracy) {
-                let stage = (attacker_accuracy - defender_evasion).clamp(-6, 6);
-                let multiplier = accuracy_stage_multiplier(stat_multipliers, stage)
-                    .ok_or(BattleTurnError::MissingAccuracyMultiplier { stage })?;
-                accuracy = multiplier.multiply_floor(i32::from(accuracy)).clamp(1, 255) as u8;
+                accuracy = apply_accuracy_evasion_multipliers(
+                    accuracy,
+                    attacker_accuracy,
+                    defender_evasion,
+                    stat_multipliers,
+                )?;
             }
             accuracy = apply_brightpowder_accuracy(state, target, items, accuracy)?;
-            let roll = rng.battle_random_byte();
-            if roll >= accuracy {
-                events.push(BattleEvent::OhkoFailed {
-                    side,
-                    move_name: move_name.to_string(),
-                    reason: OhkoFailureReason::Missed { accuracy, roll },
-                });
-                return Ok(());
+            if accuracy == u8::MAX {
+                // Shared CheckHit compares the finalized byte with -1 before
+                // BattleRandom. Keep the diagnostic field neutral without
+                // consuming a source byte on this sure-hit result.
+                0
+            } else {
+                let roll = rng.battle_random_byte();
+                if roll >= accuracy {
+                    events.push(BattleEvent::OhkoFailed {
+                        side,
+                        move_name: move_name.to_string(),
+                        reason: OhkoFailureReason::Missed { accuracy, roll },
+                    });
+                    state.critical_hit_register = 0;
+                    return Ok(());
+                }
+                roll
             }
-            roll
         }
     };
 
     state.critical_hit_register = 2;
     let defender_hp_before = state.pokemon(target).hp;
-    if apply_substitute_damage(state, side, move_name, u16::MAX, events).is_some() {
+    let raw_damage = u16::MAX;
+    let survival = apply_damage_survival_modifier(state, target, raw_damage, items, rng)?;
+    if apply_substitute_damage(state, side, move_name, survival.damage, events).is_some() {
+        emit_survival_damage_event(
+            side,
+            target,
+            move_name,
+            raw_damage,
+            survival.held_item,
+            events,
+        );
+        state.critical_hit_register = 0;
         apply_rage_counter_increment(state, target, events)?;
         return Ok(());
     }
-    let mut damage = defender_hp_before;
-    if endure_active(state, target) && defender_hp_before > 1 {
-        damage = defender_hp_before - 1;
-        events.push(BattleEvent::EnduredHit {
-            side,
-            move_name: move_name.to_string(),
-            target,
-            raw_damage: defender_hp_before,
-            held_item: None,
-        });
-    } else if defender_hp_before > 1 && focus_band_survives(state, target, items, rng)? {
-        damage = defender_hp_before - 1;
-        events.push(BattleEvent::EnduredHit {
-            side,
-            move_name: move_name.to_string(),
-            target,
-            raw_damage: defender_hp_before,
-            held_item: state.pokemon(target).item.clone(),
-        });
-    }
+    let damage = survival.damage.min(defender_hp_before);
     state.pokemon_mut(target).hp = defender_hp_before.saturating_sub(damage);
     let defender_hp_after = state.pokemon(target).hp;
     events.push(BattleEvent::Damage {
@@ -7208,6 +7593,15 @@ fn apply_ohko_effect(
             type_multiplier,
         },
     });
+    emit_survival_damage_event(
+        side,
+        target,
+        move_name,
+        raw_damage,
+        survival.held_item,
+        events,
+    );
+    state.critical_hit_register = 0;
     record_last_damage(
         state,
         target,
@@ -7249,20 +7643,40 @@ fn transform_state(state: &BattleCombatState, side: BattleSide) -> Option<&Battl
     }
 }
 
-fn active_ability(state: &BattleCombatState, side: BattleSide) -> &str {
+fn battle_stat_boosts(state: &BattleCombatState, side: BattleSide) -> &BTreeMap<Stat, i8> {
     transform_state(state, side)
-        .map(|transform| transform.species.ability.as_str())
-        .unwrap_or_else(|| state.pokemon(side).species.ability.as_str())
+        .map(|transform| &transform.stat_boosts)
+        .unwrap_or_else(|| &state.pokemon(side).stat_boosts)
+}
+
+fn battle_stat_boosts_mut(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+) -> &mut BTreeMap<Stat, i8> {
+    if transform_state(state, side).is_some() {
+        match side {
+            BattleSide::Player => {
+                &mut state
+                    .player_transform
+                    .as_mut()
+                    .expect("transform")
+                    .stat_boosts
+            }
+            BattleSide::Enemy => {
+                &mut state
+                    .enemy_transform
+                    .as_mut()
+                    .expect("transform")
+                    .stat_boosts
+            }
+        }
+    } else {
+        &mut state.pokemon_mut(side).stat_boosts
+    }
 }
 
 fn battle_effective_weather(state: &BattleCombatState) -> Weather {
-    if active_ability(state, BattleSide::Player) == "AIR_LOCK"
-        || active_ability(state, BattleSide::Enemy) == "AIR_LOCK"
-    {
-        Weather::None
-    } else {
-        state.weather
-    }
+    state.weather
 }
 
 fn set_transform_state(
@@ -7352,15 +7766,11 @@ fn move_blocked_before_disabled_move(
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
-    let early_bird = active_ability(state, side) == "EARLY_BIRD";
     let pokemon = state.pokemon_mut(side);
     let mut woke_up = false;
     let blocked_by_status = match pokemon.status.as_deref() {
         Some("SLEEP") => {
             pokemon.sleep_turns = pokemon.sleep_turns.saturating_sub(1);
-            if early_bird {
-                pokemon.sleep_turns = pokemon.sleep_turns.saturating_sub(1);
-            }
             if pokemon.sleep_turns == 0 {
                 pokemon.status = None;
                 woke_up = true;
@@ -7437,6 +7847,12 @@ fn tick_disable_before_action(
     let Some(disable) = disable_state(state, side).cloned() else {
         return;
     };
+    if disable.turns_remaining == 0 {
+        // CheckTurn tests the packed w*DisableCount byte before decrementing.
+        // Zero is inactive and produces no DisabledNoMoreText.
+        clear_disable_state(state, side);
+        return;
+    }
     let turns_remaining = disable.turns_remaining.saturating_sub(1);
     if turns_remaining == 0 {
         clear_disable_state(state, side);
@@ -7467,7 +7883,9 @@ fn move_blocked_by_paralysis(
         return false;
     }
     let roll = rng.battle_random_byte();
-    if roll >= 64 {
+    // RGBDS's `25 percent` is `$3f`; unlike the separate AI-failure
+    // comparisons, CheckTurn does not add one to this threshold.
+    if roll >= 63 {
         return false;
     }
     events.push(BattleEvent::FullyParalyzed {
@@ -7506,14 +7924,16 @@ fn move_blocked_by_attract(
     let Some(source) = attracted_by_state(state, side) else {
         return false;
     };
-    let roll = rng.battle_random_byte() & 1;
+    let roll = rng.battle_random_byte();
     events.push(BattleEvent::InfatuatedTurn {
         side,
         move_name: move_name.to_string(),
         source,
         roll,
     });
-    if roll == 0 {
+    // CheckTurn compares the complete byte against `50 percent + 1` ($80).
+    // Attraction immobilizes on the upper half of that split.
+    if roll >= 128 {
         events.push(BattleEvent::InfatuatedImmobilized {
             side,
             move_name: move_name.to_string(),
@@ -7552,14 +7972,15 @@ fn move_blocked_by_confusion(
         return Ok(false);
     }
 
-    let confusion_roll = rng.battle_random_byte() & 1;
+    let confusion_roll = rng.battle_random_byte();
     events.push(BattleEvent::ConfusedTurn {
         side,
         move_name: move_name.to_string(),
         turns_remaining,
         roll: confusion_roll,
     });
-    if confusion_roll != 0 {
+    // Confusion self-damage uses the lower half of the same $80 split.
+    if confusion_roll >= 128 {
         return Ok(false);
     }
 
@@ -7622,6 +8043,7 @@ fn apply_confusion_self_damage(
             defender_badge_boost: badge_boost_active(state, side, Stat::Defense),
             attacker_type_badge_boost: false,
             defender_metal_powder: ditto_holds_metal_powder(state, side),
+            attacker_species_item_boost: false,
             defender_screen: screen_turns(state, side, BattleScreen::Reflect) != 0,
             link_colosseum: state.link_colosseum,
             held_type_boost_percent,
@@ -7630,6 +8052,10 @@ fn apply_confusion_self_damage(
             rage_counter: 0,
             attacker_burn_penalty: side == BattleSide::Enemy
                 && state.enemy_burn_attack_penalty_active,
+            attacker_badge_before_status: side == BattleSide::Player
+                && state.player_badge_before_status,
+            attacker_loaded_stat: Some(loaded_stats(state, side).attack),
+            defender_loaded_stat: Some(loaded_stats(state, side).defense),
         },
     )
     .map_err(BattleTurnError::DamageCalculation)?;
@@ -7657,10 +8083,25 @@ fn ditto_holds_metal_powder(state: &BattleCombatState, side: BattleSide) -> bool
     pokemon.species.id == "DITTO" && pokemon.item.as_deref() == Some("METAL_POWDER")
 }
 
+fn species_held_attack_boost_active(
+    state: &BattleCombatState,
+    side: BattleSide,
+    physical: bool,
+) -> bool {
+    let pokemon = state.pokemon(side);
+    if physical {
+        matches!(pokemon.species.id.as_str(), "CUBONE" | "MAROWAK")
+            && pokemon.item.as_deref() == Some("THICK_CLUB")
+    } else {
+        pokemon.species.id == "PIKACHU" && pokemon.item.as_deref() == Some("LIGHT_BALL")
+    }
+}
+
 fn apply_held_status_healing(
     state: &mut BattleCombatState,
     side: BattleSide,
     items: &BTreeMap<String, Item>,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     if state.pokemon(side).hp == 0 {
@@ -7695,6 +8136,12 @@ fn apply_held_status_healing(
         if side == BattleSide::Enemy {
             recalculate_enemy_status_penalties(state);
         }
+        // Held status recovery calls CalcPlayerStats/CalcEnemyStats after
+        // clearing the status, replacing all five copied live words.
+        if side == BattleSide::Player {
+            state.player_badge_before_status = true;
+        }
+        recalculate_loaded_stats(state, side, stat_multipliers)?;
         set_toxic_turns(state, side, 0);
         if status_before.as_deref() == Some("SLEEP") {
             set_nightmare_source(state, side, None);
@@ -7800,7 +8247,7 @@ fn apply_end_turn_leftovers(
 
 fn apply_end_turn_mystery_berry(
     state: &mut BattleCombatState,
-    moves: &BTreeMap<String, Move>,
+    _moves: &BTreeMap<String, Move>,
     items: &BTreeMap<String, Item>,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
@@ -7820,26 +8267,40 @@ fn apply_end_turn_mystery_berry(
         if item.held_effect != "HELD_RESTORE_PP" {
             continue;
         }
-        let Some(slot) = battle_moves(state, side)
-            .iter()
-            .position(|learned| learned.current_pp == 0)
-        else {
+        let party_index = match side {
+            BattleSide::Player => state.player_party_index,
+            BattleSide::Enemy => state.enemy_party_index,
+        };
+        let party = match side {
+            BattleSide::Player => &state.player_party,
+            BattleSide::Enemy => &state.enemy_party,
+        };
+        let Some((slot, learned)) = party.get(party_index).and_then(|pokemon| {
+            pokemon
+                .moves
+                .iter()
+                .enumerate()
+                .find(|(_, learned)| learned.current_pp == 0)
+        }) else {
             continue;
         };
-        let learned = &battle_moves(state, side)[slot];
         let move_name = learned.name.clone();
-        let move_data = moves
-            .get(&move_name)
-            .ok_or_else(|| BattleTurnError::MissingMoveData {
-                side,
-                move_name: move_name.clone(),
-            })?;
         let pp_before = learned.current_pp;
         let restore = if move_name == "SKETCH" { 1 } else { 5 };
-        let pp_after = pp_before
-            .saturating_add(restore)
-            .min(crate::models::max_move_pp(move_data.pp, learned.pp_ups));
-        battle_moves_mut(state, side)[slot].current_pp = pp_after;
+        let pp_after = pp_before.saturating_add(restore);
+        let party = match side {
+            BattleSide::Player => &mut state.player_party,
+            BattleSide::Enemy => &mut state.enemy_party,
+        };
+        party[party_index].moves[slot].current_pp = pp_after;
+        let transformed = transform_state(state, side).is_some();
+        if transformed || state.pokemon(side).moves[slot].name == move_name {
+            // `Pokemon::moves` remains the persistent original moves while a
+            // separate transform record owns the effective battle moves.
+            // Updating it in the transformed case mirrors the party write,
+            // not the cartridge's transformed BattleMon PP.
+            state.pokemon_mut(side).moves[slot].current_pp = pp_after;
+        }
         state.pokemon_mut(side).item = None;
         events.push(BattleEvent::HeldItemPpRestored {
             side,
@@ -7891,7 +8352,9 @@ fn apply_end_turn_encore(state: &mut BattleCombatState, events: &mut Vec<BattleE
         let Some(encore) = encore_state(state, side).cloned() else {
             continue;
         };
-        let turns_remaining = encore.turns_remaining.saturating_sub(1);
+        // HandleEncore decrements the raw w*EncoreCount byte without first
+        // checking it for zero, so an active zero count wraps to $ff.
+        let turns_remaining = encore.turns_remaining.wrapping_sub(1);
         let forced_move_has_pp = battle_moves(state, side)
             .iter()
             .find(|learned| learned.name == encore.move_name)
@@ -7928,6 +8391,127 @@ fn held_item_heals_status(held_effect: &str, status: Option<&str>) -> bool {
         ) => true,
         _ => false,
     }
+}
+
+fn held_item_prevents_effect(
+    state: &BattleCombatState,
+    target: BattleSide,
+    effect: &str,
+    items: &BTreeMap<String, Item>,
+) -> Result<Option<(String, String)>, BattleTurnError> {
+    let Some(item_id) = state.pokemon(target).item.clone() else {
+        return Ok(None);
+    };
+    let item = items
+        .get(&item_id)
+        .ok_or_else(|| BattleTurnError::UnknownHeldItem {
+            side: target,
+            item_id: item_id.clone(),
+        })?;
+    let prevention_effect = match effect {
+        "POISON" | "BAD_POISON" => "HELD_PREVENT_POISON",
+        "BURN" => "HELD_PREVENT_BURN",
+        "FREEZE" => "HELD_PREVENT_FREEZE",
+        "SLEEP" => "HELD_PREVENT_SLEEP",
+        "PARALYSIS" => "HELD_PREVENT_PARALYZE",
+        "CONFUSION" => "HELD_PREVENT_CONFUSE",
+        _ => return Ok(None),
+    };
+    Ok((item.held_effect == prevention_effect).then(|| (item_id, item.held_effect.clone())))
+}
+
+fn held_item_blocks_direct_effect(
+    state: &BattleCombatState,
+    side: BattleSide,
+    move_name: &str,
+    target: BattleSide,
+    effect: &str,
+    items: &BTreeMap<String, Item>,
+    events: &mut Vec<BattleEvent>,
+) -> Result<bool, BattleTurnError> {
+    let Some((item_id, held_effect)) = held_item_prevents_effect(state, target, effect, items)?
+    else {
+        return Ok(false);
+    };
+    events.push(BattleEvent::HeldItemProtected {
+        side,
+        move_name: move_name.to_string(),
+        target,
+        item_id,
+        held_effect,
+        effect: effect.to_string(),
+    });
+    Ok(true)
+}
+
+#[derive(Debug)]
+struct SurvivalDamageResult {
+    damage: u16,
+    /// `Some(None)` is Endure; `Some(Some(item))` is Focus Band.
+    held_item: Option<Option<String>>,
+}
+
+fn apply_damage_survival_modifier(
+    state: &BattleCombatState,
+    target: BattleSide,
+    raw_damage: u16,
+    items: &BTreeMap<String, Item>,
+    rng: &mut dyn BattleRandomSource,
+) -> Result<SurvivalDamageResult, BattleTurnError> {
+    let hp = state.pokemon(target).hp;
+    if endure_active(state, target) {
+        return Ok(if raw_damage >= hp {
+            SurvivalDamageResult {
+                damage: hp.saturating_sub(1),
+                held_item: Some(None),
+            }
+        } else {
+            SurvivalDamageResult {
+                damage: raw_damage,
+                held_item: None,
+            }
+        });
+    }
+
+    // GetOpponentItem/Focus Band's BattleRandom occur before the damage
+    // routine checks Substitute or compares wCurDamage with real HP.
+    let focus_band_succeeded = focus_band_survives(state, target, items, rng)?;
+    if focus_band_succeeded && raw_damage >= hp {
+        return Ok(SurvivalDamageResult {
+            damage: hp.saturating_sub(1),
+            held_item: Some(Some(
+                state
+                    .pokemon(target)
+                    .item
+                    .clone()
+                    .expect("successful Focus Band check requires a held item"),
+            )),
+        });
+    }
+    Ok(SurvivalDamageResult {
+        damage: raw_damage,
+        held_item: None,
+    })
+}
+
+fn emit_survival_damage_event(
+    side: BattleSide,
+    target: BattleSide,
+    move_name: &str,
+    raw_damage: u16,
+    held_item: Option<Option<String>>,
+    events: &mut Vec<BattleEvent>,
+) {
+    let Some(held_item) = held_item else {
+        return;
+    };
+    events.push(BattleEvent::EnduredHit {
+        side,
+        move_name: move_name.to_string(),
+        target,
+        raw_damage,
+        held_item,
+    });
 }
 
 fn focus_band_survives(
@@ -8078,10 +8662,11 @@ fn apply_end_turn_effects(
     state: &mut BattleCombatState,
     moves: &BTreeMap<String, Move>,
     items: &BTreeMap<String, Item>,
+    stat_multipliers: &BattleStatMultiplierTables,
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    apply_end_turn_future_sight(state, items, rng, events)?;
+    apply_end_turn_future_sight(state, moves, items, stat_multipliers, rng, events)?;
     if either_active_pokemon_fainted(state) {
         return Ok(());
     }
@@ -8103,76 +8688,71 @@ fn apply_end_turn_effects(
     apply_end_turn_defrost(state, rng, events);
     apply_end_turn_safeguard(state, events);
     apply_end_turn_screens(state, events);
-    apply_end_turn_abilities(state, rng, events)?;
+    for side in between_turn_side_order(state.serial_connection_status) {
+        apply_held_stat_boost(state, side, items, stat_multipliers, events)?;
+    }
     for side in between_turn_side_order(state.serial_connection_status) {
         apply_held_hp_healing(state, side, items, events)?;
-        apply_held_status_healing(state, side, items, events)?;
+        apply_held_status_healing(state, side, items, stat_multipliers, events)?;
     }
     apply_end_turn_encore(state, events);
     Ok(())
 }
 
-fn apply_end_turn_abilities(
-    state: &mut BattleCombatState,
-    rng: &mut dyn BattleRandomSource,
-    events: &mut Vec<BattleEvent>,
-) -> Result<(), BattleTurnError> {
-    for side in between_turn_side_order(state.serial_connection_status) {
-        if state.pokemon(side).hp == 0 {
-            continue;
-        }
-        let ability = active_ability(state, side).to_string();
-        let active_turns = match side {
-            BattleSide::Player => state.player_active_turns,
-            BattleSide::Enemy => state.enemy_active_turns,
-        };
-        match ability.as_str() {
-            "SPEED_BOOST" if active_turns > 0 => apply_stat_stage_delta_to_target(
-                state,
-                side,
-                "SPEED_BOOST",
-                side,
-                Stat::Speed,
-                1,
-                events,
-            )?,
-            "SHED_SKIN"
-                if state.pokemon(side).status.is_some() && emerald_random_u16(rng) % 3 == 0 =>
-            {
-                let status_before = state
-                    .pokemon_mut(side)
-                    .status
-                    .take()
-                    .expect("Shed Skin status checked above");
-                state.pokemon_mut(side).sleep_turns = 0;
-                set_toxic_turns(state, side, 0);
-                set_nightmare_source(state, side, None);
-                if side == BattleSide::Enemy {
-                    recalculate_enemy_status_penalties(state);
-                }
-                events.push(BattleEvent::StatusHealed {
-                    side,
-                    move_name: "SHED_SKIN".to_string(),
-                    target: side,
-                    status_before,
-                });
-            }
-            _ => {}
-        }
-        match side {
-            BattleSide::Player => {
-                state.player_active_turns = state.player_active_turns.saturating_add(1)
-            }
-            BattleSide::Enemy => {
-                state.enemy_active_turns = state.enemy_active_turns.saturating_add(1)
-            }
-        }
-    }
-    Ok(())
-}
-
 fn either_active_pokemon_fainted(state: &BattleCombatState) -> bool {
     state.player.hp == 0 || state.enemy.hp == 0
+}
+
+fn apply_held_stat_boost(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    items: &BTreeMap<String, Item>,
+    stat_multipliers: &BattleStatMultiplierTables,
+    events: &mut Vec<BattleEvent>,
+) -> Result<(), BattleTurnError> {
+    let Some(item_id) = state.pokemon(side).item.clone() else {
+        return Ok(());
+    };
+    let item = items
+        .get(&item_id)
+        .ok_or_else(|| BattleTurnError::UnknownHeldItem {
+            side,
+            item_id: item_id.clone(),
+        })?;
+    let stat = match item.held_effect.as_str() {
+        "HELD_ATTACK_UP" => Stat::Attack,
+        "HELD_DEFENSE_UP" => Stat::Defense,
+        "HELD_SPEED_UP" => Stat::Speed,
+        "HELD_SP_ATTACK_UP" => Stat::SpecialAttack,
+        "HELD_SP_DEFENSE_UP" => Stat::SpecialDefense,
+        "HELD_ACCURACY_UP" => Stat::Accuracy,
+        "HELD_EVASION_UP" => Stat::Evasion,
+        _ => return Ok(()),
+    };
+    let stage = *battle_stat_boosts(state, side)
+        .get(&stat)
+        .ok_or(BattleTurnError::MissingStatStage { side, stat })?;
+    apply_stat_stage_delta_to_target(
+        state,
+        side,
+        &item.held_effect,
+        side,
+        stat,
+        1,
+        stat_multipliers,
+        events,
+    )?;
+    if stage == 6 {
+        return Ok(());
+    }
+    let held_effect = item.held_effect.clone();
+    state.pokemon_mut(side).item = None;
+    events.push(BattleEvent::HeldItemActivated {
+        side,
+        item_id,
+        held_effect,
+    });
+    Ok(())
 }
 
 fn apply_end_turn_leech_seed(
@@ -8285,6 +8865,12 @@ fn apply_end_turn_trap(state: &mut BattleCombatState, events: &mut Vec<BattleEve
         let Some(trap) = trap_state(state, side).cloned() else {
             continue;
         };
+        // HandleWrap treats a zero w*WrapCount as inactive before any
+        // Substitute, release-text, animation, or damage work.
+        if trap.turns_remaining == 0 {
+            clear_trap_state(state, side);
+            continue;
+        }
         if state.pokemon(side).hp == 0 {
             continue;
         }
@@ -8376,7 +8962,9 @@ fn apply_end_turn_perish_song(state: &mut BattleCombatState, events: &mut Vec<Ba
 
 fn apply_end_turn_future_sight(
     state: &mut BattleCombatState,
+    moves: &BTreeMap<String, Move>,
     items: &BTreeMap<String, Item>,
+    stat_multipliers: &BattleStatMultiplierTables,
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
@@ -8385,8 +8973,20 @@ fn apply_end_turn_future_sight(
             continue;
         };
         let target = source_side.other();
-        let turns_remaining = queued.turns_remaining.saturating_sub(1);
-        if turns_remaining > 0 {
+        if queued.turns_remaining == 0 {
+            // A zero w*FutureSightCount is inactive. Keep the split Rust
+            // representation canonical if malformed input supplied Some(0).
+            set_future_sight_state(state, source_side, None);
+            continue;
+        }
+        let turns_remaining = queued.turns_remaining - 1;
+        if turns_remaining == 0 {
+            // CheckFutureSight only lands at count 1. Decrementing an
+            // externally supplied count 1 to zero silently cancels it.
+            set_future_sight_state(state, source_side, None);
+            continue;
+        }
+        if turns_remaining != 1 {
             set_future_sight_state(
                 state,
                 source_side,
@@ -8413,35 +9013,109 @@ fn apply_end_turn_future_sight(
             source: queued.source,
             move_name: queued.move_name.clone(),
         });
+        let move_data =
+            moves
+                .get(&queued.move_name)
+                .ok_or_else(|| BattleTurnError::MissingMoveData {
+                    side: queued.source,
+                    move_name: queued.move_name.clone(),
+                })?;
         let damage_roll = crystal_damage_variation_roll(rng);
         let varied_damage = ((u32::from(queued.damage) * u32::from(damage_roll)) / 255)
             .max(1)
             .min(u32::from(u16::MAX)) as u16;
+        // CheckFutureSight resumes immediately after the FutureSight command,
+        // so DamageVariation has already run when the delayed CheckHit begins.
+        if protect_active(state, target) {
+            events.push(BattleEvent::MoveProtected {
+                side: queued.source,
+                move_name: queued.move_name.clone(),
+                target,
+            });
+            state.critical_hit_register = 0;
+            continue;
+        }
+        let lock_on_active = lock_on_target_state(state, queued.source);
+        if lock_on_active {
+            set_lock_on_target_state(state, queued.source, false);
+            events.push(BattleEvent::LockOnConsumed {
+                side: queued.source,
+                move_name: queued.move_name.clone(),
+                target,
+            });
+        }
+        if let Some(airborne_move) = airborne_move_state(state, target).map(ToOwned::to_owned) {
+            let lock_on_hits = lock_on_active
+                && (airborne_move == "DIG"
+                    || !matches!(
+                        queued.move_name.as_str(),
+                        "EARTHQUAKE" | "FISSURE" | "MAGNITUDE"
+                    ));
+            if !lock_on_hits && !move_hits_airborne_target(move_data, &airborne_move) {
+                events.push(BattleEvent::AirborneAvoided {
+                    side: queued.source,
+                    move_name: queued.move_name.clone(),
+                    target,
+                    airborne_move,
+                });
+                state.critical_hit_register = 0;
+                continue;
+            }
+        }
+        let x_accuracy_guarantees_hit = x_accuracy_active(state, queued.source);
+        if !lock_on_active && !x_accuracy_guarantees_hit {
+            let attacker = effective_battle_pokemon(state, queued.source);
+            let defender = effective_battle_pokemon(state, target);
+            let mut accuracy = accuracy_byte_with_weather(
+                move_data,
+                queued.source,
+                &attacker,
+                &defender,
+                stat_multipliers,
+                battle_effective_weather(state),
+                identified_state(state, target),
+            )?;
+            // The delayed script resumes into the same CheckHit command as an
+            // ordinary move. Future Sight has no explicit sure-hit branch, so
+            // BrightPowder is consulted even when its base byte is $ff.
+            accuracy = apply_brightpowder_accuracy(state, target, items, accuracy)?;
+            if accuracy < u8::MAX {
+                let roll = rng.battle_random_byte();
+                if roll >= accuracy {
+                    events.push(BattleEvent::Missed {
+                        side: queued.source,
+                        move_name: queued.move_name.clone(),
+                        accuracy,
+                        roll,
+                    });
+                    state.critical_hit_register = 0;
+                    continue;
+                }
+            }
+        }
+        let survival = apply_damage_survival_modifier(state, target, varied_damage, items, rng)?;
         if apply_substitute_damage(
             state,
             queued.source,
             &queued.move_name,
-            varied_damage,
+            survival.damage,
             events,
         )
         .is_some()
         {
+            emit_survival_damage_event(
+                queued.source,
+                target,
+                &queued.move_name,
+                varied_damage,
+                survival.held_item,
+                events,
+            );
             apply_rage_counter_increment(state, target, events)?;
             continue;
         }
         let hp_before = state.pokemon(target).hp;
-        let mut damage = varied_damage.min(hp_before);
-        if damage >= hp_before && hp_before > 1 && focus_band_survives(state, target, items, rng)? {
-            let lethal_damage = damage;
-            damage = hp_before - 1;
-            events.push(BattleEvent::EnduredHit {
-                side: queued.source,
-                move_name: queued.move_name.clone(),
-                target,
-                raw_damage: lethal_damage,
-                held_item: state.pokemon(target).item.clone(),
-            });
-        }
+        let damage = survival.damage.min(hp_before);
         state.pokemon_mut(target).hp = hp_before.saturating_sub(damage);
         let hp_after_damage = state.pokemon(target).hp;
         events.push(BattleEvent::FutureSightDamage {
@@ -8452,6 +9126,14 @@ fn apply_end_turn_future_sight(
             hp_before,
             hp_after: hp_after_damage,
         });
+        emit_survival_damage_event(
+            queued.source,
+            target,
+            &queued.move_name,
+            varied_damage,
+            survival.held_item,
+            events,
+        );
         if damage > 0 {
             record_last_damage(
                 state,
@@ -8490,7 +9172,7 @@ fn apply_end_turn_safeguard(state: &mut BattleCombatState, events: &mut Vec<Batt
 
 fn apply_end_turn_screens(state: &mut BattleCombatState, events: &mut Vec<BattleEvent>) {
     for side in between_turn_side_order(state.serial_connection_status) {
-        for screen in [BattleScreen::Reflect, BattleScreen::LightScreen] {
+        for screen in [BattleScreen::LightScreen, BattleScreen::Reflect] {
             let turns = screen_turns(state, side, screen);
             if turns == 0 {
                 continue;
@@ -8519,21 +9201,13 @@ fn apply_end_turn_weather(state: &mut BattleCombatState, events: &mut Vec<Battle
         return;
     }
     let weather = state.weather;
-    if state.weather_turns == 0 {
-        if weather == Weather::Sandstorm {
-            apply_end_turn_sandstorm_damage(state, events);
-        }
-        return;
-    }
-    let turns_remaining = state.weather_turns.saturating_sub(1);
+    // HandleWeather executes `dec [hl]` for every active weather value. A
+    // zero count therefore wraps to $ff rather than becoming an indefinite
+    // zero-count weather state.
+    let turns_remaining = state.weather_turns.wrapping_sub(1);
     state.weather_turns = turns_remaining;
     if turns_remaining == 0 {
         state.weather = Weather::None;
-        for side in [BattleSide::Player, BattleSide::Enemy] {
-            if active_ability(state, side) == "FORECAST" {
-                apply_forecast_type(state, side);
-            }
-        }
         events.push(BattleEvent::WeatherEnded { weather });
         return;
     }
@@ -9023,9 +9697,10 @@ fn direct_beat_up_effect(move_data: &Move) -> bool {
     move_data.effect == "BEAT_UP"
 }
 
-/// Exact `MoveEffects` entries whose source command stream contains
-/// `checkhit`. This boundary owns Dream Eater, Protect, draining-Substitute,
-/// Lock-On, airborne, weather/X Accuracy, and ordinary accuracy ordering.
+/// Exact `MoveEffects` whose ordinary execution reaches the shared `checkhit`.
+/// This boundary owns Dream Eater, Protect, draining-Substitute, Lock-On,
+/// airborne, weather/X Accuracy, and ordinary accuracy ordering. Future Sight
+/// contains `checkhit` textually but reaches it only from its delayed handler.
 fn move_effect_uses_check_hit(effect: &str) -> bool {
     matches!(
         effect,
@@ -9118,6 +9793,87 @@ fn move_effect_uses_check_hit(effect: &str) -> bool {
             | "SKULL_BASH"
             | "TWISTER"
             | "EARTHQUAKE"
+            | "GUST"
+            | "STOMP"
+            | "SOLARBEAM"
+            | "THUNDER"
+            | "BEAT_UP"
+            | "FLY"
+    )
+}
+
+fn move_effect_has_failure_text(effect: &str) -> bool {
+    matches!(
+        effect,
+        "NORMAL_HIT"
+            | "POISON_HIT"
+            | "LEECH_HIT"
+            | "BURN_HIT"
+            | "FREEZE_HIT"
+            | "PARALYZE_HIT"
+            | "SELFDESTRUCT"
+            | "DREAM_EATER"
+            | "ALWAYS_HIT"
+            | "RAMPAGE"
+            | "MULTI_HIT"
+            | "FLINCH_HIT"
+            | "PAY_DAY"
+            | "TRI_ATTACK"
+            | "UNUSED_25"
+            | "OHKO"
+            | "RAZOR_WIND"
+            | "SUPER_FANG"
+            | "STATIC_DAMAGE"
+            | "TRAP_TARGET"
+            | "UNUSED_2B"
+            | "DOUBLE_HIT"
+            | "JUMP_KICK"
+            | "RECOIL_HIT"
+            | "ATTACK_DOWN_HIT"
+            | "DEFENSE_DOWN_HIT"
+            | "SPEED_DOWN_HIT"
+            | "SPECIAL_ATTACK_DOWN_HIT"
+            | "SPECIAL_DEFENSE_DOWN_HIT"
+            | "ACCURACY_DOWN_HIT"
+            | "EVASION_DOWN_HIT"
+            | "SKY_ATTACK"
+            | "CONFUSE_HIT"
+            | "POISON_MULTI_HIT"
+            | "UNUSED_4E"
+            | "HYPER_BEAM"
+            | "RAGE"
+            | "LEVEL_DAMAGE"
+            | "PSYWAVE"
+            | "COUNTER"
+            | "SNORE"
+            | "REVERSAL"
+            | "FALSE_SWIPE"
+            | "PRIORITY_HIT"
+            | "TRIPLE_KICK"
+            | "THIEF"
+            | "FLAME_WHEEL"
+            | "UNUSED_6E"
+            | "ROLLOUT"
+            | "SWAGGER"
+            | "FURY_CUTTER"
+            | "RETURN"
+            | "PRESENT"
+            | "FRUSTRATION"
+            | "SACRED_FIRE"
+            | "MAGNITUDE"
+            | "PURSUIT"
+            | "RAPID_SPIN"
+            | "UNUSED_82"
+            | "UNUSED_83"
+            | "HIDDEN_POWER"
+            | "DEFENSE_UP_HIT"
+            | "ATTACK_UP_HIT"
+            | "ALL_UP_HIT"
+            | "FAKE_OUT"
+            | "MIRROR_COAT"
+            | "SKULL_BASH"
+            | "TWISTER"
+            | "EARTHQUAKE"
             | "FUTURE_SIGHT"
             | "GUST"
             | "STOMP"
@@ -9126,6 +9882,153 @@ fn move_effect_uses_check_hit(effect: &str) -> bool {
             | "BEAT_UP"
             | "FLY"
     )
+}
+
+fn clear_critical_if_failure_text(state: &mut BattleCombatState, effect: &str) {
+    if move_effect_has_failure_text(effect) {
+        // GetFailureResultText clears wCriticalHit, but FailureText returns
+        // immediately on a successful move. Call this helper only from paths
+        // that have already set the equivalent of wAttackMissed.
+        state.critical_hit_register = 0;
+    }
+}
+
+fn move_effect_has_critical_text(effect: &str) -> bool {
+    matches!(
+        effect,
+        "NORMAL_HIT"
+            | "POISON_HIT"
+            | "LEECH_HIT"
+            | "BURN_HIT"
+            | "FREEZE_HIT"
+            | "PARALYZE_HIT"
+            | "SELFDESTRUCT"
+            | "DREAM_EATER"
+            | "ALWAYS_HIT"
+            | "RAMPAGE"
+            | "MULTI_HIT"
+            | "FLINCH_HIT"
+            | "PAY_DAY"
+            | "TRI_ATTACK"
+            | "UNUSED_25"
+            | "OHKO"
+            | "RAZOR_WIND"
+            | "TRAP_TARGET"
+            | "UNUSED_2B"
+            | "DOUBLE_HIT"
+            | "JUMP_KICK"
+            | "RECOIL_HIT"
+            | "ATTACK_DOWN_HIT"
+            | "DEFENSE_DOWN_HIT"
+            | "SPEED_DOWN_HIT"
+            | "SPECIAL_ATTACK_DOWN_HIT"
+            | "SPECIAL_DEFENSE_DOWN_HIT"
+            | "ACCURACY_DOWN_HIT"
+            | "EVASION_DOWN_HIT"
+            | "SKY_ATTACK"
+            | "CONFUSE_HIT"
+            | "POISON_MULTI_HIT"
+            | "UNUSED_4E"
+            | "HYPER_BEAM"
+            | "RAGE"
+            | "SNORE"
+            | "FALSE_SWIPE"
+            | "PRIORITY_HIT"
+            | "TRIPLE_KICK"
+            | "THIEF"
+            | "FLAME_WHEEL"
+            | "UNUSED_6E"
+            | "ROLLOUT"
+            | "FURY_CUTTER"
+            | "RETURN"
+            | "PRESENT"
+            | "FRUSTRATION"
+            | "SACRED_FIRE"
+            | "MAGNITUDE"
+            | "PURSUIT"
+            | "RAPID_SPIN"
+            | "UNUSED_82"
+            | "UNUSED_83"
+            | "HIDDEN_POWER"
+            | "DEFENSE_UP_HIT"
+            | "ATTACK_UP_HIT"
+            | "ALL_UP_HIT"
+            | "SKULL_BASH"
+            | "TWISTER"
+            | "EARTHQUAKE"
+            | "GUST"
+            | "STOMP"
+            | "SOLARBEAM"
+            | "THUNDER"
+            | "BEAT_UP"
+            | "FLY"
+    )
+}
+
+fn clear_critical_if_critical_text(state: &mut BattleCombatState, effect: &str) {
+    if move_effect_has_critical_text(effect) && state.critical_hit_register != 0 {
+        // CriticalText clears only a nonzero marker after displaying the
+        // critical-hit or one-hit-KO message.
+        state.critical_hit_register = 0;
+    }
+}
+
+fn effect_prepares_damage_before_check_hit(move_data: &Move) -> bool {
+    move_data.power != 0
+        && matches!(
+            move_data.effect.as_str(),
+            "NORMAL_HIT"
+                | "POISON_HIT"
+                | "LEECH_HIT"
+                | "BURN_HIT"
+                | "FREEZE_HIT"
+                | "PARALYZE_HIT"
+                | "SELFDESTRUCT"
+                | "DREAM_EATER"
+                | "ALWAYS_HIT"
+                | "FLINCH_HIT"
+                | "PAY_DAY"
+                | "TRI_ATTACK"
+                | "RAZOR_WIND"
+                | "JUMP_KICK"
+                | "RECOIL_HIT"
+                | "ATTACK_DOWN_HIT"
+                | "DEFENSE_DOWN_HIT"
+                | "SPEED_DOWN_HIT"
+                | "SPECIAL_ATTACK_DOWN_HIT"
+                | "SPECIAL_DEFENSE_DOWN_HIT"
+                | "ACCURACY_DOWN_HIT"
+                | "EVASION_DOWN_HIT"
+                | "SKY_ATTACK"
+                | "CONFUSE_HIT"
+                | "HYPER_BEAM"
+                | "SNORE"
+                | "FALSE_SWIPE"
+                | "PRIORITY_HIT"
+                | "THIEF"
+                | "FLAME_WHEEL"
+                | "SACRED_FIRE"
+                | "MAGNITUDE"
+                | "PURSUIT"
+                | "RAPID_SPIN"
+                | "RETURN"
+                | "FRUSTRATION"
+                | "HIDDEN_POWER"
+                | "DEFENSE_UP_HIT"
+                | "ATTACK_UP_HIT"
+                | "ALL_UP_HIT"
+                | "SKULL_BASH"
+                | "TWISTER"
+                | "EARTHQUAKE"
+                | "GUST"
+                | "STOMP"
+                | "SOLARBEAM"
+                | "FLY"
+                | "STATIC_DAMAGE"
+                | "LEVEL_DAMAGE"
+                | "SUPER_FANG"
+                | "PSYWAVE"
+        )
 }
 
 fn direct_weather_effect(move_data: &Move) -> Option<Weather> {
@@ -9271,51 +10174,66 @@ fn roll_critical_hit(
     // Crystal tallies critical-hit stages from the move table, Focus Energy,
     // species-specific items, and Scope Lens, then indexes the ROM's chance
     // table: 1/15, 1/8, 1/4, 1/3, and 1/2.
-    let mut stage = 0usize;
-    if attacker.focus_energy {
-        stage += 1;
-    }
-    if matches!(
-        move_name,
-        "KARATE_CHOP"
-            | "RAZOR_WIND"
-            | "RAZOR_LEAF"
-            | "CRABHAMMER"
-            | "SLASH"
-            | "AEROBLAST"
-            | "CROSS_CHOP"
-    ) {
-        stage += 2;
-    }
-    if matches!(attacker.species.id.as_str(), "CHANSEY" | "FARFETCH_D") {
+    let species_item = attacker.item.as_deref().is_some_and(|item_id| {
+        (attacker.species.id == "CHANSEY" && item_id == "LUCKY_PUNCH")
+            || (attacker.species.id == "FARFETCH_D" && item_id == "STICK")
+    });
+    let mut stage = if species_item {
+        // These raw species/item checks set c=2 and jump straight to .Tally.
+        // They do not pass through FocusEnergy, CheckCritical, or ScopeLens.
+        2
+    } else {
+        let mut stage = usize::from(attacker.focus_energy);
+        if matches!(
+            move_name,
+            "KARATE_CHOP"
+                | "RAZOR_WIND"
+                | "RAZOR_LEAF"
+                | "CRABHAMMER"
+                | "SLASH"
+                | "AEROBLAST"
+                | "CROSS_CHOP"
+        ) {
+            stage += 2;
+        }
         if let Some(item_id) = attacker.item.as_deref() {
-            let _item = items
+            let item = items
                 .get(item_id)
                 .ok_or_else(|| BattleTurnError::UnknownHeldItem {
                     side,
                     item_id: item_id.to_string(),
                 })?;
-            let species_item = (attacker.species.id == "CHANSEY" && item_id == "LUCKY_PUNCH")
-                || (attacker.species.id == "FARFETCH_D" && item_id == "STICK");
-            if species_item {
-                stage += 2;
+            if item.held_effect == "HELD_CRITICAL_UP" {
+                stage += 1;
             }
         }
+        stage
+    };
+    if stage > 4 {
+        // Preserve the source table's terminal entry for otherwise additive
+        // Focus Energy/high-critical/Scope Lens combinations.
+        stage = 4;
     }
-    if let Some(item_id) = attacker.item.as_deref() {
-        let item = items
-            .get(item_id)
-            .ok_or_else(|| BattleTurnError::UnknownHeldItem {
-                side,
-                item_id: item_id.to_string(),
-            })?;
-        if item.held_effect == "HELD_CRITICAL_UP" {
-            stage += 1;
-        }
-    }
-    let threshold = [17u8, 32, 64, 86, 128][stage.min(4)];
+    let threshold = [17u8, 32, 64, 85, 128][stage];
     let roll = rng.battle_random_byte();
     Ok((roll < threshold, roll, threshold))
+}
+
+fn prepare_critical_hit(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    move_name: &str,
+    attacker: &Pokemon,
+    items: &BTreeMap<String, Item>,
+    rng: &mut dyn BattleRandomSource,
+) -> Result<PreparedCriticalHit, BattleTurnError> {
+    let (critical, roll, threshold) = roll_critical_hit(side, move_name, attacker, items, rng)?;
+    state.critical_hit_register = u8::from(critical);
+    Ok(PreparedCriticalHit {
+        critical,
+        roll,
+        threshold,
+    })
 }
 
 fn sample_multi_hit_count(rng: &mut dyn BattleRandomSource) -> (u8, u8) {
@@ -9356,44 +10274,10 @@ fn damage_move_data(
 fn apply_state_damage_power_modifiers(
     state: &BattleCombatState,
     side: BattleSide,
-    target_switching: bool,
     move_data: &mut Move,
     events: &mut Vec<BattleEvent>,
 ) -> u16 {
     let mut post_type_damage_multiplier = 1;
-    let flash_fire_active = match side {
-        BattleSide::Player => state.player_flash_fire_active,
-        BattleSide::Enemy => state.enemy_flash_fire_active,
-    };
-    if flash_fire_active && move_data.move_type == "FIRE" {
-        move_data.power = ((u32::from(move_data.power) * 3) / 2).min(u32::from(u16::MAX)) as u16;
-    }
-    if move_data.effect == "PURSUIT" && target_switching {
-        move_data.power = move_data.power.saturating_mul(2);
-        events.push(BattleEvent::PursuitPower {
-            side,
-            move_name: move_data.name.clone(),
-            target: side.other(),
-            power: move_data.power,
-        });
-    }
-    if matches!(move_data.effect.as_str(), "GUST" | "TWISTER")
-        && airborne_move_state(state, side.other()).is_some()
-    {
-        move_data.power = move_data.power.saturating_mul(2);
-    }
-    if matches!(move_data.effect.as_str(), "EARTHQUAKE" | "MAGNITUDE")
-        && airborne_move_state(state, side.other())
-            .is_some_and(|airborne_move| airborne_move == "DIG")
-    {
-        move_data.power = move_data.power.saturating_mul(2);
-        events.push(BattleEvent::EarthquakePower {
-            side,
-            move_name: move_data.name.clone(),
-            target_move: "DIG".to_string(),
-            power: move_data.power,
-        });
-    }
     if move_data.effect == "FURY_CUTTER" {
         let chain = fury_cutter_chain(state, side);
         post_type_damage_multiplier = fury_cutter_damage_multiplier(chain.wrapping_add(1));
@@ -9437,143 +10321,6 @@ fn rollout_damage_multiplier(source_count: u8, defense_curled: bool) -> u16 {
     }
 }
 
-fn apply_absorb_ability(
-    state: &mut BattleCombatState,
-    side: BattleSide,
-    move_name: &str,
-    move_data: &Move,
-    events: &mut Vec<BattleEvent>,
-) -> bool {
-    let target = side.other();
-    let ability = active_ability(state, target).to_string();
-    if !absorbs_move_type(&ability, &move_data.move_type) {
-        return false;
-    }
-    events.push(BattleEvent::NoEffect {
-        side,
-        move_name: move_name.to_string(),
-    });
-    if ability == "FLASH_FIRE" {
-        match target {
-            BattleSide::Player => state.player_flash_fire_active = true,
-            BattleSide::Enemy => state.enemy_flash_fire_active = true,
-        }
-        return true;
-    }
-    let pokemon = state.pokemon(target);
-    let hp_before = pokemon.hp;
-    let amount = (pokemon.max_hp / 4).max(1);
-    let hp_after = hp_before.saturating_add(amount).min(pokemon.max_hp);
-    state.pokemon_mut(target).hp = hp_after;
-    events.push(BattleEvent::HealApplied {
-        side: target,
-        move_name: ability,
-        hp_before,
-        hp_after,
-        amount: hp_after - hp_before,
-        animation_param: 0,
-    });
-    true
-}
-
-fn apply_contact_ability(
-    state: &mut BattleCombatState,
-    attacker: BattleSide,
-    move_name: &str,
-    damage: u16,
-    rng: &mut dyn BattleRandomSource,
-    events: &mut Vec<BattleEvent>,
-) {
-    if damage == 0 || !move_makes_contact(move_name) || state.pokemon(attacker).hp == 0 {
-        return;
-    }
-    let defender = attacker.other();
-    let ability = active_ability(state, defender).to_string();
-    if ability == "ROUGH_SKIN" {
-        let pokemon = state.pokemon_mut(attacker);
-        let hp_before = pokemon.hp;
-        let recoil_damage = (pokemon.max_hp / 16).max(1).min(pokemon.hp);
-        pokemon.hp = pokemon.hp.saturating_sub(recoil_damage);
-        events.push(BattleEvent::RecoilDamage {
-            side: attacker,
-            move_name: ability,
-            damage_dealt: damage,
-            recoil_damage,
-            hp_before,
-            hp_after: pokemon.hp,
-        });
-        return;
-    }
-    if !matches!(
-        ability.as_str(),
-        "CUTE_CHARM" | "EFFECT_SPORE" | "FLAME_BODY" | "POISON_POINT" | "STATIC"
-    ) {
-        return;
-    }
-    let activation_modulus = if ability == "EFFECT_SPORE" { 10 } else { 3 };
-    if emerald_random_u16(rng) % activation_modulus != 0 {
-        return;
-    }
-    if ability == "CUTE_CHARM" {
-        if state.pokemon(defender).hp == 0 || attracted_by_state(state, attacker).is_some() {
-            return;
-        }
-        let attacker_pokemon = effective_battle_pokemon(state, attacker);
-        let defender_pokemon = effective_battle_pokemon(state, defender);
-        let attacker_gender = battle_pokemon_gender(&attacker_pokemon);
-        let defender_gender = battle_pokemon_gender(&defender_pokemon);
-        if attacker_gender.is_some()
-            && defender_gender.is_some()
-            && attacker_gender != defender_gender
-            && !ability_blocks_attraction(active_ability(state, attacker))
-        {
-            set_attracted_by_state(state, attacker, Some(defender));
-        }
-        return;
-    }
-    if state.pokemon(attacker).status.is_some() {
-        return;
-    }
-    let status = match ability.as_str() {
-        "FLAME_BODY" => "BURN",
-        "POISON_POINT" => "POISON",
-        "STATIC" => "PARALYSIS",
-        "EFFECT_SPORE" => match loop {
-            let effect = emerald_random_u16(rng) & 3;
-            if effect != 0 {
-                break effect;
-            }
-        } {
-            1 => "SLEEP",
-            2 => "POISON",
-            3 => "PARALYSIS",
-            _ => unreachable!("Effect Spore rejects the zero effect roll"),
-        },
-        _ => return,
-    };
-    let target_types = effective_pokemon_types(state, attacker);
-    let sleep_turn_mask = state.sleep_turn_mask;
-    let target_ability = active_ability(state, attacker).to_string();
-    let applied = apply_status_to_target(
-        state.pokemon_mut(attacker),
-        &target_types,
-        &target_ability,
-        defender,
-        &ability,
-        attacker,
-        status,
-        sleep_turn_mask,
-        rng,
-        events,
-    );
-    if applied && attacker == BattleSide::Enemy {
-        recalculate_enemy_status_penalties(state);
-    }
-    if applied {
-        apply_synchronize(state, defender, attacker, status, rng, events);
-    }
-}
-
 fn dynamic_move_power(
     side: BattleSide,
     move_name: &str,
@@ -9610,7 +10357,22 @@ fn frustration_power(happiness: u8) -> u16 {
 }
 
 fn reversal_power(hp: u16, max_hp: u16) -> u16 {
-    let ratio = u32::from(hp) * 48 / u32::from(max_hp.max(1));
+    let product = u32::from(hp) * 48;
+    let ratio = if max_hp == 0 {
+        // A zero maximum is rejected by battle-state validation. Keep this
+        // helper total for malformed test fixtures without inventing a divide
+        // result that can select a stronger source table row.
+        48
+    } else if max_hp > u16::from(u8::MAX) {
+        // The LR35902 Divide helper accepts only an eight-bit divisor. When
+        // the high max-HP byte is nonzero, BattleCommand_ConstantDamage shifts
+        // both HP*48 and max HP right twice before division. Preserve the two
+        // independent truncations; a direct wide division differs at table
+        // boundaries for ordinary two-byte HP values.
+        (product >> 2) / u32::from(max_hp >> 2)
+    } else {
+        product / u32::from(max_hp)
+    };
     match ratio {
         0..=1 => 200,
         2..=4 => 150,
@@ -9623,8 +10385,8 @@ fn reversal_power(hp: u16, max_hp: u16) -> u16 {
 
 fn magnitude_power(roll: u8) -> u16 {
     match roll {
-        0..=12 => 10,
-        13..=38 => 30,
+        0..=13 => 10,
+        14..=38 => 30,
         39..=89 => 50,
         90..=166 => 70,
         167..=217 => 90,
@@ -9639,13 +10401,16 @@ pub(super) fn hidden_power_type_power(attacker: &Pokemon) -> (PokemonType, u16) 
     let speed = attacker.dvs.speed & 0x0f;
     let special = attacker.dvs.special & 0x0f;
     let type_index = (((attack & 0x03) << 2) | (defense & 0x03)) as usize;
-    let power =
-        ((((attack >> 3) + ((defense >> 3) << 1) + ((speed >> 3) << 2) + ((special >> 3) << 3))
-            as u16
-            * 5
-            + u16::from(special & 0x03))
-            / 2)
-            + 31;
+    // HiddenPowerDamage assembles the four high DV bits from most to least
+    // significant in Attack, Defense, Speed, Special order. Preserve that
+    // register layout explicitly; reversing these weights changes power for
+    // every asymmetric DV spread while leaving the all-zero/all-max edges
+    // deceptively correct.
+    let high_bits = ((attack & 0x08) as u16)
+        | u16::from((defense & 0x08) >> 1)
+        | u16::from((speed & 0x08) >> 2)
+        | u16::from((special & 0x08) >> 3);
+    let power = ((high_bits * 5 + u16::from(special & 0x03)) / 2) + 31;
     (hidden_power_type(type_index), power.clamp(31, 70))
 }
 
@@ -9703,46 +10468,66 @@ fn is_fixed_damage_effect(move_data: &Move) -> bool {
     )
 }
 
+fn record_failed_counter(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    move_name: &str,
+    events: &mut Vec<BattleEvent>,
+) {
+    // Counter and Mirror Coat both execute FailureText immediately after
+    // their reflection command. Every rejected reflection therefore clears
+    // the shared critical-hit byte through GetFailureResultText.
+    state.critical_hit_register = 0;
+    events.push(BattleEvent::NoEffect {
+        side,
+        move_name: move_name.to_string(),
+    });
+}
+
 fn apply_counter_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
     move_data: &Move,
     moves: &BTreeMap<String, Move>,
+    type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     items: &BTreeMap<String, Item>,
     rng: &mut dyn BattleRandomSource,
+    opponent_went_first: bool,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let Some(required_category) = counter_effect(move_data) else {
         return Ok(());
     };
-    let Some(last_damage) = last_damage_state(state, side).cloned() else {
-        events.push(BattleEvent::NoEffect {
-            side,
-            move_name: move_name.to_string(),
-        });
-        return Ok(());
-    };
-    if last_damage.source != side.other() || last_damage.category != required_category {
-        events.push(BattleEvent::NoEffect {
-            side,
-            move_name: move_name.to_string(),
-        });
+    if !opponent_went_first {
+        record_failed_counter(state, side, move_name, events);
         return Ok(());
     }
+    let Some(source_damage) = last_damage_state(state, side).map(|damage| damage.damage) else {
+        record_failed_counter(state, side, move_name, events);
+        return Ok(());
+    };
+    let target = side.other();
+    let Some(countered_move_name) = last_counter_move(state, target).map(ToOwned::to_owned) else {
+        record_failed_counter(state, side, move_name, events);
+        return Ok(());
+    };
     let countered_move =
         moves
-            .get(&last_damage.move_name)
+            .get(&countered_move_name)
             .ok_or_else(|| BattleTurnError::MissingMoveData {
-                side,
-                move_name: last_damage.move_name.clone(),
+                side: target,
+                move_name: countered_move_name.clone(),
             })?;
+    if countered_move.power == 0
+        || damage_category(type_categories, countered_move)? != required_category
+    {
+        record_failed_counter(state, side, move_name, events);
+        return Ok(());
+    }
     if counter_effect(countered_move).is_some() {
-        events.push(BattleEvent::NoEffect {
-            side,
-            move_name: move_name.to_string(),
-        });
+        record_failed_counter(state, side, move_name, events);
         return Ok(());
     }
 
@@ -9754,24 +10539,26 @@ fn apply_counter_effect(
     )
     .map_err(BattleTurnError::DamageCalculation)?;
     if multiplier.numerator == 0 {
-        events.push(BattleEvent::NoEffect {
-            side,
-            move_name: move_name.to_string(),
-        });
+        record_failed_counter(state, side, move_name, events);
         return Ok(());
     }
 
-    let target = side.other();
     let defender_hp_before = state.pokemon(target).hp;
-    let raw_damage = last_damage.damage.saturating_mul(2);
+    let raw_damage = source_damage.saturating_mul(2);
     if raw_damage == 0 {
-        events.push(BattleEvent::NoEffect {
-            side,
-            move_name: move_name.to_string(),
-        });
+        record_failed_counter(state, side, move_name, events);
         return Ok(());
     }
-    if apply_substitute_damage(state, side, move_name, raw_damage, events).is_some() {
+    let survival = apply_damage_survival_modifier(state, target, raw_damage, items, rng)?;
+    if apply_substitute_damage(state, side, move_name, survival.damage, events).is_some() {
+        emit_survival_damage_event(
+            side,
+            target,
+            move_name,
+            raw_damage,
+            survival.held_item,
+            events,
+        );
         apply_rage_counter_increment(state, target, events)?;
         if state.pokemon(target).hp != 0 && state.pokemon(side).hp != 0 {
             // Counter and Mirror Coat continue through checkfaint,
@@ -9784,34 +10571,7 @@ fn apply_counter_effect(
         }
         return Ok(());
     }
-    let mut damage = raw_damage.min(defender_hp_before);
-    if endure_active(state, target) && defender_hp_before > 1 {
-        let endured_damage = damage;
-        damage = damage.min(defender_hp_before - 1);
-        if endured_damage != damage {
-            events.push(BattleEvent::EnduredHit {
-                side,
-                move_name: move_name.to_string(),
-                target,
-                raw_damage: endured_damage,
-                held_item: None,
-            });
-        }
-    }
-    if damage >= defender_hp_before
-        && defender_hp_before > 1
-        && focus_band_survives(state, target, items, rng)?
-    {
-        let lethal_damage = damage;
-        damage = defender_hp_before - 1;
-        events.push(BattleEvent::EnduredHit {
-            side,
-            move_name: move_name.to_string(),
-            target,
-            raw_damage: lethal_damage,
-            held_item: state.pokemon(target).item.clone(),
-        });
-    }
+    let damage = survival.damage.min(defender_hp_before);
     let defender = state.pokemon_mut(target);
     defender.hp = defender.hp.saturating_sub(damage);
     let defender_hp_after = defender.hp;
@@ -9819,13 +10579,21 @@ fn apply_counter_effect(
         side,
         move_name: move_name.to_string(),
         target,
-        countered_move: last_damage.move_name,
+        countered_move: countered_move_name,
         category: required_category,
-        source_damage: last_damage.damage,
+        source_damage,
         damage,
         defender_hp_before,
         defender_hp_after,
     });
+    emit_survival_damage_event(
+        side,
+        target,
+        move_name,
+        raw_damage,
+        survival.held_item,
+        events,
+    );
     if damage != 0 {
         record_last_damage(
             state,
@@ -9900,7 +10668,7 @@ fn apply_substitute_damage(
 ) -> Option<DamageHitResult> {
     let target = side.other();
     let substitute_hp_before = substitute_hp(state, target);
-    if damage == 0 || substitute_hp_before == 0 {
+    if substitute_hp_before == 0 {
         return None;
     }
     let substitute_damage = damage.min(substitute_hp_before);
@@ -9921,6 +10689,9 @@ fn apply_substitute_damage(
             target,
         });
     }
+    // DoSubstituteDamage always tail-jumps to ResetDamage, even when the
+    // retained damage is zero and the doll's HP therefore does not change.
+    clear_turn_last_damage(state);
     Some(DamageHitResult::Continue)
 }
 
@@ -9942,6 +10713,10 @@ fn move_blocked_by_substitute(
     true
 }
 
+fn target_is_hidden(state: &BattleCombatState, side: BattleSide) -> bool {
+    airborne_move_state(state, side.other()).is_some()
+}
+
 fn apply_post_damage_hp_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
@@ -9951,9 +10726,6 @@ fn apply_post_damage_hp_effect(
     pre_damage_effect_chance: Option<EffectChanceResult>,
     events: &mut Vec<BattleEvent>,
 ) {
-    if damage == 0 {
-        return;
-    }
     match move_data.effect.as_str() {
         "DREAM_EATER" | "LEECH_HIT" => apply_drain_effect(state, side, move_name, damage, events),
         "RECOIL_HIT" => apply_recoil_effect(state, side, move_name, damage, events),
@@ -9976,6 +10748,7 @@ fn apply_post_damage_stat_effect(
     move_data: &Move,
     damage: u16,
     pre_damage_effect_chance: Option<EffectChanceResult>,
+    stat_multipliers: &BattleStatMultiplierTables,
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
@@ -9996,15 +10769,13 @@ fn apply_post_damage_stat_effect(
                 Stat::SpecialAttack,
                 Stat::SpecialDefense,
             ] {
-                let stage = *state
-                    .pokemon(side)
-                    .stat_boosts
+                let stage = *battle_stat_boosts(state, side)
                     .get(&stat)
                     .ok_or(BattleTurnError::MissingStatStage { side, stat })?;
                 if stage >= 6 {
                     continue;
                 }
-                apply_stat_stage_delta(state, side, move_name, stat, 1, events)?;
+                apply_stat_stage_delta(state, side, move_name, stat, 1, stat_multipliers, events)?;
             }
             Ok(true)
         }
@@ -10023,6 +10794,7 @@ fn apply_post_damage_stat_effect(
                 move_name,
                 move_data,
                 effect_chance,
+                stat_multipliers,
                 rng,
                 events,
             )?;
@@ -10051,8 +10823,7 @@ fn sample_effect_chance_against_target(
     move_data: &Move,
     rng: &mut dyn BattleRandomSource,
 ) -> EffectChanceResult {
-    let chance_percent =
-        secondary_effect_chance(active_ability(state, side), move_data.effect_chance);
+    let chance_percent = move_data.effect_chance.min(100);
     if substitute_hp(state, side.other()) != 0 {
         return EffectChanceResult {
             chance_percent,
@@ -10060,11 +10831,7 @@ fn sample_effect_chance_against_target(
             roll: None,
         };
     }
-    let (mut succeeds, roll) = secondary_effect_roll(chance_percent, rng);
-    let targets_opponent = move_data.amount.is_none_or(|amount| amount < 0);
-    if targets_opponent && blocks_opposing_secondary_effects(active_ability(state, side.other())) {
-        succeeds = false;
-    }
+    let (succeeds, roll) = secondary_effect_roll(chance_percent, rng);
     EffectChanceResult {
         chance_percent,
         succeeds,
@@ -10146,7 +10913,7 @@ fn apply_thief_effect(
         });
         return;
     }
-    let Some(item_id) = state.pokemon_mut(target).item.take() else {
+    let Some(item_id) = state.pokemon(target).item.clone() else {
         events.push(BattleEvent::HeldItemStealFailed {
             side,
             move_name: move_name.to_string(),
@@ -10155,6 +10922,16 @@ fn apply_thief_effect(
         });
         return;
     };
+    if is_mail_item_id(&item_id) {
+        events.push(BattleEvent::HeldItemStealFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+            reason: "target_holds_mail".to_string(),
+        });
+        return;
+    }
+    state.pokemon_mut(target).item = None;
     state.pokemon_mut(side).item = Some(item_id.clone());
     events.push(BattleEvent::HeldItemStolen {
         side,
@@ -10171,30 +10948,9 @@ fn apply_drain_effect(
     damage: u16,
     events: &mut Vec<BattleEvent>,
 ) {
-    if active_ability(state, side.other()) == "LIQUID_OOZE" {
-        let pokemon = state.pokemon_mut(side);
-        if pokemon.hp == 0 {
-            return;
-        }
-        let hp_before = pokemon.hp;
-        let ooze_damage = damage.div_ceil(2).min(pokemon.hp);
-        pokemon.hp = pokemon.hp.saturating_sub(ooze_damage);
-        events.push(BattleEvent::RecoilDamage {
-            side,
-            move_name: "LIQUID_OOZE".to_string(),
-            damage_dealt: damage,
-            recoil_damage: ooze_damage,
-            hp_before,
-            hp_after: pokemon.hp,
-        });
-        return;
-    }
     let pokemon = state.pokemon_mut(side);
-    if pokemon.hp >= pokemon.max_hp {
-        return;
-    }
     let hp_before = pokemon.hp;
-    let amount = damage.div_ceil(2).min(pokemon.max_hp - pokemon.hp);
+    let amount = (damage / 2).max(1).min(pokemon.max_hp - pokemon.hp);
     pokemon.hp += amount;
     events.push(BattleEvent::HpDrained {
         side,
@@ -10214,9 +10970,6 @@ fn apply_recoil_effect(
     damage: u16,
     events: &mut Vec<BattleEvent>,
 ) {
-    if active_ability(state, side) == "ROCK_HEAD" {
-        return;
-    }
     let pokemon = state.pokemon_mut(side);
     if pokemon.hp == 0 {
         return;
@@ -10239,9 +10992,18 @@ fn apply_jump_kick_crash_effect(
     side: BattleSide,
     move_name: &str,
     move_data: &Move,
+    retained_damage: Option<&DamageResult>,
     events: &mut Vec<BattleEvent>,
 ) {
     if move_data.effect != "JUMP_KICK" {
+        return;
+    }
+    let Some(retained_damage) = retained_damage else {
+        return;
+    };
+    // GetFailureResultText explicitly skips the crash when the retained type
+    // modifier is zero, so Jump Kick into Ghost only prints "doesn't affect".
+    if retained_damage.type_multiplier.numerator == 0 {
         return;
     }
     let pokemon = state.pokemon_mut(side);
@@ -10249,7 +11011,7 @@ fn apply_jump_kick_crash_effect(
         return;
     }
     let hp_before = pokemon.hp;
-    let crash_damage = (pokemon.max_hp / 2).max(1).min(pokemon.hp);
+    let crash_damage = (retained_damage.damage >> 3).max(1).min(pokemon.hp);
     pokemon.hp = pokemon.hp.saturating_sub(crash_damage);
     events.push(BattleEvent::JumpKickCrash {
         side,
@@ -10258,7 +11020,22 @@ fn apply_jump_kick_crash_effect(
         hp_before,
         hp_after: pokemon.hp,
     });
-    if pokemon.hp == 0 {
+    let fainted = pokemon.hp == 0;
+    // FailureText writes the divided crash amount back into the global
+    // wCurDamage before DoPlayerDamage/DoEnemyDamage. A later opponent
+    // Counter therefore observes this self-damage-sized register, not the
+    // earlier AI scoring value.
+    record_last_damage(
+        state,
+        side.other(),
+        BattleLastDamageState {
+            source: side,
+            move_name: move_name.to_string(),
+            category: BattleDamageCategory::Physical,
+            damage: crash_damage,
+        },
+    );
+    if fainted {
         events.push(BattleEvent::Fainted { side });
     }
 }
@@ -10411,6 +11188,7 @@ fn apply_stat_stage_effect(
     side: BattleSide,
     move_name: &str,
     move_data: &Move,
+    stat_multipliers: &BattleStatMultiplierTables,
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
@@ -10421,14 +11199,26 @@ fn apply_stat_stage_effect(
         return Ok(false);
     }
     let target = stat_effect_target(side, amount);
-    if target != side && move_blocked_by_substitute(state, side, move_name, target, events) {
-        return Ok(true);
-    }
-    let target_stage = *state
-        .pokemon(target)
-        .stat_boosts
+    let target_stage = *battle_stat_boosts(state, target)
         .get(&stat)
         .ok_or(BattleTurnError::MissingStatStage { side: target, stat })?;
+    if amount < 0 && target != side {
+        // StatDown checks protection and the lower bound before the enemy's
+        // random-failure branch, then checks Substitute and a hidden opponent
+        // only after that RNG has potentially been consumed.
+        if mist_active(state, target) || target_stage <= -6 {
+            apply_stat_stage_delta(
+                state,
+                side,
+                move_name,
+                stat,
+                amount,
+                stat_multipliers,
+                events,
+            )?;
+            return Ok(true);
+        }
+    }
     if amount < 0
         && side == BattleSide::Enemy
         && state.enemy_effect_ai_random_fail
@@ -10446,10 +11236,30 @@ fn apply_stat_stage_effect(
         });
         return Ok(true);
     }
-    apply_stat_stage_delta(state, side, move_name, stat, amount, events)?;
+    if target != side && move_blocked_by_substitute(state, side, move_name, target, events) {
+        return Ok(true);
+    }
+    if amount < 0 && target != side && target_is_hidden(state, side) {
+        events.push(BattleEvent::StatStageFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+            stat,
+        });
+        return Ok(true);
+    }
+    apply_stat_stage_delta(
+        state,
+        side,
+        move_name,
+        stat,
+        amount,
+        stat_multipliers,
+        events,
+    )?;
     if move_name == "MINIMIZE"
         && target == side
-        && *state.pokemon(side).stat_boosts.get(&Stat::Evasion).ok_or(
+        && *battle_stat_boosts(state, side).get(&Stat::Evasion).ok_or(
             BattleTurnError::MissingStatStage {
                 side,
                 stat: Stat::Evasion,
@@ -10467,10 +11277,20 @@ fn apply_stat_stage_delta(
     move_name: &str,
     stat: Stat,
     amount: i8,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let target = stat_effect_target(side, amount);
-    apply_stat_stage_delta_to_target(state, side, move_name, target, stat, amount, events)
+    apply_stat_stage_delta_to_target(
+        state,
+        side,
+        move_name,
+        target,
+        stat,
+        amount,
+        stat_multipliers,
+        events,
+    )
 }
 
 fn apply_stat_stage_delta_to_target(
@@ -10480,18 +11300,9 @@ fn apply_stat_stage_delta_to_target(
     target: BattleSide,
     stat: Stat,
     amount: i8,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    if amount < 0 && target != side && ability_blocks_stat_drop(active_ability(state, target), stat)
-    {
-        events.push(BattleEvent::StatStageFailed {
-            side,
-            move_name: move_name.to_string(),
-            target,
-            stat,
-        });
-        return Ok(());
-    }
     if amount < 0 && target != side && mist_active(state, target) {
         events.push(BattleEvent::MistProtected {
             side,
@@ -10502,9 +11313,7 @@ fn apply_stat_stage_delta_to_target(
         });
         return Ok(());
     }
-    let pokemon = state.pokemon_mut(target);
-    let stage_before = *pokemon
-        .stat_boosts
+    let stage_before = *battle_stat_boosts(state, target)
         .get(&stat)
         .ok_or(BattleTurnError::MissingStatStage { side: target, stat })?;
     let stage_after = (stage_before + amount).clamp(-6, 6);
@@ -10517,8 +11326,30 @@ fn apply_stat_stage_delta_to_target(
             amount,
             stage: stage_before,
         });
+    } else if matches!(
+        stat,
+        Stat::Attack | Stat::Defense | Stat::Speed | Stat::SpecialAttack | Stat::SpecialDefense
+    ) && ((amount > 0 && battle_raw_stat(state, target, stat) == 999)
+        || (amount < 0 && battle_raw_stat(state, target, stat) == 1))
+    {
+        // RaiseStat/LowerStat write the requested one- or two-stage change
+        // before checking the unmodified party-stat word. At the raw limit
+        // the failure path rolls back exactly one stage and deliberately
+        // skips CalcPlayerStats/CalcEnemyStats. A sharp change therefore
+        // leaves one hidden stage behind while the loaded battle-stat words
+        // remain untouched.
+        let rolled_back_stage = stage_after - amount.signum();
+        battle_stat_boosts_mut(state, target).insert(stat, rolled_back_stage);
+        events.push(BattleEvent::StatStageUnchanged {
+            side,
+            move_name: move_name.to_string(),
+            target,
+            stat,
+            amount,
+            stage: rolled_back_stage,
+        });
     } else {
-        pokemon.stat_boosts.insert(stat, stage_after);
+        battle_stat_boosts_mut(state, target).insert(stat, stage_after);
         events.push(BattleEvent::StatStageChanged {
             side,
             move_name: move_name.to_string(),
@@ -10528,6 +11359,14 @@ fn apply_stat_stage_delta_to_target(
             stage_before,
             stage_after,
         });
+        if matches!(
+            stat,
+            Stat::Attack | Stat::Defense | Stat::Speed | Stat::SpecialAttack | Stat::SpecialDefense
+        ) {
+            if target == BattleSide::Player {
+                state.player_badge_before_status = true;
+            }
+        }
         if target == BattleSide::Enemy
             && matches!(
                 stat,
@@ -10542,8 +11381,55 @@ fn apply_stat_stage_delta_to_target(
             // CalcEnemyStats, replacing the stale values left by AI_HealStatus.
             recalculate_enemy_status_penalties(state);
         }
+        if matches!(
+            stat,
+            Stat::Attack | Stat::Defense | Stat::Speed | Stat::SpecialAttack | Stat::SpecialDefense
+        ) {
+            recalculate_loaded_stats(state, target, stat_multipliers)?;
+        }
     }
     Ok(())
+}
+
+fn battle_raw_stat(state: &BattleCombatState, side: BattleSide, stat: Stat) -> u16 {
+    let pokemon = effective_battle_pokemon(state, side);
+    match stat {
+        Stat::Attack => pokemon.attack,
+        Stat::Defense => pokemon.defense,
+        Stat::Speed => pokemon.speed,
+        Stat::SpecialAttack => pokemon.special_attack,
+        Stat::SpecialDefense => pokemon.special_defense,
+        Stat::Hp | Stat::Accuracy | Stat::Evasion => {
+            unreachable!("HP, accuracy, and evasion have no mutable raw stat word")
+        }
+    }
+}
+
+fn loaded_stats(state: &BattleCombatState, side: BattleSide) -> &BattleLoadedStats {
+    match side {
+        BattleSide::Player => &state.player_loaded_stats,
+        BattleSide::Enemy => &state.enemy_loaded_stats,
+    }
+}
+
+fn loaded_stats_mut(state: &mut BattleCombatState, side: BattleSide) -> &mut BattleLoadedStats {
+    match side {
+        BattleSide::Player => &mut state.player_loaded_stats,
+        BattleSide::Enemy => &mut state.enemy_loaded_stats,
+    }
+}
+
+fn loaded_stat_mut(stats: &mut BattleLoadedStats, stat: Stat) -> &mut u16 {
+    match stat {
+        Stat::Attack => &mut stats.attack,
+        Stat::Defense => &mut stats.defense,
+        Stat::Speed => &mut stats.speed,
+        Stat::SpecialAttack => &mut stats.special_attack,
+        Stat::SpecialDefense => &mut stats.special_defense,
+        Stat::Hp | Stat::Accuracy | Stat::Evasion => {
+            unreachable!("HP, accuracy, and evasion have no loaded battle-stat word")
+        }
+    }
 }
 
 fn stat_effect_target(side: BattleSide, amount: i8) -> BattleSide {
@@ -11114,6 +12000,9 @@ fn clear_side_volatile_conditions(state: &mut BattleCombatState, side: BattleSid
     set_minimized_state(state, side, false);
     set_toxic_turns(state, side, 0);
     clear_last_moves(state, side);
+    // NewBattleMonStatus/ResetEnemyBattleVars also clear the opponent's
+    // LAST_COUNTER_MOVE, while deliberately preserving its LAST_MOVE.
+    set_last_counter_move(state, side.other(), None);
     if side == BattleSide::Player {
         state.player_used_moves.clear();
         state.player_turns_taken = 0;
@@ -11178,6 +12067,7 @@ fn apply_secondary_stat_stage_effect(
     move_name: &str,
     move_data: &Move,
     effect_chance: EffectChanceResult,
+    stat_multipliers: &BattleStatMultiplierTables,
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
@@ -11194,9 +12084,7 @@ fn apply_secondary_stat_stage_effect(
     if target != side && mist_active(state, target) {
         return Ok(true);
     }
-    let target_stage = *state
-        .pokemon(target)
-        .stat_boosts
+    let target_stage = *battle_stat_boosts(state, target)
         .get(&stat)
         .ok_or(BattleTurnError::MissingStatStage { side: target, stat })?;
     if (amount > 0 && target_stage >= 6) || (amount < 0 && target_stage <= -6) {
@@ -11215,7 +12103,16 @@ fn apply_secondary_stat_stage_effect(
     if target != side && substitute_hp(state, target) != 0 {
         return Ok(true);
     }
-    apply_stat_stage_delta_to_target(state, side, move_name, target, stat, amount, events)?;
+    apply_stat_stage_delta_to_target(
+        state,
+        side,
+        move_name,
+        target,
+        stat,
+        amount,
+        stat_multipliers,
+        events,
+    )?;
     Ok(true)
 }
 
@@ -11255,9 +12152,10 @@ fn apply_secondary_status_effect(
     move_name: &str,
     status: &str,
     effect_chance: EffectChanceResult,
+    items: &BTreeMap<String, Item>,
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
-) {
+) -> Result<(), BattleTurnError> {
     let target = side.other();
     if !effect_chance.succeeds {
         if let Some(roll) = effect_chance.roll {
@@ -11270,10 +12168,10 @@ fn apply_secondary_status_effect(
                 roll,
             });
         }
-        return;
+        return Ok(());
     }
 
-    apply_secondary_status_after_success(state, side, move_name, target, status, rng, events);
+    apply_secondary_status_after_success(state, side, move_name, target, status, items, rng, events)
 }
 
 fn apply_tri_attack_effect(
@@ -11281,9 +12179,10 @@ fn apply_tri_attack_effect(
     side: BattleSide,
     move_name: &str,
     move_data: &Move,
+    items: &BTreeMap<String, Item>,
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
-) {
+) -> Result<(), BattleTurnError> {
     let chance_percent = move_data.effect_chance.min(100);
     let target = side.other();
     let (succeeds, chance_roll) = secondary_effect_roll(chance_percent, rng);
@@ -11296,7 +12195,7 @@ fn apply_tri_attack_effect(
             chance_percent,
             roll: chance_roll.expect("effectchance always consumes a battle byte"),
         });
-        return;
+        return Ok(());
     }
 
     let status_roll = loop {
@@ -11311,7 +12210,7 @@ fn apply_tri_attack_effect(
         3 => "BURN",
         _ => unreachable!("Tri Attack rejects the zero masked status roll"),
     };
-    apply_secondary_status_after_success(state, side, move_name, target, status, rng, events);
+    apply_secondary_status_after_success(state, side, move_name, target, status, items, rng, events)
 }
 
 fn apply_secondary_status_after_success(
@@ -11320,9 +12219,10 @@ fn apply_secondary_status_after_success(
     move_name: &str,
     target: BattleSide,
     status: &str,
+    items: &BTreeMap<String, Item>,
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
-) {
+) -> Result<(), BattleTurnError> {
     if status == "BURN" && state.pokemon(target).status.as_deref() == Some("FREEZE") {
         state.pokemon_mut(target).status = None;
         events.push(BattleEvent::StatusHealed {
@@ -11331,31 +12231,32 @@ fn apply_secondary_status_after_success(
             target,
             status_before: "FREEZE".to_string(),
         });
-        return;
+        return Ok(());
     }
     // The damaging target commands return silently for an existing status or
     // an immune type. These gates precede Safeguard in the source stream.
     if state.pokemon(target).status.is_some() {
-        return;
+        return Ok(());
     }
     let target_types = effective_pokemon_types(state, target);
     if pokemon_is_status_immune(&target_types, status) {
-        return;
+        return Ok(());
     }
     // FreezeTarget returns silently in sunlight after its chance byte has
     // already been sampled by the effect script.
     if status == "FREEZE" && battle_effective_weather(state) == Weather::Sun {
-        return;
+        return Ok(());
+    }
+    if held_item_prevents_effect(state, target, status, items)?.is_some() {
+        return Ok(());
     }
     if move_blocked_by_safeguard(state, side, move_name, target, status, events) {
-        return;
+        return Ok(());
     }
     let sleep_turn_mask = state.sleep_turn_mask;
-    let target_ability = active_ability(state, target).to_string();
     let applied = apply_status_to_target(
-        state.pokemon_mut(target),
+        state,
         &target_types,
-        &target_ability,
         side,
         move_name,
         target,
@@ -11367,46 +12268,10 @@ fn apply_secondary_status_after_success(
     if applied && target == BattleSide::Enemy {
         recalculate_enemy_status_penalties(state);
     }
-    if applied {
-        apply_synchronize(state, side, target, status, rng, events);
-    }
     if applied && status == "FREEZE" {
         set_recharge_move_state(state, target, None);
     }
-}
-
-fn apply_synchronize(
-    state: &mut BattleCombatState,
-    source: BattleSide,
-    synchronized: BattleSide,
-    status: &str,
-    rng: &mut dyn BattleRandomSource,
-    events: &mut Vec<BattleEvent>,
-) {
-    if active_ability(state, synchronized) != "SYNCHRONIZE"
-        || !matches!(status, "BURN" | "PARALYSIS" | "POISON" | "BAD_POISON")
-        || state.pokemon(source).status.is_some()
-    {
-        return;
-    }
-    let source_types = effective_pokemon_types(state, source);
-    let sleep_turn_mask = state.sleep_turn_mask;
-    let source_ability = active_ability(state, source).to_string();
-    let applied = apply_status_to_target(
-        state.pokemon_mut(source),
-        &source_types,
-        &source_ability,
-        synchronized,
-        "SYNCHRONIZE",
-        source,
-        status,
-        sleep_turn_mask,
-        rng,
-        events,
-    );
-    if applied && source == BattleSide::Enemy {
-        recalculate_enemy_status_penalties(state);
-    }
+    Ok(())
 }
 
 fn status_applied_since(events: &[BattleEvent], start: usize, target: BattleSide) -> bool {
@@ -11456,7 +12321,6 @@ fn apply_secondary_flinch_effect(
     }
     if target_already_acted
         || substitute_hp(state, target) != 0
-        || ability_blocks_flinching(active_ability(state, target))
         || matches!(
             state.pokemon(target).status.as_deref(),
             Some("SLEEP" | "FREEZE")
@@ -11478,29 +12342,33 @@ fn apply_confusion_to_target(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
+    items: &BTreeMap<String, Item>,
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
-) {
+) -> Result<(), BattleTurnError> {
     let target = side.other();
-    if ability_blocks_confusion(active_ability(state, target)) {
-        return;
-    }
     if move_blocked_by_safeguard(state, side, move_name, target, "CONFUSION", events) {
-        return;
+        return Ok(());
     }
-    if move_blocked_by_substitute(state, side, move_name, target, events) {
-        return;
+    if held_item_blocks_direct_effect(state, side, move_name, target, "CONFUSION", items, events)? {
+        return Ok(());
     }
-    let pokemon = state.pokemon_mut(target);
-    if pokemon.confusion_turns != 0 {
+    // BattleCommand_Confuse reports an existing confusion before it checks
+    // Substitute. This differs from the silent ConfuseTarget command used by
+    // Swagger and damaging secondary effects.
+    if state.pokemon(target).confusion_turns != 0 {
         events.push(BattleEvent::ConfusionFailed {
             side,
             move_name: move_name.to_string(),
             target,
-            turns_remaining: pokemon.confusion_turns,
+            turns_remaining: state.pokemon(target).confusion_turns,
         });
-        return;
+        return Ok(());
     }
+    if move_blocked_by_substitute(state, side, move_name, target, events) {
+        return Ok(());
+    }
+    let pokemon = state.pokemon_mut(target);
     pokemon.confusion_turns = 2 + u16::from(rng.battle_random_byte() & 3);
     events.push(BattleEvent::ConfusionApplied {
         side,
@@ -11508,18 +12376,60 @@ fn apply_confusion_to_target(
         target,
         turns: pokemon.confusion_turns,
     });
+    Ok(())
 }
 
 fn apply_swagger_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
+    items: &BTreeMap<String, Item>,
+    stat_multipliers: &BattleStatMultiplierTables,
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let target = side.other();
-    apply_stat_stage_delta_to_target(state, side, move_name, target, Stat::Attack, 2, events)?;
-    apply_confusion_to_target(state, side, move_name, rng, events);
+    let attack_before = *battle_stat_boosts(state, target).get(&Stat::Attack).ok_or(
+        BattleTurnError::MissingStatStage {
+            side: target,
+            stat: Stat::Attack,
+        },
+    )?;
+    apply_stat_stage_delta_to_target(
+        state,
+        side,
+        move_name,
+        target,
+        Stat::Attack,
+        2,
+        stat_multipliers,
+        events,
+    )?;
+    let attack_after = *battle_stat_boosts(state, target).get(&Stat::Attack).ok_or(
+        BattleTurnError::MissingStatStage {
+            side: target,
+            stat: Stat::Attack,
+        },
+    )?;
+    if attack_after == attack_before {
+        // AttackUp2 sets wAttackMissed at the cap, so Swagger's following
+        // FailureText jumps to EndMoveEffect before ConfuseTarget.
+        state.critical_hit_register = 0;
+        return Ok(());
+    }
+    apply_secondary_confusion_effect(
+        state,
+        side,
+        move_name,
+        EffectChanceResult {
+            chance_percent: 100,
+            succeeds: true,
+            roll: None,
+        },
+        items,
+        rng,
+        events,
+    )?;
     Ok(())
 }
 
@@ -11550,9 +12460,10 @@ fn apply_secondary_confusion_effect(
     side: BattleSide,
     move_name: &str,
     effect_chance: EffectChanceResult,
+    items: &BTreeMap<String, Item>,
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
-) {
+) -> Result<(), BattleTurnError> {
     let target = side.other();
     if !effect_chance.succeeds {
         if let Some(roll) = effect_chance.roll {
@@ -11564,16 +12475,16 @@ fn apply_secondary_confusion_effect(
                 roll,
             });
         }
-        return;
+        return Ok(());
+    }
+    if held_item_prevents_effect(state, target, "CONFUSION", items)?.is_some() {
+        return Ok(());
     }
     if move_blocked_by_safeguard(state, side, move_name, target, "CONFUSION", events) {
-        return;
+        return Ok(());
     }
-    if substitute_hp(state, target) != 0
-        || state.pokemon(target).confusion_turns != 0
-        || ability_blocks_confusion(active_ability(state, target))
-    {
-        return;
+    if substitute_hp(state, target) != 0 || state.pokemon(target).confusion_turns != 0 {
+        return Ok(());
     }
     let turns = 2 + u16::from(rng.battle_random_byte() & 3);
     state.pokemon_mut(target).confusion_turns = turns;
@@ -11583,6 +12494,7 @@ fn apply_secondary_confusion_effect(
         target,
         turns,
     });
+    Ok(())
 }
 
 fn apply_direct_heal_effect(
@@ -11590,14 +12502,15 @@ fn apply_direct_heal_effect(
     side: BattleSide,
     move_name: &str,
     move_data: &Move,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
-) {
+) -> Result<(), BattleTurnError> {
     let weather = battle_effective_weather(state);
     let time_of_day = state.time_of_day;
     let link_battle = state.link_battle;
     if move_data.name == "REST" {
-        apply_rest_heal_effect(state, side, move_name, events);
-        return;
+        apply_rest_heal_effect(state, side, move_name, stat_multipliers, events)?;
+        return Ok(());
     }
     let pokemon = state.pokemon_mut(side);
     if pokemon.hp >= pokemon.max_hp {
@@ -11607,7 +12520,7 @@ fn apply_direct_heal_effect(
             hp: pokemon.hp,
             max_hp: pokemon.max_hp,
         });
-        return;
+        return Ok(());
     }
     let hp_before = pokemon.hp;
     let animation_param = time_based_heal_param(move_data, time_of_day, weather, link_battle);
@@ -11622,40 +12535,43 @@ fn apply_direct_heal_effect(
         amount,
         animation_param,
     });
+    Ok(())
 }
 
 fn apply_heal_bell_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     _move_name: &str,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
-) {
+) -> Result<(), BattleTurnError> {
     let status_before = state.pokemon(side).status.clone();
-    if active_ability(state, side) != "SOUNDPROOF" {
-        let pokemon = state.pokemon_mut(side);
-        pokemon.status = None;
-        pokemon.sleep_turns = 0;
-    }
+    let pokemon = state.pokemon_mut(side);
+    pokemon.status = None;
+    pokemon.sleep_turns = 0;
     let party = match side {
         BattleSide::Player => &mut state.player_party,
         BattleSide::Enemy => &mut state.enemy_party,
     };
     for pokemon in party {
-        if pokemon.species.ability != "SOUNDPROOF" {
-            pokemon.status = None;
-            pokemon.sleep_turns = 0;
-        }
+        pokemon.status = None;
+        pokemon.sleep_turns = 0;
     }
     if side == BattleSide::Enemy {
         // HealBell finishes by recalculating the active enemy's stats after
         // clearing the status byte.
         recalculate_enemy_status_penalties(state);
     }
+    if side == BattleSide::Player {
+        state.player_badge_before_status = true;
+    }
+    recalculate_loaded_stats(state, side, stat_multipliers)?;
     set_nightmare_source(state, side, None);
     events.push(BattleEvent::HealBellChimed {
         side,
         active_status_before: status_before,
     });
+    Ok(())
 }
 
 fn apply_pain_split_effect(
@@ -11665,7 +12581,12 @@ fn apply_pain_split_effect(
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
-    if move_blocked_by_substitute(state, side, move_name, target, events) {
+    if substitute_hp(state, target) != 0 {
+        events.push(BattleEvent::PainSplitFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        });
         return;
     }
     let user_hp_before = state.pokemon(side).hp;
@@ -11675,6 +12596,9 @@ fn apply_pain_split_effect(
     let target_hp_after = split_hp.min(state.pokemon(target).max_hp);
     state.pokemon_mut(side).hp = user_hp_after;
     state.pokemon_mut(target).hp = target_hp_after;
+    // The command uses wCurDamage while averaging HP, then clears it after
+    // both battlers' HP values and bars have been updated.
+    clear_turn_last_damage(state);
     events.push(BattleEvent::PainSplitApplied {
         side,
         move_name: move_name.to_string(),
@@ -11690,18 +12614,9 @@ fn apply_rest_heal_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
-) {
-    if ability_blocks_status(active_ability(state, side), "SLEEP") {
-        let pokemon = state.pokemon(side);
-        events.push(BattleEvent::HealFailed {
-            side,
-            move_name: move_name.to_string(),
-            hp: pokemon.hp,
-            max_hp: pokemon.max_hp,
-        });
-        return;
-    }
+) -> Result<(), BattleTurnError> {
     if state.pokemon(side).hp >= state.pokemon(side).max_hp {
         let pokemon = state.pokemon(side);
         events.push(BattleEvent::HealFailed {
@@ -11710,7 +12625,7 @@ fn apply_rest_heal_effect(
             hp: pokemon.hp,
             max_hp: pokemon.max_hp,
         });
-        return;
+        return Ok(());
     }
     // BattleCommand_Heal clears SUBSTATUS_TOXIC before replacing the status
     // byte, and stores REST_SLEEP_TURNS + 1. The ordinary sleep gate
@@ -11739,6 +12654,11 @@ fn apply_rest_heal_effect(
     if side == BattleSide::Enemy {
         recalculate_enemy_status_penalties(state);
     }
+    if side == BattleSide::Player {
+        state.player_badge_before_status = true;
+    }
+    recalculate_loaded_stats(state, side, stat_multipliers)?;
+    Ok(())
 }
 
 fn time_based_heal_param(
@@ -11809,9 +12729,6 @@ fn apply_perish_song_effect(
     }
 
     for target in [BattleSide::Player, BattleSide::Enemy] {
-        if active_ability(state, target) == "SOUNDPROOF" {
-            continue;
-        }
         let pokemon = state.pokemon_mut(target);
         if pokemon.perish_song_turns != 0 {
             continue;
@@ -11851,21 +12768,51 @@ fn apply_belly_drum_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    let attack_stage = *state.pokemon(side).stat_boosts.get(&Stat::Attack).ok_or(
+    let attack_stage = *battle_stat_boosts(state, side).get(&Stat::Attack).ok_or(
         BattleTurnError::MissingStatStage {
             side,
             stat: Stat::Attack,
         },
     )?;
     if attack_stage >= 6 {
-        let pokemon = state.pokemon(side);
-        events.push(BattleEvent::HealFailed {
+        events.push(BattleEvent::BellyDrumFailed {
             side,
             move_name: move_name.to_string(),
-            hp: pokemon.hp,
-            max_hp: pokemon.max_hp,
+            attack_stage_before: attack_stage,
+            attack_stage_after: attack_stage,
+        });
+        return Ok(());
+    }
+
+    let mut preliminary_events = Vec::new();
+    apply_stat_stage_delta_to_target(
+        state,
+        side,
+        move_name,
+        side,
+        Stat::Attack,
+        2,
+        stat_multipliers,
+        &mut preliminary_events,
+    )?;
+    let preliminary_stage = *battle_stat_boosts(state, side).get(&Stat::Attack).ok_or(
+        BattleTurnError::MissingStatStage {
+            side,
+            stat: Stat::Attack,
+        },
+    )?;
+    if preliminary_events
+        .iter()
+        .any(|event| matches!(event, BattleEvent::StatStageUnchanged { .. }))
+    {
+        events.push(BattleEvent::BellyDrumFailed {
+            side,
+            move_name: move_name.to_string(),
+            attack_stage_before: attack_stage,
+            attack_stage_after: preliminary_stage,
         });
         return Ok(());
     }
@@ -11874,29 +12821,32 @@ fn apply_belly_drum_effect(
     // greater than the half-max cost. Equality takes Belly Drum's failure
     // path (after its well-known preliminary +2 Attack glitch).
     if state.pokemon(side).hp <= state.pokemon(side).max_hp / 2 {
-        apply_stat_stage_delta(state, side, move_name, Stat::Attack, 2, events)?;
-        let pokemon = state.pokemon(side);
-        events.push(BattleEvent::HealFailed {
+        events.push(BattleEvent::BellyDrumFailed {
             side,
             move_name: move_name.to_string(),
-            hp: pokemon.hp,
-            max_hp: pokemon.max_hp,
+            attack_stage_before: attack_stage,
+            attack_stage_after: preliminary_stage,
         });
         return Ok(());
     }
 
     let hp_cost = state.pokemon(side).max_hp / 2;
     let pokemon = state.pokemon_mut(side);
+    let hp_before = pokemon.hp;
     pokemon.hp = pokemon.hp.saturating_sub(hp_cost);
-    pokemon.stat_boosts.insert(Stat::Attack, 6);
-    events.push(BattleEvent::StatStageChanged {
+    let hp_after = pokemon.hp;
+    battle_stat_boosts_mut(state, side).insert(Stat::Attack, 6);
+    if side == BattleSide::Player {
+        state.player_badge_before_status = true;
+    }
+    recalculate_loaded_stats(state, side, stat_multipliers)?;
+    events.push(BattleEvent::BellyDrumApplied {
         side,
         move_name: move_name.to_string(),
-        target: side,
-        stat: Stat::Attack,
-        amount: 6 - attack_stage,
-        stage_before: attack_stage,
-        stage_after: 6,
+        hp_before,
+        hp_after,
+        attack_stage_before: attack_stage,
+        attack_stage_after: 6,
     });
     Ok(())
 }
@@ -11905,20 +12855,40 @@ fn apply_defense_curl_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     set_defense_curled(state, side, true);
-    apply_stat_stage_delta(state, side, move_name, Stat::Defense, 1, events)
+    apply_stat_stage_delta(
+        state,
+        side,
+        move_name,
+        Stat::Defense,
+        1,
+        stat_multipliers,
+        events,
+    )
 }
 
 fn apply_curse_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     if pokemon_types_include(state, side, "GHOST") {
         let target = side.other();
+        // The Ghost branch owns a private CheckHiddenOpponent command; the
+        // ordinary non-Ghost stat-change branch never performs this check.
+        if airborne_move_state(state, target).is_some() {
+            events.push(BattleEvent::CurseFailed {
+                side,
+                move_name: move_name.to_string(),
+                target,
+            });
+            return Ok(());
+        }
         if substitute_hp(state, target) > 0 || curse_source(state, target).is_some() {
             events.push(BattleEvent::CurseFailed {
                 side,
@@ -11947,38 +12917,56 @@ fn apply_curse_effect(
         return Ok(());
     }
 
-    let pokemon = state.pokemon(side);
-    let attack_stage =
-        *pokemon
-            .stat_boosts
-            .get(&Stat::Attack)
-            .ok_or(BattleTurnError::MissingStatStage {
-                side,
-                stat: Stat::Attack,
-            })?;
-    let defense_stage =
-        *pokemon
-            .stat_boosts
-            .get(&Stat::Defense)
-            .ok_or(BattleTurnError::MissingStatStage {
-                side,
-                stat: Stat::Defense,
-            })?;
+    let attack_stage = *battle_stat_boosts(state, side).get(&Stat::Attack).ok_or(
+        BattleTurnError::MissingStatStage {
+            side,
+            stat: Stat::Attack,
+        },
+    )?;
+    let defense_stage = *battle_stat_boosts(state, side).get(&Stat::Defense).ok_or(
+        BattleTurnError::MissingStatStage {
+            side,
+            stat: Stat::Defense,
+        },
+    )?;
     if attack_stage >= 6 && defense_stage >= 6 {
-        events.push(BattleEvent::StatStageUnchanged {
+        events.push(BattleEvent::CurseStatsCapped {
             side,
             move_name: move_name.to_string(),
-            target: side,
-            stat: Stat::Attack,
-            amount: 1,
-            stage: attack_stage,
         });
         return Ok(());
     }
 
-    apply_stat_stage_delta_to_target(state, side, move_name, side, Stat::Attack, 1, events)?;
-    apply_stat_stage_delta_to_target(state, side, move_name, side, Stat::Defense, 1, events)?;
-    apply_stat_stage_delta_to_target(state, side, move_name, side, Stat::Speed, -1, events)?;
+    apply_stat_stage_delta_to_target(
+        state,
+        side,
+        move_name,
+        side,
+        Stat::Speed,
+        -1,
+        stat_multipliers,
+        events,
+    )?;
+    apply_stat_stage_delta_to_target(
+        state,
+        side,
+        move_name,
+        side,
+        Stat::Attack,
+        1,
+        stat_multipliers,
+        events,
+    )?;
+    apply_stat_stage_delta_to_target(
+        state,
+        side,
+        move_name,
+        side,
+        Stat::Defense,
+        1,
+        stat_multipliers,
+        events,
+    )?;
     Ok(())
 }
 
@@ -12092,6 +13080,9 @@ fn apply_sleep_talk_effect(
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
+    // SleepTalk begins with ClearLastMove. ResetTurn marks the called move as
+    // charging, so its UsedMoveText does not repopulate either history byte.
+    clear_last_moves(state, side);
     if state.pokemon(side).status.as_deref() != Some("SLEEP") {
         events.push(BattleEvent::SleepTalkFailed {
             side,
@@ -12190,6 +13181,10 @@ fn apply_mirror_move_effect(
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let target = side.other();
+    // MirrorMove clears its own used-move history before looking up the
+    // opponent's move. The called move runs under ResetTurn's charging guard
+    // and therefore leaves these registers clear as well.
+    clear_last_moves(state, side);
     let Some(copied_move) = last_counter_move(state, target).map(ToOwned::to_owned) else {
         events.push(BattleEvent::MirrorMoveFailed {
             side,
@@ -12198,7 +13193,10 @@ fn apply_mirror_move_effect(
         });
         return Ok(());
     };
-    if copied_move == move_name {
+    if battle_moves(state, side)
+        .iter()
+        .any(|learned| learned.name == copied_move)
+    {
         events.push(BattleEvent::MirrorMoveFailed {
             side,
             move_name: move_name.to_string(),
@@ -12255,6 +13253,8 @@ fn apply_metronome_effect(
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
+    // Metronome shares MirrorMove's ClearLastMove + guarded ResetTurn path.
+    clear_last_moves(state, side);
     let (roll, selected_move) = select_metronome_move(state, side, moves, rng)?;
     let selected_data =
         moves
@@ -12350,6 +13350,9 @@ fn apply_mimic_effect(
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
+    // Mimic always clears both last-move registers, including every failure
+    // path, and unlike called moves it leaves them clear after success too.
+    clear_last_moves(state, side);
     let Some(slot) = executing_slot else {
         events.push(BattleEvent::MimicFailed {
             side,
@@ -12358,6 +13361,14 @@ fn apply_mimic_effect(
         });
         return;
     };
+    if target_is_hidden(state, side) {
+        events.push(BattleEvent::MimicFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        });
+        return;
+    }
     let Some(copied_move) = last_counter_move(state, target).map(ToOwned::to_owned) else {
         events.push(BattleEvent::MimicFailed {
             side,
@@ -12366,7 +13377,12 @@ fn apply_mimic_effect(
         });
         return;
     };
-    if copied_move == move_name || !moves.contains_key(&copied_move) {
+    if copied_move == "STRUGGLE"
+        || battle_moves(state, side)
+            .iter()
+            .any(|learned| learned.name == copied_move)
+        || !moves.contains_key(&copied_move)
+    {
         events.push(BattleEvent::MimicFailed {
             side,
             move_name: move_name.to_string(),
@@ -12393,6 +13409,101 @@ fn apply_mimic_effect(
         replaced_move,
         copied_move,
     });
+}
+
+fn apply_mimic_check_hit_failure(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    move_name: &str,
+    events: &mut Vec<BattleEvent>,
+) {
+    // CheckHit only sets wAttackMissed and returns to the effect stream.
+    // BattleCommand_Mimic still begins with ClearLastMove before observing
+    // that flag and entering FailMimic.
+    clear_last_moves(state, side);
+    events.push(BattleEvent::MimicFailed {
+        side,
+        move_name: move_name.to_string(),
+        target: side.other(),
+    });
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckHitFailureKind {
+    Protect,
+    Airborne,
+    Accuracy,
+}
+
+fn apply_post_check_hit_command_failure(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    move_name: &str,
+    effect: &str,
+    failure: CheckHitFailureKind,
+    events: &mut Vec<BattleEvent>,
+) {
+    let target = side.other();
+    match effect {
+        // AirborneAvoided already represents Leech Seed's identical EvadedText
+        // on the hidden-target branch. Protect and accuracy need the command's
+        // otherwise-missing result after their own shared events.
+        "LEECH_SEED" if failure != CheckHitFailureKind::Airborne => {
+            events.push(BattleEvent::LeechSeedFailed {
+                side,
+                move_name: move_name.to_string(),
+                target,
+            });
+        }
+        "PAIN_SPLIT" => events.push(BattleEvent::PainSplitFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        }),
+        "MIMIC" => apply_mimic_check_hit_failure(state, side, move_name, events),
+        "ENCORE" => events.push(BattleEvent::EncoreFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        }),
+        "SPITE" => events.push(BattleEvent::SpiteFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        }),
+        "LOCK_ON" => events.push(BattleEvent::LockOnFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        }),
+        "CONVERSION2" => events.push(BattleEvent::Conversion2Failed {
+            side,
+            move_name: move_name.to_string(),
+        }),
+        "ATTRACT" => events.push(BattleEvent::AttractFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+            user_gender: None,
+            target_gender: None,
+        }),
+        "DISABLE" => events.push(BattleEvent::DisableFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        }),
+        "FORESIGHT" => events.push(BattleEvent::ForesightFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        }),
+        "FORCE_SWITCH" => events.push(BattleEvent::ForceSwitchFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        }),
+        _ => {}
+    }
 }
 
 fn apply_sketch_effect(
@@ -12548,26 +13659,23 @@ fn apply_conversion2_effect(
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    let Some(last_damage) = last_damage_state(state, side).cloned() else {
+    // BattleCommand_Conversion2 reads LAST_COUNTER_MOVE_OPP, not the
+    // same-turn damage buffer used by Counter and Mirror Coat. The register
+    // persists across turns and is updated for non-damaging moves too.
+    let target = side.other();
+    let Some(source_move_name) = last_counter_move(state, target).map(ToOwned::to_owned) else {
         events.push(BattleEvent::Conversion2Failed {
             side,
             move_name: move_name.to_string(),
         });
         return Ok(());
     };
-    if last_damage.source != side.other() {
-        events.push(BattleEvent::Conversion2Failed {
-            side,
-            move_name: move_name.to_string(),
-        });
-        return Ok(());
-    }
     let source_move =
         moves
-            .get(&last_damage.move_name)
+            .get(&source_move_name)
             .ok_or_else(|| BattleTurnError::MissingMoveData {
                 side,
-                move_name: last_damage.move_name.clone(),
+                move_name: source_move_name.clone(),
             })?;
     if source_move.move_type == "CURSE_TYPE" {
         events.push(BattleEvent::Conversion2Failed {
@@ -12591,10 +13699,12 @@ fn apply_conversion2_effect(
             // malformed battle data.
             type_effectiveness
                 .matchups
-                .get(&source_move.move_type)
-                .and_then(|defenders| defenders.get(&candidate_type))
-                .copied()
-                .unwrap_or_else(TypeMultiplier::one)
+                .iter()
+                .chain(type_effectiveness.foresight_matchups.iter())
+                .find(|entry| {
+                    entry.attacker == source_move.move_type && entry.defender == candidate_type
+                })
+                .map_or_else(TypeMultiplier::one, |entry| entry.multiplier)
         };
         if multiplier.numerator == 0 || multiplier.numerator < multiplier.denominator {
             candidates.push((slot, candidate_type));
@@ -12624,7 +13734,7 @@ fn apply_conversion2_effect(
     events.push(BattleEvent::Conversion2Applied {
         side,
         move_name: move_name.to_string(),
-        source_move: last_damage.move_name,
+        source_move: source_move_name,
         source_type: source_move.move_type.clone(),
         new_type,
         roll,
@@ -12729,7 +13839,8 @@ fn apply_bide_release_effect(
     let target = side.other();
     let target_hp_before = state.pokemon(target).hp;
     let raw_damage = stored_damage.saturating_mul(2);
-    if apply_substitute_damage(state, side, move_name, raw_damage, events).is_some() {
+    let survival = apply_damage_survival_modifier(state, target, raw_damage, items, rng)?;
+    if apply_substitute_damage(state, side, move_name, survival.damage, events).is_some() {
         events.push(BattleEvent::BideReleased {
             side,
             move_name: move_name.to_string(),
@@ -12739,6 +13850,14 @@ fn apply_bide_release_effect(
             target_hp_before,
             target_hp_after: target_hp_before,
         });
+        emit_survival_damage_event(
+            side,
+            target,
+            move_name,
+            raw_damage,
+            survival.held_item,
+            events,
+        );
         apply_rage_counter_increment(state, target, events)?;
         if state.pokemon(target).hp != 0 && state.pokemon(side).hp != 0 {
             apply_kings_rock_flinch(
@@ -12748,34 +13867,7 @@ fn apply_bide_release_effect(
         return Ok(());
     }
 
-    let mut damage = raw_damage.min(target_hp_before);
-    if endure_active(state, target) && target_hp_before > 1 {
-        let lethal_damage = damage;
-        damage = damage.min(target_hp_before - 1);
-        if damage != lethal_damage {
-            events.push(BattleEvent::EnduredHit {
-                side,
-                move_name: move_name.to_string(),
-                target,
-                raw_damage: lethal_damage,
-                held_item: None,
-            });
-        }
-    }
-    if damage >= target_hp_before
-        && target_hp_before > 1
-        && focus_band_survives(state, target, items, rng)?
-    {
-        let lethal_damage = damage;
-        damage = target_hp_before - 1;
-        events.push(BattleEvent::EnduredHit {
-            side,
-            move_name: move_name.to_string(),
-            target,
-            raw_damage: lethal_damage,
-            held_item: state.pokemon(target).item.clone(),
-        });
-    }
+    let damage = survival.damage.min(target_hp_before);
     state.pokemon_mut(target).hp = target_hp_before.saturating_sub(damage);
     let target_hp_after = state.pokemon(target).hp;
     events.push(BattleEvent::BideReleased {
@@ -12787,6 +13879,14 @@ fn apply_bide_release_effect(
         target_hp_before,
         target_hp_after,
     });
+    emit_survival_damage_event(
+        side,
+        target,
+        move_name,
+        raw_damage,
+        survival.held_item,
+        events,
+    );
     if damage != 0 {
         record_last_damage(
             state,
@@ -12867,7 +13967,12 @@ fn apply_leech_seed_effect(
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
-    if move_blocked_by_substitute(state, side, move_name, target, events) {
+    if substitute_hp(state, target) != 0 {
+        events.push(BattleEvent::LeechSeedFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        });
         return;
     }
     let target_types = effective_pokemon_types(state, target);
@@ -12910,6 +14015,14 @@ fn apply_nightmare_effect(
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
+    if target_is_hidden(state, side) {
+        events.push(BattleEvent::NightmareFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        });
+        return;
+    }
     if move_blocked_by_substitute(state, side, move_name, target, events) {
         return;
     }
@@ -12949,12 +14062,13 @@ fn apply_force_switch_effect(
     side: BattleSide,
     move_name: &str,
     force_switch_ends_battle: bool,
+    items: &BTreeMap<String, Item>,
     rng: &mut dyn BattleRandomSource,
     acted_before: &[BattleSide],
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let target = side.other();
-    if state.force_switch_blocked || active_ability(state, target) == "SUCTION_CUPS" {
+    if state.force_switch_blocked {
         events.push(BattleEvent::ForceSwitchFailed {
             side,
             move_name: move_name.to_string(),
@@ -12975,9 +14089,9 @@ fn apply_force_switch_effect(
                     break roll;
                 }
             };
-            // BattleCommand_ForceSwitch keeps the user's level in b and
+            // BattleCommand_ForceSwitch keeps the target's level in b and
             // shifts that register twice after rejection sampling.
-            roll >= u16::from(attacker_level / 4)
+            roll >= u16::from(target_level / 4)
         };
         if !succeeds {
             events.push(BattleEvent::ForceSwitchFailed {
@@ -13032,8 +14146,10 @@ fn apply_force_switch_effect(
         move_name: move_name.to_string(),
         target,
     });
-    clear_side_volatile_conditions(state, target);
-    switch_battle_combat_pokemon(state, target, party_index)?;
+    switch_battle_combat_pokemon_normally(state, target, party_index)?;
+    if target == BattleSide::Player {
+        activate_amulet_coin_for_player_battler(state, items);
+    }
     events.push(BattleEvent::Switched {
         side: target,
         party_index,
@@ -13067,12 +14183,7 @@ fn apply_teleport_effect(
     }
     let attacker_level = state.pokemon(side).level;
     let target_level = state.pokemon(side.other()).level;
-    let succeeds = if side == BattleSide::Enemy {
-        // On the enemy path, a failed level check falls through directly to
-        // `.run_away` after the random comparison. Consequently a wild
-        // Pokemon's Teleport always succeeds, including when underleveled.
-        true
-    } else if attacker_level >= target_level {
+    let succeeds = if attacker_level >= target_level {
         true
     } else {
         let upper = u16::from(attacker_level) + u16::from(target_level) + 1;
@@ -13082,7 +14193,16 @@ fn apply_teleport_effect(
                 break roll;
             }
         };
-        roll >= u16::from(attacker_level / 4)
+        if side == BattleSide::Enemy {
+            // The enemy path still performs the rejection loop and compare,
+            // but then falls through directly to `.run_away` regardless of
+            // the flags. This is Crystal's always-Teleport wild enemy bug.
+            true
+        } else {
+            // The player path keeps the wild target's level in b across the
+            // rejection loop, then shifts that value twice for the threshold.
+            roll >= u16::from(target_level / 4)
+        }
     };
     if succeeds {
         events.push(BattleEvent::Fled { side });
@@ -13180,6 +14300,7 @@ fn apply_berserk_gene_start_of_turn(
     state: &mut BattleCombatState,
     side: BattleSide,
     items: &BTreeMap<String, Item>,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     if state.pokemon(side).hp == 0 {
@@ -13194,7 +14315,7 @@ fn apply_berserk_gene_start_of_turn(
             side,
             item_id: item_id.clone(),
         })?;
-    if item.held_effect != "HELD_ATTACK_UP" {
+    if item_id != "BERSERK_GENE" {
         return Ok(());
     }
     let held_effect = item.held_effect.clone();
@@ -13204,7 +14325,16 @@ fn apply_berserk_gene_start_of_turn(
         item_id,
         held_effect,
     });
-    apply_stat_stage_delta_to_target(state, side, "HELD_ATTACK_UP", side, Stat::Attack, 2, events)?;
+    apply_stat_stage_delta_to_target(
+        state,
+        side,
+        "HELD_ATTACK_UP",
+        side,
+        Stat::Attack,
+        2,
+        stat_multipliers,
+        events,
+    )?;
     // HandleBerserkGene sets the confused substatus without initializing its
     // byte counter. Zero therefore wraps through 256 decrements; an existing
     // confusion count is preserved. No battle RNG is consumed here.
@@ -13227,6 +14357,14 @@ fn apply_escape_trap_effect(
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
+    if target_is_hidden(state, side) {
+        events.push(BattleEvent::EscapeTrapFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        });
+        return;
+    }
     if escape_trap_state(state, target).is_some() {
         events.push(BattleEvent::EscapeTrapFailed {
             side,
@@ -13267,6 +14405,12 @@ fn apply_trap_target_effect(
         });
         return;
     }
+    // BattleCommand_TrapTarget tests the live Substitute flag after checking
+    // for an existing WrapCount. Since applydamage precedes this command, a
+    // Substitute broken by the trapping hit no longer blocks it.
+    if substitute_hp(state, target) != 0 {
+        return;
+    }
     let roll = rng.battle_random_byte() & 3;
     // The source stores 3..6 before the same-turn residual decrement,
     // producing the documented 2..5 trapped turns.
@@ -13296,7 +14440,12 @@ fn apply_lock_on_effect(
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
-    if move_blocked_by_substitute(state, side, move_name, target, events) {
+    if substitute_hp(state, target) != 0 {
+        events.push(BattleEvent::LockOnFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        });
         return;
     }
     set_lock_on_target_state(state, side, true);
@@ -13316,12 +14465,17 @@ fn apply_attract_effect(
     let target = side.other();
     let user_gender = battle_pokemon_gender(state.pokemon(side));
     let target_gender = battle_pokemon_gender(state.pokemon(target));
-    if user_gender.is_none()
-        || target_gender.is_none()
-        || user_gender == target_gender
-        || attracted_by_state(state, target).is_some()
-        || ability_blocks_attraction(active_ability(state, target))
-    {
+    if user_gender.is_none() || target_gender.is_none() || user_gender == target_gender {
+        events.push(BattleEvent::AttractFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+            user_gender,
+            target_gender,
+        });
+        return;
+    }
+    if target_is_hidden(state, side) || attracted_by_state(state, target).is_some() {
         events.push(BattleEvent::AttractFailed {
             side,
             move_name: move_name.to_string(),
@@ -13522,9 +14676,11 @@ fn apply_spite_effect(
     }
 
     let roll = rng.battle_random_byte() & 3;
-    let reduction = roll + 2;
     let pp_before = learned_move.current_pp;
-    learned_move.current_pp = learned_move.current_pp.saturating_sub(reduction);
+    // Spite stores the smaller of its sampled 2..5 and the move's remaining
+    // PP in b, then uses that same clamped byte for subtraction and text.
+    let reduction = (roll + 2).min(pp_before);
+    learned_move.current_pp -= reduction;
     events.push(BattleEvent::SpiteApplied {
         side,
         move_name: move_name.to_string(),
@@ -13548,6 +14704,8 @@ fn apply_future_sight_effect(
 ) -> Result<(), BattleTurnError> {
     let target = side.other();
     if future_sight_state(state, side).is_some() {
+        // The duplicate-queue failure explicitly calls ResetDamage.
+        clear_turn_last_damage(state);
         events.push(BattleEvent::FutureSightFailed {
             side,
             move_name: move_name.to_string(),
@@ -13563,10 +14721,13 @@ fn apply_future_sight_effect(
         Some(BattleFutureSightState {
             source: side,
             move_name: move_name.to_string(),
-            turns_remaining: 3,
+            turns_remaining: 4,
             damage,
         }),
     );
+    // Storing wCurDamage into the delayed-damage buffer zeros both source
+    // bytes as it copies them.
+    clear_turn_last_damage(state);
     events.push(BattleEvent::FutureSightQueued {
         side,
         move_name: move_name.to_string(),
@@ -13581,44 +14742,22 @@ fn calculate_future_sight_damage(
     state: &BattleCombatState,
     side: BattleSide,
     move_data: &Move,
-    stat_multipliers: &BattleStatMultiplierTables,
+    _stat_multipliers: &BattleStatMultiplierTables,
     items: &BTreeMap<String, Item>,
     events: &mut Vec<BattleEvent>,
 ) -> Result<u16, BattleTurnError> {
-    let attacker = state.pokemon(side);
+    let attacker = effective_battle_pokemon(state, side);
     let defender_side = side.other();
-    let defender = state.pokemon(defender_side);
-    let attack_stage = *attacker.stat_boosts.get(&Stat::SpecialAttack).ok_or(
-        BattleTurnError::MissingStatStage {
-            side,
-            stat: Stat::SpecialAttack,
-        },
-    )?;
-    let defense_stage = *defender.stat_boosts.get(&Stat::SpecialDefense).ok_or(
-        BattleTurnError::MissingStatStage {
-            side: defender_side,
-            stat: Stat::SpecialDefense,
-        },
-    )?;
-    let mut attack = apply_stage(stat_multipliers, attacker.special_attack, attack_stage).ok_or(
-        BattleTurnError::MissingStatMultiplier {
-            side,
-            stage: attack_stage,
-        },
-    )?;
-    if attacker.species.id == "PIKACHU" && attacker.item.as_deref() == Some("LIGHT_BALL") {
+    let mut attack = loaded_stats(state, side).special_attack;
+    if species_held_attack_boost_active(state, side, false) {
         attack = attack.wrapping_mul(2);
     }
-    let mut defense = apply_stage(stat_multipliers, defender.special_defense, defense_stage)
-        .ok_or(BattleTurnError::MissingStatMultiplier {
-            side: defender_side,
-            stage: defense_stage,
-        })?;
+    let mut defense = loaded_stats(state, defender_side).special_defense;
     if screen_turns(state, defender_side, BattleScreen::LightScreen) != 0 {
         defense = defense.wrapping_mul(2);
     }
     let (mut attack, mut defense) = truncate_damage_stats(attack, defense, state.link_colosseum);
-    if defender.species.id == "DITTO" && defender.item.as_deref() == Some("METAL_POWDER") {
+    if ditto_holds_metal_powder(state, defender_side) {
         (attack, defense) = apply_metal_powder_damage_stats(attack, defense);
     }
     let held_type_boost_percent =
@@ -13629,9 +14768,7 @@ fn calculate_future_sight_damage(
         .saturating_mul(u32::from(attack));
     damage /= u32::from(defense);
     damage /= 50;
-    if held_type_boost_percent != 0 {
-        damage = damage.saturating_mul(100 + u32::from(held_type_boost_percent)) / 100;
-    }
+    damage = apply_held_type_boost_to_quotient(damage, held_type_boost_percent);
     damage = damage.min(997) + 2;
     Ok(damage.max(1).min(u32::from(u16::MAX)) as u16)
 }
@@ -13640,27 +14777,38 @@ fn apply_transform_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
+    _stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
-) {
+) -> Result<(), BattleTurnError> {
     let target = side.other();
+    clear_last_moves(state, side);
     if transform_state(state, target).is_some() {
         events.push(BattleEvent::TransformFailed {
             side,
             move_name: move_name.to_string(),
             target,
         });
-        return;
+        return Ok(());
+    }
+    if target_is_hidden(state, side) {
+        events.push(BattleEvent::TransformFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        });
+        return Ok(());
     }
     let target_pokemon = state.pokemon(target);
     let target_species_id = target_pokemon.species.id.clone();
     let target_species = target_pokemon.species.clone();
     let target_dvs = target_pokemon.dvs;
-    let target_stat_boosts = target_pokemon.stat_boosts.clone();
+    let target_stat_boosts = battle_stat_boosts(state, target).clone();
     let target_attack = target_pokemon.attack;
     let target_defense = target_pokemon.defense;
     let target_speed = target_pokemon.speed;
     let target_special_attack = target_pokemon.special_attack;
     let target_special_defense = target_pokemon.special_defense;
+    let target_loaded_stats = *loaded_stats(state, target);
     let transformed_moves: Vec<LearnedMove> = battle_moves(state, target)
         .iter()
         .map(|learned| LearnedMove {
@@ -13687,12 +14835,14 @@ fn apply_transform_effect(
             special_defense: target_special_defense,
         }),
     );
+    *loaded_stats_mut(state, side) = target_loaded_stats;
     events.push(BattleEvent::TransformApplied {
         side,
         move_name: move_name.to_string(),
         target,
         species: target_species_id,
     });
+    Ok(())
 }
 
 fn apply_baton_pass_effect(
@@ -13700,7 +14850,8 @@ fn apply_baton_pass_effect(
     side: BattleSide,
     move_name: &str,
     party_index: Option<usize>,
-    _items: &BTreeMap<String, Item>,
+    items: &BTreeMap<String, Item>,
+    stat_multipliers: &BattleStatMultiplierTables,
     _rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
@@ -13720,17 +14871,25 @@ fn apply_baton_pass_effect(
         return Err(BattleTurnError::SwitchTargetFainted { side, party_index });
     }
 
-    let stat_boosts = state.pokemon(side).stat_boosts.clone();
+    let stat_boosts = battle_stat_boosts(state, side).clone();
     let confusion_turns = state.pokemon(side).confusion_turns;
     let focus_energy = state.pokemon(side).focus_energy;
     clear_baton_pass_non_passable_conditions(state, side);
     switch_battle_combat_pokemon(state, side, party_index)?;
+    if side == BattleSide::Player {
+        activate_amulet_coin_for_player_battler(state, items);
+    }
     if state.pokemon(side).status.as_deref() != Some("SLEEP") {
         set_nightmare_source(state, side, None);
     }
     state.pokemon_mut(side).stat_boosts = stat_boosts.clone();
     state.pokemon_mut(side).confusion_turns = confusion_turns;
     state.pokemon_mut(side).focus_energy = focus_energy;
+    // PassedBattleMonEntrance and the enemy Baton Pass path call
+    // ApplyStatLevelMultiplierOnAllStats after loading the replacement. That
+    // command rebuilds the five BattleMon words from the untouched raw shadow,
+    // overwriting the status and badge adjustments made by InitBattleMon.
+    recalculate_loaded_stats_from_stages_only(state, side, stat_multipliers)?;
     events.push(BattleEvent::BatonPassed {
         side,
         move_name: move_name.to_string(),
@@ -13755,14 +14914,7 @@ pub(crate) fn switch_battle_combat_pokemon(
         BattleSide::Player => state.player_party_index,
         BattleSide::Enemy => state.enemy_party_index,
     };
-    let mut outgoing = state.pokemon(side).clone();
-    if let Some(original_ability) = trace_original_ability(state, side).clone() {
-        outgoing.species.ability = original_ability;
-    }
-    if active_ability(state, side) == "NATURAL_CURE" {
-        outgoing.status = None;
-        outgoing.sleep_turns = 0;
-    }
+    let outgoing = state.pokemon(side).clone();
     let party = match side {
         BattleSide::Player => &mut state.player_party,
         BattleSide::Enemy => &mut state.enemy_party,
@@ -13774,7 +14926,7 @@ pub(crate) fn switch_battle_combat_pokemon(
                 side,
                 party_index: active_index,
             })?;
-    *active_slot = outgoing;
+    sync_active_pokemon_into_party_slot(active_slot, outgoing, false);
     let mut switched = party
         .get(party_index)
         .cloned()
@@ -13796,139 +14948,63 @@ pub(crate) fn switch_battle_combat_pokemon(
             clear_enemy_status_penalties(state);
         }
     }
+    reload_switch_in_loaded_stats(state, side);
     match side {
         BattleSide::Player => {
             state.player_party_index = party_index;
             state.player_spikes_zero_hp_unchecked = false;
-            state.player_flash_fire_active = false;
-            state.player_truant_loafing = false;
             state.player_type_override = None;
-            state.player_trace_original_ability = None;
-            state.player_active_turns = 0;
         }
         BattleSide::Enemy => {
             state.enemy_party_index = party_index;
             state.enemy_spikes_zero_hp_unchecked = false;
-            state.enemy_flash_fire_active = false;
-            state.enemy_truant_loafing = false;
             state.enemy_type_override = None;
-            state.enemy_trace_original_ability = None;
-            state.enemy_active_turns = 0;
         }
     }
-    apply_switch_in_ability(state, side)?;
     Ok(())
 }
 
-fn apply_switch_in_ability(
-    state: &mut BattleCombatState,
-    side: BattleSide,
-) -> Result<(), BattleTurnError> {
-    if active_ability(state, side) == "TRACE" {
-        let traced = active_ability(state, side.other()).to_string();
-        *trace_original_ability_mut(state, side) = Some("TRACE".to_string());
-        state.pokemon_mut(side).species.ability = traced;
+fn reload_switch_in_loaded_stats(state: &mut BattleCombatState, side: BattleSide) {
+    let pokemon = state.pokemon(side);
+    let mut stats = BattleLoadedStats::from_raw(pokemon);
+    let status_applies = match side {
+        BattleSide::Player => true,
+        BattleSide::Enemy => {
+            state.enemy_burn_attack_penalty_active || state.enemy_paralysis_speed_penalty_active
+        }
+    };
+    if status_applies {
+        stats.apply_status(pokemon);
     }
-    let ability = active_ability(state, side).to_string();
-    apply_ability_self_cure(state, side, &ability);
-    match ability.as_str() {
-        "DRIZZLE" => {
-            state.weather = Weather::Rain;
-            state.weather_turns = 0;
-        }
-        "DROUGHT" => {
-            state.weather = Weather::Sun;
-            state.weather_turns = 0;
-        }
-        "SAND_STREAM" => {
-            state.weather = Weather::Sandstorm;
-            state.weather_turns = 0;
-        }
-        "INTIMIDATE" => {
-            let target = side.other();
-            if !ability_blocks_stat_drop(active_ability(state, target), Stat::Attack) {
-                let stage = state
-                    .pokemon(target)
-                    .stat_boosts
-                    .get(&Stat::Attack)
-                    .copied()
-                    .ok_or(BattleTurnError::MissingStatStage {
-                        side: target,
-                        stat: Stat::Attack,
-                    })?;
-                state
-                    .pokemon_mut(target)
-                    .stat_boosts
-                    .insert(Stat::Attack, (stage - 1).max(-6));
+    if side == BattleSide::Player {
+        for stat in [
+            Stat::Attack,
+            Stat::Defense,
+            Stat::Speed,
+            Stat::SpecialAttack,
+            Stat::SpecialDefense,
+        ] {
+            if badge_boost_active(state, side, stat) {
+                let value = loaded_stat_mut(&mut stats, stat);
+                *value = value.saturating_add(*value / 8).min(999);
             }
         }
-        "FORECAST" => apply_forecast_type(state, side),
-        _ => {}
+        state.player_badge_before_status = false;
     }
-    if active_ability(state, side.other()) == "FORECAST" {
-        apply_forecast_type(state, side.other());
-    }
-    Ok(())
+    *loaded_stats_mut(state, side) = stats;
 }
 
-fn apply_ability_self_cure(state: &mut BattleCombatState, side: BattleSide, ability: &str) {
-    let blocked_status = state
-        .pokemon(side)
-        .status
-        .as_deref()
-        .is_some_and(|status| ability_blocks_status(ability, status));
-    if blocked_status {
-        let pokemon = state.pokemon_mut(side);
-        pokemon.status = None;
-        pokemon.sleep_turns = 0;
-        set_toxic_turns(state, side, 0);
-        set_nightmare_source(state, side, None);
-        if side == BattleSide::Enemy {
-            recalculate_enemy_status_penalties(state);
-        }
-    }
-    if ability_blocks_confusion(ability) {
-        state.pokemon_mut(side).confusion_turns = 0;
-    }
-    if ability_blocks_attraction(ability) {
-        set_attracted_by_state(state, side, None);
-    }
-}
-
-fn trace_original_ability(state: &BattleCombatState, side: BattleSide) -> &Option<String> {
-    match side {
-        BattleSide::Player => &state.player_trace_original_ability,
-        BattleSide::Enemy => &state.enemy_trace_original_ability,
-    }
-}
-
-fn trace_original_ability_mut(
+pub(crate) fn switch_battle_combat_pokemon_normally(
     state: &mut BattleCombatState,
     side: BattleSide,
-) -> &mut Option<String> {
-    match side {
-        BattleSide::Player => &mut state.player_trace_original_ability,
-        BattleSide::Enemy => &mut state.enemy_trace_original_ability,
-    }
-}
-
-fn apply_forecast_type(state: &mut BattleCombatState, side: BattleSide) {
-    if effective_battle_pokemon(state, side).species.id != "CASTFORM" {
-        return;
-    }
-    let type_id = match battle_effective_weather(state) {
-        Weather::Rain => "WATER",
-        Weather::Sun => "FIRE",
-        Weather::Sandstorm | Weather::None => "NORMAL",
-    };
-    let type_override = BattleTypeOverride {
-        type1: type_id.to_string(),
-        type2: type_id.to_string(),
-    };
-    match side {
-        BattleSide::Player => state.player_type_override = Some(type_override),
-        BattleSide::Enemy => state.enemy_type_override = Some(type_override),
-    }
+    party_index: usize,
+) -> Result<(), BattleTurnError> {
+    // Ordinary menu switches, forced replacements, Roar/Whirlwind, and
+    // trainer advancement all enter through NewBattleMonStatus or
+    // NewEnemyMonStatus. Baton Pass deliberately bypasses that reset and must
+    // continue to call the raw battler swap above.
+    clear_side_volatile_conditions(state, side);
+    switch_battle_combat_pokemon(state, side, party_index)
 }
 
 fn sync_active_combat_pokemon_into_parties(
@@ -13954,11 +15030,7 @@ fn sync_active_combat_pokemon_into_parties(
             } if *party_index == player_index && !outcome.pp_changes.is_empty()
         )
     });
-    let preserved_moves = party_only_moves.then(|| player_slot.moves.clone());
-    *player_slot = player;
-    if let Some(preserved_moves) = preserved_moves {
-        player_slot.moves = preserved_moves;
-    }
+    sync_active_pokemon_into_party_slot(player_slot, player, party_only_moves);
 
     let enemy_index = state.enemy_party_index;
     let enemy = state.enemy.clone();
@@ -13968,8 +15040,59 @@ fn sync_active_combat_pokemon_into_parties(
             party_index: enemy_index,
         }
     })?;
-    *enemy_slot = enemy;
+    sync_active_pokemon_into_party_slot(enemy_slot, enemy, false);
     Ok(())
+}
+
+fn sync_consumed_move_pp_into_party(state: &mut BattleCombatState, side: BattleSide, slot: usize) {
+    if transform_state(state, side).is_some() {
+        return;
+    }
+    let Some(active_move) = state.pokemon(side).moves.get(slot).cloned() else {
+        return;
+    };
+    let active_index = match side {
+        BattleSide::Player => state.player_party_index,
+        BattleSide::Enemy => state.enemy_party_index,
+    };
+    let party = match side {
+        BattleSide::Player => &mut state.player_party,
+        BattleSide::Enemy => &mut state.enemy_party,
+    };
+    let Some(party_move) = party
+        .get_mut(active_index)
+        .and_then(|pokemon| pokemon.moves.get_mut(slot))
+    else {
+        return;
+    };
+    // CheckMimicUsed leaves the permanent Mimic slot untouched while its
+    // battle-only replacement is selected. Every other ordinary move use
+    // consumes the matching party PP at the same time as the battle PP.
+    if active_move.name != "MIMIC" && party_move.name == "MIMIC" {
+        return;
+    }
+    party_move.current_pp = active_move.current_pp;
+}
+
+fn sync_active_pokemon_into_party_slot(
+    party_slot: &mut Pokemon,
+    active: Pokemon,
+    preserve_all_moves: bool,
+) {
+    let persistent_moves = party_slot.moves.clone();
+    *party_slot = active;
+    if preserve_all_moves {
+        party_slot.moves = persistent_moves;
+        return;
+    }
+    for (slot, persistent_move) in persistent_moves.into_iter().enumerate() {
+        let Some(active_move) = party_slot.moves.get_mut(slot) else {
+            continue;
+        };
+        if persistent_move.name == "MIMIC" && active_move.name != "MIMIC" {
+            *active_move = persistent_move;
+        }
+    }
 }
 
 fn apply_foresight_effect(
@@ -13979,6 +15102,14 @@ fn apply_foresight_effect(
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
+    if target_is_hidden(state, side) {
+        events.push(BattleEvent::ForesightFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        });
+        return;
+    }
     if identified_state(state, target) {
         events.push(BattleEvent::ForesightFailed {
             side,
@@ -13999,37 +15130,59 @@ fn apply_reset_stats_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
-) {
+) -> Result<(), BattleTurnError> {
     recalculate_enemy_status_penalties(state);
     for target in [BattleSide::Player, BattleSide::Enemy] {
-        for stage in state.pokemon_mut(target).stat_boosts.values_mut() {
+        for stage in battle_stat_boosts_mut(state, target).values_mut() {
             *stage = 0;
         }
     }
+    state.player_badge_before_status = true;
+    recalculate_loaded_stats(state, BattleSide::Player, stat_multipliers)?;
+    recalculate_loaded_stats(state, BattleSide::Enemy, stat_multipliers)?;
     events.push(BattleEvent::StatsReset {
         side,
         move_name: move_name.to_string(),
     });
+    Ok(())
 }
 
 fn apply_psych_up_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
+    stat_multipliers: &BattleStatMultiplierTables,
     events: &mut Vec<BattleEvent>,
-) {
+) -> Result<(), BattleTurnError> {
     let target = side.other();
-    let copied = state.pokemon(target).stat_boosts.clone();
-    state.pokemon_mut(side).stat_boosts = copied;
+    if battle_stat_boosts(state, target)
+        .values()
+        .all(|stage| *stage == 0)
+    {
+        events.push(BattleEvent::PsychUpFailed {
+            side,
+            move_name: move_name.to_string(),
+            target,
+        });
+        return Ok(());
+    }
+    let copied = battle_stat_boosts(state, target).clone();
+    *battle_stat_boosts_mut(state, side) = copied;
+    if side == BattleSide::Player {
+        state.player_badge_before_status = true;
+    }
     if side == BattleSide::Enemy {
         recalculate_enemy_status_penalties(state);
     }
+    recalculate_loaded_stats(state, side, stat_multipliers)?;
     events.push(BattleEvent::PsychUpApplied {
         side,
         move_name: move_name.to_string(),
         target,
     });
+    Ok(())
 }
 
 fn apply_weather_effect(
@@ -14039,13 +15192,16 @@ fn apply_weather_effect(
     weather: Weather,
     events: &mut Vec<BattleEvent>,
 ) {
+    if weather == Weather::Sandstorm && state.weather == Weather::Sandstorm {
+        events.push(BattleEvent::WeatherFailed {
+            side,
+            move_name: move_name.to_string(),
+            weather,
+        });
+        return;
+    }
     state.weather = weather;
     state.weather_turns = 5;
-    for target in [BattleSide::Player, BattleSide::Enemy] {
-        if active_ability(state, target) == "FORECAST" {
-            apply_forecast_type(state, target);
-        }
-    }
     events.push(BattleEvent::WeatherApplied {
         side,
         move_name: move_name.to_string(),
@@ -14055,9 +15211,8 @@ fn apply_weather_effect(
 }
 
 fn apply_status_to_target(
-    target_pokemon: &mut Pokemon,
+    state: &mut BattleCombatState,
     target_types: &[PokemonType],
-    target_ability: &str,
     side: BattleSide,
     move_name: &str,
     target: BattleSide,
@@ -14066,9 +15221,7 @@ fn apply_status_to_target(
     rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> bool {
-    if pokemon_is_status_immune(target_types, status)
-        || ability_blocks_status(target_ability, status)
-    {
+    if pokemon_is_status_immune(target_types, status) {
         events.push(BattleEvent::StatusImmune {
             side,
             move_name: move_name.to_string(),
@@ -14082,7 +15235,10 @@ fn apply_status_to_target(
         });
         return false;
     }
-    target_pokemon.status = Some(status.to_string());
+    state.pokemon_mut(target).status = Some(status.to_string());
+    if target == BattleSide::Player && matches!(status, "BURN" | "PARALYSIS") {
+        state.player_badge_before_status = true;
+    }
     if status == "SLEEP" {
         let sampled = loop {
             let sampled = rng.battle_random_byte() & sleep_turn_mask;
@@ -14090,7 +15246,18 @@ fn apply_status_to_target(
                 break sampled;
             }
         };
-        target_pokemon.sleep_turns = sampled + 1;
+        state.pokemon_mut(target).sleep_turns = sampled + 1;
+    }
+    match status {
+        "BURN" => {
+            let stats = loaded_stats_mut(state, target);
+            stats.attack = (stats.attack / 2).max(1);
+        }
+        "PARALYSIS" => {
+            let stats = loaded_stats_mut(state, target);
+            stats.speed = (stats.speed / 4).max(1);
+        }
+        _ => {}
     }
     events.push(BattleEvent::StatusApplied {
         side,
@@ -14160,6 +15327,43 @@ fn record_last_damage(
         BattleSide::Player => state.player_last_damage = Some(damage),
         BattleSide::Enemy => state.enemy_last_damage = Some(damage),
     }
+}
+
+fn seed_counter_damage_from_ai_scratch(
+    state: &mut BattleCombatState,
+    damage: u16,
+    moves: &BTreeMap<String, Move>,
+    type_categories: &TypeCategories,
+) -> Result<(), BattleTurnError> {
+    if damage == 0 {
+        return Ok(());
+    }
+    // wCurDamage is one global register. Either battler's Counter command can
+    // observe the value left by enemy AI scoring, while the move identity is
+    // read independently from that battler's opponent LAST_COUNTER_MOVE.
+    for side in [BattleSide::Player, BattleSide::Enemy] {
+        let source = side.other();
+        let Some(move_name) = last_counter_move(state, source).map(ToOwned::to_owned) else {
+            continue;
+        };
+        let move_data = moves
+            .get(&move_name)
+            .ok_or_else(|| BattleTurnError::MissingMoveData {
+                side: source,
+                move_name: move_name.clone(),
+            })?;
+        record_last_damage(
+            state,
+            side,
+            BattleLastDamageState {
+                source,
+                move_name,
+                category: damage_category(type_categories, move_data)?,
+                damage,
+            },
+        );
+    }
+    Ok(())
 }
 
 fn clear_turn_last_damage(state: &mut BattleCombatState) {
@@ -14643,36 +15847,119 @@ pub fn move_priority(
 pub fn battle_speed(
     state: &BattleCombatState,
     side: BattleSide,
-    stat_multipliers: &BattleStatMultiplierTables,
+    _stat_multipliers: &BattleStatMultiplierTables,
 ) -> Result<u16, BattleTurnError> {
+    battle_stat_boosts(state, side)
+        .get(&Stat::Speed)
+        .ok_or(BattleTurnError::MissingStatStage {
+            side,
+            stat: Stat::Speed,
+        })?;
+    Ok(loaded_stats(state, side).speed)
+}
+
+fn loaded_battle_stats(
+    state: &BattleCombatState,
+    side: BattleSide,
+    stat_multipliers: &BattleStatMultiplierTables,
+) -> Result<BattleLoadedStats, BattleTurnError> {
     let pokemon = effective_battle_pokemon(state, side);
-    let mut base = pokemon.speed;
-    if badge_boost_active(state, side, Stat::Speed) {
-        base = base.saturating_add(base / 8).min(999);
-    }
-    let stage =
-        *pokemon
+    let staged = |stat: Stat, raw: u16| {
+        let stage = *pokemon
             .stat_boosts
-            .get(&Stat::Speed)
-            .ok_or(BattleTurnError::MissingStatStage {
-                side,
-                stat: Stat::Speed,
-            })?;
-    let speed = apply_stage(stat_multipliers, base, stage)
-        .ok_or(BattleTurnError::MissingStatMultiplier { side, stage })?;
-    let weather = battle_effective_weather(state);
-    let speed = speed
-        .saturating_mul(weather_speed_multiplier(&pokemon.species.ability, weather))
-        .min(999);
-    if side == BattleSide::Enemy {
-        if state.enemy_paralysis_speed_penalty_active {
-            Ok((speed / 4).max(1))
-        } else {
-            Ok(speed)
-        }
-    } else {
-        Ok(apply_paralysis_speed_penalty(&pokemon, speed))
+            .get(&stat)
+            .ok_or(BattleTurnError::MissingStatStage { side, stat })?;
+        apply_stage(stat_multipliers, raw, stage)
+            .ok_or(BattleTurnError::MissingStatMultiplier { side, stage })
+    };
+    let mut attack = staged(Stat::Attack, pokemon.attack)?;
+    let attack_badge = badge_boost_active(state, side, Stat::Attack);
+    if attack_badge && state.player_badge_before_status {
+        attack = attack.saturating_add(attack / 8).min(999);
     }
+    let burn_penalty = if side == BattleSide::Enemy {
+        state.enemy_burn_attack_penalty_active
+    } else {
+        pokemon.status.as_deref() == Some("BURN")
+    };
+    if burn_penalty {
+        attack = (attack / 2).max(1);
+    }
+    if attack_badge && !state.player_badge_before_status {
+        attack = attack.saturating_add(attack / 8).min(999);
+    }
+    let mut defense = staged(Stat::Defense, pokemon.defense)?;
+    if badge_boost_active(state, side, Stat::Defense) {
+        defense = defense.saturating_add(defense / 8).min(999);
+    }
+    let mut special_attack = staged(Stat::SpecialAttack, pokemon.special_attack)?;
+    if badge_boost_active(state, side, Stat::SpecialAttack) {
+        special_attack = special_attack.saturating_add(special_attack / 8).min(999);
+    }
+    let mut special_defense = staged(Stat::SpecialDefense, pokemon.special_defense)?;
+    if badge_boost_active(state, side, Stat::SpecialDefense) {
+        special_defense = special_defense.saturating_add(special_defense / 8).min(999);
+    }
+    let mut speed = staged(Stat::Speed, pokemon.speed)?;
+    let speed_badge = badge_boost_active(state, side, Stat::Speed);
+    if speed_badge && state.player_badge_before_status {
+        speed = speed.saturating_add(speed / 8).min(999);
+    }
+    let paralysis_penalty = if side == BattleSide::Enemy {
+        state.enemy_paralysis_speed_penalty_active
+    } else {
+        pokemon.status.as_deref() == Some("PARALYSIS")
+    };
+    if paralysis_penalty {
+        speed = (speed / 4).max(1);
+    }
+    if speed_badge && !state.player_badge_before_status {
+        speed = speed.saturating_add(speed / 8).min(999);
+    }
+    Ok(BattleLoadedStats {
+        attack,
+        defense,
+        speed,
+        special_attack,
+        special_defense,
+    })
+}
+
+/// Rebuild Crystal's five live battle-stat words from the effective raw
+/// BattleMon image, current stat levels, status, and badge state.
+pub fn recalculate_loaded_stats(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    stat_multipliers: &BattleStatMultiplierTables,
+) -> Result<(), BattleTurnError> {
+    let recalculated = loaded_battle_stats(state, side, stat_multipliers)?;
+    *loaded_stats_mut(state, side) = recalculated;
+    Ok(())
+}
+
+fn recalculate_loaded_stats_from_stages_only(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    stat_multipliers: &BattleStatMultiplierTables,
+) -> Result<(), BattleTurnError> {
+    let pokemon = effective_battle_pokemon(state, side);
+    let staged = |stat: Stat, raw: u16| {
+        let stage = *pokemon
+            .stat_boosts
+            .get(&stat)
+            .ok_or(BattleTurnError::MissingStatStage { side, stat })?;
+        apply_stage(stat_multipliers, raw, stage)
+            .ok_or(BattleTurnError::MissingStatMultiplier { side, stage })
+    };
+    let recalculated = BattleLoadedStats {
+        attack: staged(Stat::Attack, pokemon.attack)?,
+        defense: staged(Stat::Defense, pokemon.defense)?,
+        speed: staged(Stat::Speed, pokemon.speed)?,
+        special_attack: staged(Stat::SpecialAttack, pokemon.special_attack)?,
+        special_defense: staged(Stat::SpecialDefense, pokemon.special_defense)?,
+    };
+    *loaded_stats_mut(state, side) = recalculated;
+    Ok(())
 }
 
 fn badge_boost_active(state: &BattleCombatState, side: BattleSide, stat: Stat) -> bool {
@@ -14731,14 +16018,6 @@ fn badge_type_boost_active(state: &BattleCombatState, side: BattleSide, move_typ
             .any(|(owned, badge_type)| *owned && badge_type == move_type)
 }
 
-fn apply_paralysis_speed_penalty(pokemon: &Pokemon, speed: u16) -> u16 {
-    if pokemon.status.as_deref() == Some("PARALYSIS") {
-        (speed / 4).max(1)
-    } else {
-        speed
-    }
-}
-
 #[cfg(test)]
 fn accuracy_byte(
     move_data: &Move,
@@ -14775,9 +16054,6 @@ fn accuracy_byte_with_weather(
     if move_data.effect == "THUNDER" && weather == Weather::Sun {
         return Ok(((50 * 255) / 100 + 1).clamp(1, 255) as u8);
     }
-    if move_data.accuracy == 0 {
-        return Ok(u8::MAX);
-    }
     let attacker_accuracy =
         *attacker
             .stat_boosts
@@ -14795,25 +16071,50 @@ fn accuracy_byte_with_weather(
                 side: defender_side,
                 stat: Stat::Evasion,
             })?;
-    let base = ((move_data.accuracy as i32 * 255) / 100).clamp(1, 255);
+    let base = ((move_data.accuracy as i32 * 255) / 100).clamp(0, 255);
     // `CheckHit.StatModifiers` returns before both multiplier lookups when
     // Foresight identifies a target whose Evasion level is at least the
     // user's Accuracy level. The move therefore retains its base byte.
     let modified = if defender_identified && defender_evasion >= attacker_accuracy {
         base
     } else {
-        let stage = (attacker_accuracy - defender_evasion).clamp(-6, 6);
-        let multiplier = accuracy_stage_multiplier(stat_multipliers, stage)
-            .ok_or(BattleTurnError::MissingAccuracyMultiplier { stage })?;
-        multiplier.multiply_floor(base).clamp(1, 255)
+        i32::from(apply_accuracy_evasion_multipliers(
+            base as u8,
+            attacker_accuracy,
+            defender_evasion,
+            stat_multipliers,
+        )?)
     };
-    let (numerator, denominator) = ability_accuracy_ratio(
-        &attacker.species.ability,
-        &defender.species.ability,
-        &move_data.move_type,
-        weather,
-    );
-    Ok(((modified * i32::from(numerator)) / i32::from(denominator)).clamp(1, 255) as u8)
+    Ok(modified as u8)
+}
+
+fn apply_accuracy_evasion_multipliers(
+    base_accuracy: u8,
+    attacker_accuracy: i8,
+    defender_evasion: i8,
+    stat_multipliers: &BattleStatMultiplierTables,
+) -> Result<u8, BattleTurnError> {
+    // CheckHit.StatModifiers runs the two table operations independently.
+    // The first Divide floors the user's Accuracy result before that quotient
+    // becomes the multiplicand for the inverse Evasion row. Collapsing the
+    // stages loses both the source's approximate ratios and this midpoint
+    // rounding (for example, +1 Accuracy against +1 Evasion yields $fe).
+    let accuracy_multiplier = accuracy_stage_multiplier(stat_multipliers, attacker_accuracy)
+        .ok_or(BattleTurnError::MissingAccuracyMultiplier {
+            stage: attacker_accuracy,
+        })?;
+    let after_accuracy = accuracy_multiplier
+        .multiply_floor(i32::from(base_accuracy))
+        .max(1);
+    let inverse_evasion = defender_evasion.saturating_neg().clamp(-6, 6);
+    let evasion_multiplier = accuracy_stage_multiplier(stat_multipliers, inverse_evasion).ok_or(
+        BattleTurnError::MissingAccuracyMultiplier {
+            stage: inverse_evasion,
+        },
+    )?;
+    Ok(evasion_multiplier
+        .multiply_floor(after_accuracy)
+        .clamp(1, 255) as u8)
 }
 
 #[cfg(test)]

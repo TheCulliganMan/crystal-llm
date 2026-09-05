@@ -1884,7 +1884,7 @@ fn integrated_title_option_entry_opens_options_before_new_game() {
             .expect("title menu should remain after closing Options");
         assert_eq!(
             visible_title_menu_entries(runtime_shell, title).expect("title entries"),
-            vec![" NEW GAME", ">OPTION"]
+            vec![">NEW GAME", " OPTION"]
         );
     }
 }
@@ -2787,7 +2787,10 @@ fn continue_consumes_post_credits_marker_and_warps_to_new_bark() {
         .snapshot()
         .expect("post-credits snapshot");
     assert_eq!(snapshot.overworld.map_name, "NewBarkTown");
-    assert_eq!(snapshot.progression.last_spawn_identifier, Some(14));
+    assert_eq!(
+        snapshot.progression.last_spawn_map_constant.as_deref(),
+        Some("PLAYERS_HOUSE_2F")
+    );
     assert_eq!(snapshot.progression.hall_of_fame.spawn_after_champion, None);
     assert!(
         runtime_shell
@@ -2835,6 +2838,11 @@ fn continue_consumes_red_post_credits_marker_and_warps_to_mt_silver() {
         .spawn_after_champion = Some(2);
     runtime_shell
         .shell
+        .session_mut()
+        .state_mut()
+        .last_spawn_map_constant = Some("VIRIDIAN_CITY".to_string());
+    runtime_shell
+        .shell
         .save(&save_path)
         .expect("save Red marker");
 
@@ -2845,7 +2853,10 @@ fn continue_consumes_red_post_credits_marker_and_warps_to_mt_silver() {
         .snapshot()
         .expect("post-credits snapshot");
     assert_eq!(snapshot.overworld.map_name, "SilverCaveOutside");
-    assert_eq!(snapshot.progression.last_spawn_identifier, Some(26));
+    assert_eq!(
+        snapshot.progression.last_spawn_map_constant.as_deref(),
+        Some("VIRIDIAN_CITY")
+    );
     assert_eq!(snapshot.progression.hall_of_fame.spawn_after_champion, None);
     assert!(
         runtime_shell

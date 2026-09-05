@@ -44,7 +44,10 @@ pub fn ability(id: &str) -> Ability {
 }
 
 pub fn max_move_pp(base_pp: u8, pp_ups: u8) -> u8 {
-    base_pp.saturating_add((base_pp / 5).saturating_mul(pp_ups.min(3)))
+    // ComputeMaxPP caps the quotient at seven so a 40-PP move cannot reach
+    // 64 and spill current PP into the packed PP-Up flag bits.
+    let per_pp_up = (base_pp / 5).min(7);
+    base_pp.saturating_add(per_pp_up.saturating_mul(pp_ups.min(3)))
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -788,7 +791,7 @@ impl Pokemon {
             ));
         }
         validate_dvs(self.dvs)?;
-        self.validate_stat_projection()?;
+        self.validate_calculated_stat_words()?;
         if self.experience < 0 {
             return Err(format!(
                 "pokemon.experience {} must be nonnegative",
@@ -807,7 +810,7 @@ impl Pokemon {
         validate_stat_boosts(&self.stat_boosts)
     }
 
-    fn validate_stat_projection(&self) -> Result<(), String> {
+    fn validate_calculated_stat_words(&self) -> Result<(), String> {
         let expected = calculate_stats(
             &self.species,
             self.level,
@@ -820,7 +823,7 @@ impl Pokemon {
                 special: self.special_exp,
             },
         );
-        for (field, actual, expected) in [
+        for (field, actual, ceiling) in [
             ("max_hp", self.max_hp, expected.max_hp),
             ("attack", self.attack, expected.attack),
             ("defense", self.defense, expected.defense),
@@ -836,9 +839,12 @@ impl Pokemon {
                 expected.special_defense,
             ),
         ] {
-            if actual != expected {
+            if actual == 0 {
+                return Err(format!("pokemon.{field} must be nonzero"));
+            }
+            if actual > ceiling {
                 return Err(format!(
-                    "pokemon.{field} {actual} does not match calculated stat {expected}"
+                    "pokemon.{field} {actual} exceeds calculated stat ceiling {ceiling}"
                 ));
             }
         }
@@ -1187,6 +1193,15 @@ mod tests {
     }
 
     #[test]
+    fn max_move_pp_caps_each_pp_up_increment_to_preserve_packed_pp_bits() {
+        assert_eq!(max_move_pp(40, 0), 40);
+        assert_eq!(max_move_pp(40, 1), 47);
+        assert_eq!(max_move_pp(40, 2), 54);
+        assert_eq!(max_move_pp(40, 3), 61);
+        assert_eq!(max_move_pp(35, 3), 56);
+    }
+
+    #[test]
     fn display_names_match_asm_special_cases() {
         assert_eq!(pokemon_species_display_name("FARFETCH_D"), "FARFETCH'D");
         assert_eq!(pokemon_species_display_name("HO_OH"), "HO-OH");
@@ -1448,11 +1463,15 @@ mod tests {
         );
 
         pokemon.dvs = Dv::from_non_hp(1, 2, 3, 4);
-        pokemon.attack += 1;
+        pokemon.attack -= 1;
+        pokemon
+            .validate_saved_state()
+            .expect("calculated party stats may remain stale after stat experience rises");
+        pokemon.attack += 2;
         assert_eq!(
             pokemon.validate_saved_state(),
             Err(format!(
-                "pokemon.attack {} does not match calculated stat {}",
+                "pokemon.attack {} exceeds calculated stat ceiling {}",
                 pokemon.attack,
                 pokemon.attack - 1
             ))

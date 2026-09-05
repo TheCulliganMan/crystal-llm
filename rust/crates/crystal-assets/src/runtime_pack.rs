@@ -114,8 +114,8 @@ pub struct BattleEscapeItemUseOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BattleStateItemUseOutcome {
     pub item_use: ItemUseOutcome,
-    pub stat_drop_guard_turns_before: u8,
-    pub stat_drop_guard_turns_after: u8,
+    pub mist_active_before: bool,
+    pub mist_active_after: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -447,10 +447,7 @@ fn compile_audio_payloads(
 }
 
 pub const REQUIRED_VENDOR_RUNTIME_FILE_KEYS: &[&str] = &[
-    "vendor/pokecrystal/constants/credits_constants.asm",
     "vendor/pokecrystal/constants/move_constants.asm",
-    "vendor/pokecrystal/data/credits_script.asm",
-    "vendor/pokecrystal/data/credits_strings.asm",
     "vendor/pokecrystal/data/moves/descriptions.asm",
     "vendor/pokecrystal/gfx/card_flip/card_flip.pal",
     "vendor/pokecrystal/gfx/card_flip/card_flip.tilemap",

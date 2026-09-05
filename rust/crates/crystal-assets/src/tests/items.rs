@@ -896,7 +896,6 @@ fn verifier_solves_explicit_progression_event_and_item_goals() {
                 battle_capture_ball: None,
                 battle_focus_energy: None,
                 battle_stat_drop_guard: None,
-                battle_stat_drop_guard_turns: None,
                 confusion_heal: None,
                 repel_steps: None,
                 escape_rope_mode: None,
@@ -1077,7 +1076,6 @@ fn verifier_applies_map_access_requirements_to_reachable_maps() {
         battle_capture_ball: None,
         battle_focus_energy: None,
         battle_stat_drop_guard: None,
-        battle_stat_drop_guard_turns: None,
         confusion_heal: None,
         repel_steps: None,
         escape_rope_mode: None,
@@ -3393,6 +3391,12 @@ fn route44_endifjustbattled_only_ends_post_battle_dispatch() {
         .expect("Vance trainer table command");
 
     let mut state = GameState::default();
+    state.overworld = OverworldMemory::Active {
+        map_name: "Route44".to_string(),
+        tile: TilePosition::new(0, 0),
+        facing: Direction::Down,
+        mode: MovementMode::Normal,
+    };
     state.storage.party.pokemon[0] = Some(crystal_core::models::Pokemon::new_for_tests(
         data.pokemon
             .get("PIDGEY")
@@ -6778,7 +6782,7 @@ fn retained_script_table_opcodes_cross_the_pack_boundary_without_reinterpretatio
 }
 
 #[test]
-fn blackoutmod_updates_last_spawn_from_compiled_spawn_table() {
+fn blackoutmod_records_the_raw_map_constant_without_requiring_a_spawn_row() {
     let mut module = test_map_module("RuntimeBlackoutMap", "RUNTIME_BLACKOUT_MAP", None);
     module.script_runtime_commands = vec![ScriptRuntimeCommand {
         command: "blackoutmod".to_string(),
@@ -6786,17 +6790,18 @@ fn blackoutmod_updates_last_spawn_from_compiled_spawn_table() {
         source_script: "RuntimeBlackoutScript".to_string(),
         command_index: 0,
     }];
-    let mut spawn = test_runtime_spawn_point(15, "Route29");
-    spawn.map_constant = "ROUTE_29".to_string();
+    let route_module = test_map_module("Route29", "ROUTE_29", None);
     let data = GameDataSet {
-        maps: [("RuntimeBlackoutMap".to_string(), module.clone())]
-            .into_iter()
-            .collect(),
-        runtime_spawn_points: [("15".to_string(), spawn)].into_iter().collect(),
+        maps: [
+            ("RuntimeBlackoutMap".to_string(), module.clone()),
+            ("Route29".to_string(), route_module),
+        ]
+        .into_iter()
+        .collect(),
         ..GameDataSet::default()
     };
     let mut state = GameState {
-        last_spawn_identifier: Some(0),
+        last_spawn_map_constant: Some("HOME_MAP".to_string()),
         ..GameState::default()
     };
     let mut session = OverworldSession::with_events_and_objects(
@@ -6826,79 +6831,12 @@ fn blackoutmod_updates_last_spawn_from_compiled_spawn_table() {
         0,
         ScriptRuntimeInputs::default(),
     )
-    .expect("blackoutmod applies against compiled spawn table");
+    .expect("blackoutmod stores a declared raw map pair");
 
-    assert_eq!(state.last_spawn_identifier, Some(15));
-
-    let mut missing_spawn_state = GameState {
-        last_spawn_identifier: Some(0),
-        ..GameState::default()
-    };
-    let before_missing = missing_spawn_state.clone();
-    let mut missing_spawn_session = session.clone();
-    let missing_spawn_data = GameDataSet {
-        maps: [("RuntimeBlackoutMap".to_string(), module.clone())]
-            .into_iter()
-            .collect(),
-        ..GameDataSet::default()
-    };
-    let error = missing_spawn_data
-        .apply_script_runtime_command_in_session(
-            &mut missing_spawn_state,
-            &mut missing_spawn_session,
-            "RuntimeBlackoutMap",
-            "RuntimeBlackoutScript",
-            0,
-            ScriptRuntimeInputs::default(),
-        )
-        .expect_err("blackoutmod requires an exact compiled spawn target");
-    assert!(
-        error
-            .to_string()
-            .contains("compiled game pack missing spawn point for ROUTE_29"),
-        "{error:#}"
+    assert_eq!(
+        state.last_spawn_map_constant.as_deref(),
+        Some("ROUTE_29")
     );
-    assert_eq!(missing_spawn_state, before_missing);
-
-    let mut first_spawn = test_runtime_spawn_point(15, "Route29");
-    first_spawn.map_constant = "ROUTE_29".to_string();
-    let mut second_spawn = test_runtime_spawn_point(16, "Route29");
-    second_spawn.map_constant = "ROUTE_29".to_string();
-    let ambiguous_data = GameDataSet {
-        maps: [("RuntimeBlackoutMap".to_string(), module)]
-            .into_iter()
-            .collect(),
-        runtime_spawn_points: [
-            ("15".to_string(), first_spawn),
-            ("16".to_string(), second_spawn),
-        ]
-        .into_iter()
-        .collect(),
-        ..GameDataSet::default()
-    };
-    let mut ambiguous_state = GameState {
-        last_spawn_identifier: Some(0),
-        ..GameState::default()
-    };
-    let before_ambiguous = ambiguous_state.clone();
-    let mut ambiguous_session = session;
-    let error = ambiguous_data
-        .apply_script_runtime_command_in_session(
-            &mut ambiguous_state,
-            &mut ambiguous_session,
-            "RuntimeBlackoutMap",
-            "RuntimeBlackoutScript",
-            0,
-            ScriptRuntimeInputs::default(),
-        )
-        .expect_err("blackoutmod rejects ambiguous compiled spawn target");
-    assert!(
-        error
-            .to_string()
-            .contains("compiled game pack has multiple spawn points for ROUTE_29: 15 and 16"),
-        "{error:#}"
-    );
-    assert_eq!(ambiguous_state, before_ambiguous);
 }
 
 #[test]

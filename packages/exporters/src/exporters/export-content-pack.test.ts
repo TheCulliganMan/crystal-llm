@@ -140,6 +140,8 @@ const titleMusicAudioAsset = {
       ["MUSIC_MAIN_MENU", "music"],
       ["MUSIC_CRYSTAL_OPENING", "music"],
       ["MUSIC_ROUTE_30", "music"],
+      ["MUSIC_CREDITS", "music"],
+      ["MUSIC_POST_CREDITS", "music"],
       ["MUSIC_MOBILE_ADAPTER_MENU", "music"],
       ["SFX_TITLE_SCREEN_ENTRANCE", "sound_effect"],
       ["SFX_GAME_FREAK_PRESENTS", "sound_effect"],
@@ -721,10 +723,12 @@ describe("export-core-content-pack", () => {
         special: ["FIRE", "WATER"],
       },
       typeEffectiveness: {
-        matchups: { FIRE: { GRASS: { numerator: 2, denominator: 1 } } },
-        foresight_matchups: {
-          NORMAL: { GHOST: { numerator: 0, denominator: 1 } },
-        },
+        matchups: [
+          { attacker: "FIRE", defender: "GRASS", multiplier: { numerator: 2, denominator: 1 } },
+        ],
+        foresight_matchups: [
+          { attacker: "NORMAL", defender: "GHOST", multiplier: { numerator: 0, denominator: 1 } },
+        ],
       },
       weatherModifiers: {
         type_modifiers: [
@@ -1147,10 +1151,12 @@ describe("export-core-content-pack", () => {
       ],
       type_effectiveness: [
         {
-          matchups: { FIRE: { GRASS: { numerator: 2, denominator: 1 } } },
-          foresight_matchups: {
-            NORMAL: { GHOST: { numerator: 0, denominator: 1 } },
-          },
+          matchups: [
+            { attacker: "FIRE", defender: "GRASS", multiplier: { numerator: 2, denominator: 1 } },
+          ],
+          foresight_matchups: [
+            { attacker: "NORMAL", defender: "GHOST", multiplier: { numerator: 0, denominator: 1 } },
+          ],
         },
       ],
       weather_modifiers: [

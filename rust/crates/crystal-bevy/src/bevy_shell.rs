@@ -29,11 +29,14 @@ use chrono::{Datelike, Local as ChronoLocal, Timelike};
 use crystal_assets::{
     RuntimeBadgeRegion, RuntimeBugContestAction, RuntimeCurrencyAccount, RuntimeDayCareAction,
     RuntimeDayCareCaretaker, RuntimeGameCornerService, RuntimeGenderMenuDefinition,
-    RuntimeGraphicsSpecial, RuntimeHappinessServiceRoutine, RuntimeIntroPresentationParameters,
-    RuntimeLinkBattleResult, RuntimeMysteryGiftAction, RuntimePartyCheckSpecial,
-    RuntimePhoneRandomSpecial, RuntimePresentationPhaseMachine, RuntimePresentationProgram,
-    RuntimeShuckieAction, RuntimeStoryGateSpecial, RuntimeTitleMainMenuDefinition,
-    RuntimeTitleMainMenuItem, RuntimeTitlePresentationParameters,
+    RuntimeGraphicsSpecial, RuntimeHappinessServiceRoutine, RuntimeIntroFrameClock,
+    RuntimeIntroInterruptTiming, RuntimeIntroPresentationParameters,
+    RuntimeIntroSpriteSchedulerFrameCrossing, RuntimeLinkBattleResult, RuntimeMysteryGiftAction,
+    RuntimePartyCheckSpecial, RuntimePhoneRandomSpecial, RuntimePresentation2bppTransferMode,
+    RuntimePresentationInterpreter, RuntimePresentationPhaseMachine, RuntimePresentationPhaseRun,
+    RuntimePresentationProgram, RuntimePresentationStep, RuntimePresentationSubprogramInterpreter,
+    RuntimePresentationTimedPhaseCursor, RuntimeShuckieAction, RuntimeStoryGateSpecial,
+    RuntimeTitleMainMenuDefinition, RuntimeTitleMainMenuItem, RuntimeTitlePresentationParameters,
 };
 
 use crate::assets::{
@@ -641,6 +644,10 @@ struct BevyRuntimeShell {
     shell: RuntimeGameShell,
     latest_rtc_sample: Option<RuntimeRtcSample>,
     intro_screen: Option<VisibleIntroScreen>,
+    /// LCD-visible intro state from the preceding VBlank. CrystalIntro writes
+    /// registers and VRAM during the current CPU frame; those writes are not
+    /// the frame the hardware has just finished presenting.
+    intro_display_screen: Option<VisibleIntroScreen>,
     intro_sprite_bundle: Option<SpriteAnimRuntimeBundle>,
     title_menu: Option<TitleMenu>,
     /// NewGame has executed ResetWRAM but has not yet reached the first
@@ -714,6 +721,9 @@ struct BevyRuntimeShell {
     pending_ui_button_presses: VecDeque<KeyCode>,
     ui_held_direction: Option<GameButton>,
     ui_direction_repeat_ticks: u8,
+    // JoyTextDelay uses held directions only while hInMenu is nonzero. Credits
+    // writes TRUE and, in the original game, deliberately fails to restore it.
+    h_in_menu: u8,
     recent_overworld_inputs: VecDeque<VisibleOverworldInputRecord>,
     deterministic_session_start: StateChecksum,
     deterministic_session_checkpoint: Option<SessionSaveCheckpointFrame>,
@@ -770,6 +780,7 @@ struct BevyRuntimeShell {
     pending_mail_input: Option<PendingMailInput>,
     pending_mail_read: Option<VisibleMailRead>,
     pending_name_choice: Option<VisibleNameChoice>,
+    pending_player_name_return: Option<VisiblePlayerNameMenuDefinition>,
     pending_standard_capture: Option<PendingStandardCapture>,
     visible_bug_contest_replacement: Option<VisibleBugContestReplacement>,
     pending_gift_pokemon_nickname: Option<PendingGiftPokemonNickname>,
@@ -1881,12 +1892,11 @@ struct TitleMenu {
     save_path: Option<PathBuf>,
     cursor: MenuCursor,
     presentation_machine: RuntimePresentationPhaseMachine,
+    title_teardown: Option<RuntimePresentationTimedPhaseCursor>,
+    main_menu_entry_interpreter: Option<RuntimePresentationInterpreter>,
+    main_menu_phase_interpreter: Option<RuntimePresentationSubprogramInterpreter>,
+    main_menu_waiting_for_input: bool,
     main_menu: RuntimeTitleMainMenuDefinition,
-    phase: VisibleTitlePhase,
-    frame: u32,
-    main_menu_frame: u32,
-    scx: u8,
-    title_timer: u16,
     timeout_fade_rate: u8,
     timeout_fade_register: String,
     timeout_fade_audio: String,
@@ -1894,12 +1904,14 @@ struct TitleMenu {
     entrance_scroll_step: u8,
     crystal_oam_target: String,
     crystal_initial_y: u8,
+    suicune_iterator_operation_index: usize,
+    teardown_start_operation_index: usize,
+    teardown_dispatch_operation_index: usize,
     suicune_frames: Vec<u8>,
     suicune_selector_mask: u8,
     suicune_selector_shift_left: u8,
     suicune_selector_swap_nibbles: bool,
     joypad_mask: u8,
-    clock_reset_trigger: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1914,17 +1926,34 @@ struct VisibleContinueScreen {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct VisibleIntroScreen {
+    callable_memory: BTreeMap<String, u16>,
+    symbolic_memory: BTreeMap<String, String>,
+    saved_register_slots: BTreeMap<usize, String>,
+    cleanup_cursor: Option<RuntimePresentationTimedPhaseCursor>,
+    scene_setup_cursor: Option<RuntimePresentationTimedPhaseCursor>,
+    scene_setup_audio: Vec<String>,
+    scene_setup_sprite_instances: Vec<String>,
+    cleanup_exit_reason: Option<&'static str>,
+    tilemap_cleared: bool,
     scene_count: usize,
+    scene_labels: Vec<String>,
     scene_operation_offsets: Vec<usize>,
     completion_wait_frames: Vec<u8>,
+    sprite_scheduler_frame_crossings: Vec<RuntimeIntroSpriteSchedulerFrameCrossing>,
+    interrupt_timing: RuntimeIntroInterruptTiming,
+    frame_clock: RuntimeIntroFrameClock,
+    cpu_work_machine_cycles: u64,
     jumptable_index: usize,
     scene_dispatch_tick: u16,
     scene_frame_counter: u8,
     next_scene_frame_counter: Option<u8>,
+    scene_block_frames: u8,
     scene_delay_frames: u8,
     scene_timer: u8,
     scroll_x: u8,
     scroll_y: u8,
+    window_x: u8,
+    window_y: u8,
     ly_overrides: Vec<u8>,
     lcdc_pointer: u8,
     global_anim_x_offset: u8,
@@ -1933,6 +1962,7 @@ struct VisibleIntroScreen {
     background_binding: Option<VisibleIntroBackgroundBinding>,
     attrmap_palette_overrides: Vec<VisibleIntroAttrmapFill>,
     tile_override: Option<VisibleIntroTileOverride>,
+    tilemap_xor_mask: u8,
     palette_effect: VisibleIntroPaletteEffect,
     finished: bool,
 }
@@ -1985,8 +2015,7 @@ enum VisibleIntroPaletteEffect {
         colors: [[u8; 3]; 4],
     },
     CrystalWordFade {
-        fade_level: u8,
-        colors: [[u8; 3]; 2],
+        palette_colors: [Option<[[u8; 3]; 2]>; 8],
     },
     ClearBg {
         color: [u8; 3],
@@ -2018,6 +2047,10 @@ struct VisibleIntroSprite {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum VisibleTimeSetPhase {
+    StartupDelay,
+    StartupFadeOut,
+    StartupLoad,
+    StartupFadeIn,
     WakeDialogue,
     SetHour,
     HourConfirm,
@@ -2031,13 +2064,37 @@ enum VisibleTimeSetPhase {
 struct VisibleTimeSetScreen {
     phase: VisibleTimeSetPhase,
     next: VisibleTimeSetNext,
+    saved_h_in_menu: u8,
+    startup_gender: VisibleGenderSelection,
+    startup_frames_remaining: u8,
+    startup_palette_step: u8,
+    startup_delay_frames: u8,
+    startup_palette_steps: u8,
+    startup_palette_step_frames: u8,
+    startup_load_frames: u8,
     wake_index: usize,
+    wake_pages: Vec<String>,
+    hour_prompt: String,
+    hour_confirm_lead: String,
+    hour_confirm_tail: String,
+    minute_prompt: String,
+    minute_confirm_lead: String,
+    minute_confirm_tail: String,
     hour: u8,
+    hour_min: u8,
+    hour_max: u8,
     minute: u8,
+    minute_min: u8,
+    minute_max: u8,
+    selection_delay_frames: u8,
+    direction_first_repeat_frames: u8,
+    direction_later_repeat_frames: u8,
+    input_delay_frames: u8,
     visible_chars: usize,
     text_timer: u8,
     yes_no_index: usize,
-    reaction_text: String,
+    reaction_pages: Vec<String>,
+    reaction_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2086,6 +2143,7 @@ struct VisibleOakIntroSequence {
     current_sprite: Option<String>,
     wooper_cry_queued: bool,
     scene_fade_out_steps: u8,
+    scene_fade_out_frames_per_step: u16,
     fade_active: bool,
     fade_direction: VisibleOakFadeDirection,
     fade_total_frames: u16,
@@ -2093,7 +2151,12 @@ struct VisibleOakIntroSequence {
     fade_alpha: u8,
     wipe_active: bool,
     wipe_window_x: u16,
+    wipe_delta: i16,
+    wipe_stop_before: i16,
+    wipe_initial_wait: bool,
     text_queue: Vec<String>,
+    post_cry_text_queue: Vec<String>,
+    post_cry_requires_prompt: bool,
     current_text: String,
     visible_chars: usize,
     text_timer: u8,
@@ -2109,10 +2172,84 @@ enum VisibleTitlePhase {
     PressStart,
     MainMenu,
     FadeOut,
+    Teardown,
+    Unknown(u16),
+}
+
+impl TitleMenu {
+    fn source_scx(&self) -> u8 {
+        u8::try_from(
+            *self
+                .presentation_machine
+                .memory
+                .get("hSCX")
+                .expect("validated title presentation memory must contain hSCX"),
+        )
+        .expect("validated title hSCX must fit in one byte")
+    }
+
+    fn source_title_timer(&self) -> u16 {
+        *self
+            .presentation_machine
+            .memory
+            .get("wTitleScreenTimer")
+            .expect("validated title presentation memory must contain wTitleScreenTimer")
+    }
+
+    fn source_suicune_frame(&self) -> u8 {
+        u8::try_from(
+            *self
+                .presentation_machine
+                .values
+                .get("title_suicune_frame")
+                .expect("validated title presentation values must contain title_suicune_frame"),
+        )
+        .expect("validated title Suicune frame must fit in one byte")
+    }
+
+    fn source_clock_reset_trigger(&self) -> bool {
+        *self
+            .presentation_machine
+            .memory
+            .get("hClockResetTrigger")
+            .expect("validated title presentation memory must contain hClockResetTrigger")
+            == 0x34
+    }
+
+    fn source_phase(&self) -> VisibleTitlePhase {
+        if self.title_teardown.is_some() {
+            return VisibleTitlePhase::Teardown;
+        }
+        let Some(scene) = self
+            .presentation_machine
+            .memory
+            .get("wJumptableIndex")
+            .copied()
+        else {
+            return VisibleTitlePhase::Unknown(u16::MAX);
+        };
+        if scene & 0x80 != 0
+            && self
+                .presentation_machine
+                .memory
+                .get("wTitleScreenSelectedOption")
+                == Some(&0)
+        {
+            return VisibleTitlePhase::MainMenu;
+        }
+        match scene & 0x7f {
+            0 => VisibleTitlePhase::Entrance,
+            1 => VisibleTitlePhase::Timer,
+            2 => VisibleTitlePhase::PressStart,
+            3 => VisibleTitlePhase::FadeOut,
+            value => VisibleTitlePhase::Unknown(value),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct VisibleCreditsScreen {
+    program: VisibleCreditsProgram,
     allow_skip: bool,
     resume_game_timer_on_exit: bool,
     frame: u32,
@@ -2120,9 +2257,13 @@ struct VisibleCreditsScreen {
     awaiting_exit: bool,
     scene_index: u8,
     timer: u8,
+    bg_map_mode: u8,
+    bg_map_third: u8,
+    music_start_delay_frames: u8,
     script_index: usize,
     jumptable_index: u8,
     lines: Vec<VisibleCreditsLine>,
+    displayed_text_rows: BTreeMap<usize, VisibleCreditsTextRow>,
     border_frame_counter: Option<u8>,
     border_frame_top: Option<VisibleCreditsBorderFrame>,
     border_frame_bottom: Option<VisibleCreditsBorderFrame>,
@@ -2131,7 +2272,23 @@ struct VisibleCreditsScreen {
     border_mon_index: u8,
     ly_override: u8,
     show_the_end: bool,
+    displayed_show_the_end: bool,
     script_complete: bool,
+    exit_clear_frames_remaining: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleCreditsProgram {
+    ops: Vec<VisibleCreditsOp>,
+    constant_indices: BTreeMap<String, usize>,
+    strings: Vec<String>,
+    string_tiles: Vec<Vec<Vec<u16>>>,
+    skip_position_threshold: u16,
+    end_music_target: String,
+    end_music_fade_rate: u8,
+    menu_state_value: u8,
+    exit_clear_frames: u8,
+    exit_clear_color: [u8; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2146,6 +2303,12 @@ struct VisibleCreditsLine {
     text: String,
     tiles: Vec<Vec<u16>>,
     line_index: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleCreditsTextRow {
+    token: String,
+    tiles: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2176,7 +2339,7 @@ enum VisibleClockResetPhase {
     SetMinute,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum VisibleCreditsOp {
     String { token: String, line_index: u8 },
     Wait(u8),
@@ -2374,6 +2537,44 @@ struct PendingNpcTradeCommit {
 struct VisibleNameChoice {
     options: Vec<String>,
     selected: usize,
+    player_menu: Option<VisiblePlayerNameMenuDefinition>,
+    player_phase: Option<VisiblePlayerNameChoicePhase>,
+    motion_step: u8,
+    motion_frames_remaining: u8,
+    pending_player_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum VisiblePlayerNameChoicePhase {
+    SlideRight,
+    Menu,
+    SlideLeft,
+    CustomFadeOut,
+    CustomBgMapWait,
+    CustomFadeIn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisiblePlayerNameMenuDefinition {
+    left: usize,
+    top: usize,
+    right: usize,
+    bottom: usize,
+    title: String,
+    title_indent: usize,
+    motion_steps: u8,
+    motion_frames_per_step: u8,
+    custom_fade_out_frames: u8,
+    custom_fade_out_steps: u8,
+    custom_fade_out_frames_per_step: u8,
+    custom_bg_map_wait_frames: u8,
+    custom_fade_in_frames: u8,
+    custom_fade_in_steps: u8,
+    custom_fade_in_frames_per_step: u8,
+    custom_player_x: usize,
+    custom_player_y: usize,
+    custom_player_width: usize,
+    custom_player_height: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -3072,6 +3273,7 @@ struct VisibleEvolutionCancellation {
     evolved_message: String,
     pending_move_messages: Vec<String>,
     report: EvolutionReport,
+    accepted: bool,
 }
 
 #[derive(Component)]
@@ -3799,6 +4001,8 @@ struct RenderedTilesetArt {
     oak_intro_cache: HashMap<OakIntroArtKey, SpriteFrame>,
     oak_intro_errors: HashMap<OakIntroArtKey, String>,
     oak_intro_cache_order: VecDeque<OakIntroArtKey>,
+    name_choice_cache: HashMap<NameChoiceArtKey, SpriteFrame>,
+    name_choice_errors: HashMap<NameChoiceArtKey, String>,
     name_entry_cache: HashMap<NameEntryArtKey, SpriteFrame>,
     name_entry_errors: HashMap<NameEntryArtKey, String>,
     name_entry_cache_order: VecDeque<NameEntryArtKey>,
@@ -3848,6 +4052,7 @@ struct TitleScreenArtKey {
     scx: u8,
     frame: u32,
     show_version_window: bool,
+    teardown: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -3860,6 +4065,7 @@ struct IntroSceneArtKey {
     ly_overrides_hash: u64,
     lcdc_pointer: u8,
     background_effect_hash: u64,
+    tilemap_cleared: bool,
     global_anim_x_offset: u8,
     sprite_hash: u64,
     palette_effect: VisibleIntroPaletteEffect,
@@ -3947,6 +4153,13 @@ struct NameEntryArtKey {
     cursor_column: usize,
     cursor_row: usize,
     case: NameInputCase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct NameChoiceArtKey {
+    player_gender: u8,
+    phase: VisiblePlayerNameChoicePhase,
+    motion_step: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -4058,6 +4271,7 @@ fn take_visible_sequence_frames(accumulated_seconds: &mut f32, delta_seconds: f3
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TimeSetArtKey {
     phase: VisibleTimeSetPhase,
+    startup_palette_step: u8,
     hour: u8,
     minute: u8,
     visible_dialog: String,
@@ -5368,8 +5582,33 @@ pub fn smoke_visible_shell_title_name_input(
     complete_visible_smoke_time_set_if_needed(&mut runtime_shell)?;
     complete_visible_smoke_oak_intro_if_needed(&mut runtime_shell)?;
     if runtime_shell.pending_name_choice.is_some() {
+        for _ in 0..64 {
+            if runtime_shell
+                .pending_name_choice
+                .as_ref()
+                .is_none_or(|choice| {
+                    choice.player_phase.is_none()
+                        || choice.player_phase == Some(VisiblePlayerNameChoicePhase::Menu)
+                })
+            {
+                break;
+            }
+            tick_visible_player_name_choice(&mut runtime_shell)?;
+        }
         confirm_visible_name_choice(&mut runtime_shell)?;
     }
+    anyhow::ensure!(
+        runtime_shell.pending_name_input.is_some(),
+        "visible title name-input smoke did not reach the naming screen (choice={:?}, oak={:?})",
+        runtime_shell
+            .pending_name_choice
+            .as_ref()
+            .and_then(|choice| choice.player_phase),
+        runtime_shell
+            .pending_oak_intro
+            .as_ref()
+            .map(|oak| (oak.mode, oak.scene_phase))
+    );
     let snapshot = runtime_shell.shell.snapshot()?;
     let initial_name_entries = visible_scene_dialog_entries(&snapshot, &runtime_shell)?;
     for ch in player_name.chars() {
@@ -5379,6 +5618,7 @@ pub fn smoke_visible_shell_title_name_input(
     let typed_name_entries = visible_scene_dialog_entries(&snapshot, &runtime_shell)?;
     apply_visible_name_input_smoke_key(&mut runtime_shell, KeyCode::Enter);
     apply_visible_name_input_smoke_key(&mut runtime_shell, KeyCode::KeyZ);
+    complete_visible_smoke_player_name_return_if_needed(&mut runtime_shell)?;
     complete_visible_smoke_oak_intro_if_needed(&mut runtime_shell)?;
     settle_visible_shell_smoke_until_idle(&mut runtime_shell)?;
     let snapshot = runtime_shell.shell.snapshot()?;
@@ -6461,6 +6701,9 @@ fn initialize_bevy_runtime_shell(
                 .insert("wTitleScreenTimer".to_string(), 0);
             presentation_machine
                 .memory
+                .insert("wSuicuneFrame".to_string(), 0);
+            presentation_machine
+                .memory
                 .insert("hClockResetTrigger".to_string(), 0);
             presentation_machine
                 .memory
@@ -6469,6 +6712,9 @@ fn initialize_bevy_runtime_shell(
                 parameters.crystal_oam_target.clone(),
                 u16::from(parameters.crystal_initial_y),
             );
+            presentation_machine
+                .values
+                .insert("title_suicune_frame".to_string(), 0);
             Some(TitleMenu {
                 spawn_identifier: *spawn_identifier,
                 save_path: save_path.clone(),
@@ -6477,12 +6723,11 @@ fn initialize_bevy_runtime_shell(
                     option_index: 0,
                 },
                 presentation_machine,
+                title_teardown: None,
+                main_menu_entry_interpreter: None,
+                main_menu_phase_interpreter: None,
+                main_menu_waiting_for_input: false,
                 main_menu,
-                phase: VisibleTitlePhase::Entrance,
-                frame: 0,
-                main_menu_frame: 0,
-                scx: parameters.entrance_start_scx,
-                title_timer: 0,
                 timeout_fade_rate: parameters.timeout_fade_rate,
                 timeout_fade_register: parameters.timeout_fade_register,
                 timeout_fade_audio: parameters.timeout_fade_audio,
@@ -6490,12 +6735,14 @@ fn initialize_bevy_runtime_shell(
                 entrance_scroll_step: parameters.entrance_scroll_step,
                 crystal_oam_target: parameters.crystal_oam_target,
                 crystal_initial_y: parameters.crystal_initial_y,
+                suicune_iterator_operation_index: parameters.suicune_iterator_operation_index,
+                teardown_start_operation_index: parameters.teardown_start_operation_index,
+                teardown_dispatch_operation_index: parameters.teardown_dispatch_operation_index,
                 suicune_frames: parameters.suicune_frames,
                 suicune_selector_mask: parameters.suicune_selector_mask,
                 suicune_selector_shift_left: parameters.suicune_selector_shift_left,
                 suicune_selector_swap_nibbles: parameters.suicune_selector_swap_nibbles,
                 joypad_mask: 0,
-                clock_reset_trigger: false,
             })
         }
         BevyShellStart::LoadSave { .. } => None,
@@ -6509,13 +6756,18 @@ fn initialize_bevy_runtime_shell(
             RuntimeIntroPresentationParameters::from_program(runtime.title_presentation_program())
         })
         .transpose()?;
-    let mut intro_screen = intro_parameters.map(VisibleIntroScreen::from_parameters);
+    let mut intro_screen = intro_parameters
+        .map(|parameters| {
+            VisibleIntroScreen::from_program(parameters, runtime.title_presentation_program())
+        })
+        .transpose()?;
     if let Some(intro) = intro_screen.as_mut() {
         apply_visible_intro_background_binding(
             intro,
             &runtime.data().runtime_title_screen.program,
         )?;
     }
+    let intro_display_screen = intro_screen.clone();
     let intro_sprite_bundle = intro_screen
         .as_ref()
         .map(|_| load_intro_sprite_anim_bundle(runtime.data().sprite_anim_bundle.as_str()))
@@ -6599,6 +6851,7 @@ fn initialize_bevy_runtime_shell(
         shell,
         latest_rtc_sample: None,
         intro_screen,
+        intro_display_screen,
         intro_sprite_bundle,
         title_menu,
         new_game_pre_overworld: false,
@@ -6659,6 +6912,7 @@ fn initialize_bevy_runtime_shell(
         pending_ui_button_presses: VecDeque::new(),
         ui_held_direction: None,
         ui_direction_repeat_ticks: 0,
+        h_in_menu: 0,
         recent_overworld_inputs: VecDeque::new(),
         deterministic_session_start,
         deterministic_session_checkpoint,
@@ -6715,6 +6969,7 @@ fn initialize_bevy_runtime_shell(
         pending_mail_input: None,
         pending_mail_read: None,
         pending_name_choice: None,
+        pending_player_name_return: None,
         pending_standard_capture: None,
         visible_bug_contest_replacement: None,
         pending_gift_pokemon_nickname: None,

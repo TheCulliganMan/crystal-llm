@@ -8934,27 +8934,131 @@ fn spawn_visible_name_choice_screen(
         }
         return Ok(());
     }
-    // The new-game preset-name menu is a complete LCD scene. Its 12x14
-    // window intentionally occupies only the left half, but the remainder is
-    // blank background—not the already initialized bedroom. Keep capture
-    // nickname YES/NO prompts as battle overlays via the branch above.
-    commit_presented_fullscreen_solid(commands, rendered_art, [255, 255, 255, 255], 5.8, images)?;
-    const LEFT_TILE: f32 = 0.0;
-    const TOP_TILE: f32 = 0.0;
-    // NEW NAME occupies eight glyph cells beginning at column two. Twelve
-    // tiles leave its final glyph clear of the right frame, while fourteen
-    // tiles tightly contain the five double-spaced choices.
-    const WIDTH_TILES: usize = 12;
-    const HEIGHT_TILES: usize = 14;
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let phase = choice
+        .player_phase
+        .context("new-game name choices have no source presentation phase")?;
+    if phase == VisiblePlayerNameChoicePhase::CustomFadeOut {
+        let menu = choice
+            .player_menu
+            .as_ref()
+            .context("custom player-name fade has no source definition")?;
+        spawn_player_name_custom_fade_overlay(
+            commands,
+            f32::from(
+                choice
+                    .motion_step
+                    .checked_div(menu.custom_fade_out_frames_per_step)
+                    .unwrap_or(0)
+                    .saturating_add(1)
+                    .min(menu.custom_fade_out_steps),
+            ) / f32::from(menu.custom_fade_out_steps),
+        );
+        return Ok(());
+    }
+    let background_key = NameChoiceArtKey {
+        player_gender: snapshot.trainer.player_gender,
+        phase,
+        motion_step: if matches!(
+            phase,
+            VisiblePlayerNameChoicePhase::CustomBgMapWait
+                | VisiblePlayerNameChoicePhase::CustomFadeIn
+        ) {
+            0
+        } else {
+            choice.motion_step
+        },
+    };
+    if !rendered_art.name_choice_cache.contains_key(&background_key)
+        && !rendered_art.name_choice_errors.contains_key(&background_key)
+    {
+        match load_visible_player_name_choice_background(
+            runtime_shell,
+            rendered_art,
+            images,
+            choice,
+        ) {
+            Ok(frame) => {
+                rendered_art.name_choice_errors.remove(&background_key);
+                rendered_art.name_choice_cache.insert(background_key.clone(), frame);
+            }
+            Err(error) => {
+                rendered_art
+                    .name_choice_errors
+                    .insert(background_key.clone(), error.to_string());
+            }
+        }
+    }
+    let background = rendered_art
+        .name_choice_cache
+        .get(&background_key)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "required player-name background could not be rendered: {}",
+                rendered_art
+                    .name_choice_errors
+                    .get(&background_key)
+                    .map(String::as_str)
+                    .unwrap_or("unknown error")
+            )
+        })?;
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &background,
+        PresentedFullscreenFrameSource::Cached,
+        5.8,
+        images,
+    )?;
+    match phase {
+        VisiblePlayerNameChoicePhase::CustomBgMapWait => {
+            spawn_player_name_custom_fade_overlay(commands, 1.0);
+            return Ok(());
+        }
+        VisiblePlayerNameChoicePhase::CustomFadeIn => {
+            let menu = choice
+                .player_menu
+                .as_ref()
+                .context("custom player-name fade has no source definition")?;
+            spawn_player_name_custom_fade_overlay(
+                commands,
+                1.0 - f32::from(
+                    choice
+                        .motion_step
+                        .checked_div(menu.custom_fade_in_frames_per_step)
+                        .unwrap_or(0)
+                        .min(menu.custom_fade_in_steps),
+                ) / f32::from(menu.custom_fade_in_steps),
+            );
+            return Ok(());
+        }
+        _ => {}
+    }
+    if choice.player_phase != Some(VisiblePlayerNameChoicePhase::Menu) {
+        return Ok(());
+    }
+    let menu = choice
+        .player_menu
+        .as_ref()
+        .context("new-game name choices have no source menu definition")?;
+    anyhow::ensure!(
+        menu.left <= menu.right && menu.top <= menu.bottom && menu.right < 20 && menu.bottom < 18,
+        "new-game name menu coordinates are outside the LCD"
+    );
+    let left_tile = menu.left as f32;
+    let top_tile = menu.top as f32;
+    let width_tiles = menu.right - menu.left + 1;
+    let height_tiles = menu.bottom - menu.top + 1;
     let (center_x, center_y) =
-        field_window_center(LEFT_TILE, TOP_TILE, WIDTH_TILES as f32, HEIGHT_TILES as f32);
+        field_window_center(left_tile, top_tile, width_tiles as f32, height_tiles as f32);
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
                 color: Color::WHITE,
                 custom_size: Some(Vec2::new(
-                    WIDTH_TILES as f32 * TILE_SIZE,
-                    HEIGHT_TILES as f32 * TILE_SIZE,
+                    width_tiles as f32 * TILE_SIZE,
+                    height_tiles as f32 * TILE_SIZE,
                 )),
                 ..default()
             },
@@ -8967,10 +9071,10 @@ fn spawn_visible_name_choice_screen(
         spawn_scene_dialog_window_frame_tiles(
             commands,
             frame,
-            LEFT_TILE,
-            TOP_TILE,
-            WIDTH_TILES,
-            HEIGHT_TILES,
+            left_tile,
+            top_tile,
+            width_tiles,
+            height_tiles,
             6.0,
         );
     }
@@ -8979,13 +9083,13 @@ fn spawn_visible_name_choice_screen(
         rendered_art,
         asset_root,
         images,
-        "NAME",
-        battle_hud_tile_origin(1.0, 1.0).0,
-        battle_hud_tile_origin(1.0, 1.0).1,
+        &menu.title,
+        battle_hud_tile_origin(left_tile + menu.title_indent as f32, top_tile).0,
+        battle_hud_tile_origin(left_tile + menu.title_indent as f32, top_tile).1,
         6.1,
     );
     for (index, label) in choice.options.iter().enumerate() {
-        let row_y = 3.0 + index as f32 * 2.0;
+        let row_y = top_tile + 2.0 + index as f32 * 2.0;
         if index == choice.selected {
             spawn_scene_dialog_bitmap_text(
                 commands,
@@ -8993,8 +9097,8 @@ fn spawn_visible_name_choice_screen(
                 asset_root,
                 images,
                 ">",
-                battle_hud_tile_origin(1.0, row_y).0,
-                battle_hud_tile_origin(1.0, row_y).1,
+                battle_hud_tile_origin(left_tile + 1.0, row_y).0,
+                battle_hud_tile_origin(left_tile + 1.0, row_y).1,
                 6.1,
             );
         }
@@ -9004,12 +9108,159 @@ fn spawn_visible_name_choice_screen(
             asset_root,
             images,
             label,
-            battle_hud_tile_origin(2.0, row_y).0,
-            battle_hud_tile_origin(2.0, row_y).1,
+            battle_hud_tile_origin(left_tile + 2.0, row_y).0,
+            battle_hud_tile_origin(left_tile + 2.0, row_y).1,
             6.1,
         );
     }
     Ok(())
+}
+
+fn spawn_player_name_custom_fade_overlay(commands: &mut Commands, alpha: f32) {
+    let (center_x, center_y) = field_window_center(
+        0.0,
+        0.0,
+        NAME_ENTRY_SCREEN_TILE_WIDTH as f32,
+        NAME_ENTRY_SCREEN_TILE_HEIGHT as f32,
+    );
+    commands.spawn((
+        SpriteBundle {
+            sprite: Sprite {
+                color: Color::srgba(1.0, 1.0, 1.0, alpha.clamp(0.0, 1.0)),
+                custom_size: Some(Vec2::new(
+                    NAME_ENTRY_SCREEN_TILE_WIDTH as f32 * TILE_SIZE,
+                    NAME_ENTRY_SCREEN_TILE_HEIGHT as f32 * TILE_SIZE,
+                )),
+                ..default()
+            },
+            transform: Transform::from_xyz(center_x, center_y, 6.2),
+            ..default()
+        },
+        SceneDialogMarker,
+    ));
+}
+
+fn load_visible_player_name_choice_background(
+    runtime_shell: &BevyRuntimeShell,
+    rendered_art: &mut RenderedTilesetArt,
+    images: &mut Assets<Image>,
+    choice: &VisibleNameChoice,
+) -> Result<SpriteFrame> {
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let assets = runtime_shell.asset_root.runtime_assets();
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
+        .context("decode player-name background font PNG")?
+        .to_rgba8();
+    let textbox_frame = crate::open_runtime_image(assets.join("gfx/frames/1.png"))
+        .context("decode player-name background textbox frame PNG")?
+        .to_rgba8();
+    let width = TIME_SET_SCREEN_TILE_WIDTH * SOURCE_TILE_SIZE;
+    let height = TIME_SET_SCREEN_TILE_HEIGHT * SOURCE_TILE_SIZE;
+    let mut data = vec![255_u8; width * height * 4];
+    for pixel in data.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+
+    let asset_id = if snapshot.trainer.player_gender == PLAYER_GENDER_FEMALE {
+        "player:kris"
+    } else {
+        "player:chris"
+    };
+    let art_key = IntroArtKey {
+        asset_id: asset_id.to_string(),
+    };
+    if !rendered_art.intro_cache.contains_key(&art_key) {
+        let frame = load_oak_intro_frame(&runtime_shell.asset_root, asset_id, images)
+            .with_context(|| format!("load {asset_id} for NamePlayer"))?;
+        rendered_art.intro_cache.insert(art_key.clone(), frame);
+    }
+    let player_frame = rendered_art
+        .intro_cache
+        .get(&art_key)
+        .context("NamePlayer player portrait cache entry is missing")?;
+    let player_image = images
+        .get(&player_frame.handle)
+        .context("NamePlayer player portrait image is missing")?;
+    let menu = choice
+        .player_menu
+        .as_ref()
+        .context("NamePlayer background has no source menu definition")?;
+    let max_step = menu.motion_steps.saturating_sub(1);
+    let step = choice.motion_step.min(max_step);
+    let tile_x = match choice.player_phase {
+        Some(VisiblePlayerNameChoicePhase::SlideRight | VisiblePlayerNameChoicePhase::Menu) => {
+            6 + usize::from(step)
+        }
+        Some(VisiblePlayerNameChoicePhase::SlideLeft) => 13_usize.saturating_sub(usize::from(step)),
+        Some(VisiblePlayerNameChoicePhase::CustomFadeIn) => menu.custom_player_x,
+        Some(VisiblePlayerNameChoicePhase::CustomBgMapWait) => menu.custom_player_x,
+        Some(VisiblePlayerNameChoicePhase::CustomFadeOut) => {
+            anyhow::bail!("custom fade-out must retain the NamingScreen surface")
+        }
+        None => anyhow::bail!("NamePlayer background has no motion phase"),
+    };
+    if choice.player_phase != Some(VisiblePlayerNameChoicePhase::CustomBgMapWait) {
+        anyhow::ensure!(
+            menu.custom_player_width == 7 && menu.custom_player_height == 7,
+            "NamePlayer custom portrait dimensions differ from DrawIntroPlayerPic"
+        );
+        blit_sprite_frame_image(
+            player_image,
+            tile_x * SOURCE_TILE_SIZE,
+            if choice.player_phase == Some(VisiblePlayerNameChoicePhase::CustomFadeIn) {
+                menu.custom_player_y * SOURCE_TILE_SIZE
+            } else {
+                4 * SOURCE_TILE_SIZE
+            },
+            width,
+            height,
+            &mut data,
+        );
+    }
+    if matches!(
+        choice.player_phase,
+        Some(
+            VisiblePlayerNameChoicePhase::SlideRight
+                | VisiblePlayerNameChoicePhase::Menu
+                | VisiblePlayerNameChoicePhase::SlideLeft
+        )
+    ) {
+        let oak_text6 = visible_presentation_text_pages(
+            runtime_shell.runtime.title_presentation_program(),
+            "OakText6",
+            "PLAYER",
+        )?
+        .into_iter()
+        .last()
+        .context("OakText6 has no visible page")?;
+        draw_time_set_textbox(
+            &font,
+            &textbox_frame,
+            &oak_text6,
+            0,
+            OAK_INTRO_TEXTBOX_Y,
+            TIME_SET_SCREEN_TILE_WIDTH,
+            OAK_INTRO_TEXTBOX_HEIGHT,
+            &mut data,
+        )?;
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: width as u32,
+            height: height as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    Ok(SpriteFrame {
+        handle: images.add(image),
+        size: Vec2::new(width as f32, height as f32),
+    })
 }
 
 fn spawn_scene_dialog_bitmap_text(
@@ -10514,6 +10765,14 @@ fn visible_scene_dialog_entries(
         entries.truncate(SCENE_MENU_VISIBLE_ROWS);
         return Ok(entries);
     }
+    if runtime_shell.pending_name_choice.is_some() {
+        push_visible_name_choice_entries(&mut entries, runtime_shell);
+        return Ok(entries);
+    }
+    if runtime_shell.pending_name_input.is_some() {
+        push_visible_name_input_entries(&mut entries, runtime_shell);
+        return Ok(entries);
+    }
     if let Some(menu) = &snapshot.ui.menu {
         push_visible_runtime_menu_dialog_entries(&mut entries, runtime_shell, menu)?;
         entries.truncate(SCENE_MENU_VISIBLE_ROWS);
@@ -10542,14 +10801,6 @@ fn visible_scene_dialog_entries(
     if runtime_shell.pending_phone_prompt.is_some() {
         push_visible_phone_prompt_entries(&mut entries, runtime_shell)?;
         entries.truncate(SCENE_MENU_VISIBLE_ROWS);
-        return Ok(entries);
-    }
-    if runtime_shell.pending_name_choice.is_some() {
-        push_visible_name_choice_entries(&mut entries, runtime_shell);
-        return Ok(entries);
-    }
-    if runtime_shell.pending_name_input.is_some() {
-        push_visible_name_input_entries(&mut entries, runtime_shell);
         return Ok(entries);
     }
     if runtime_shell.pending_mail_input.is_some() {
@@ -10864,6 +11115,11 @@ fn push_visible_name_choice_entries(entries: &mut Vec<String>, runtime_shell: &B
     let Some(choice) = runtime_shell.pending_name_choice.as_ref() else {
         return;
     };
+    if choice.player_menu.is_some()
+        && choice.player_phase != Some(VisiblePlayerNameChoicePhase::Menu)
+    {
+        return;
+    }
     if let Some(default_name) = runtime_shell
         .pending_standard_capture
         .as_ref()

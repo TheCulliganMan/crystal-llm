@@ -669,7 +669,7 @@ fn item_payload_issue_diagnostic(
         ItemPayloadIssue::InvalidVitaminStatExp { amount } => VerificationError::error(
             "invalid_item_vitamin_stat_exp",
             item_id,
-            format!("VITAMIN requires positive vitamin_stat_exp, found {amount}"),
+            format!("VITAMIN requires the source high-byte increment 2560, found {amount}"),
         ),
         ItemPayloadIssue::MissingVitaminMaxStatExp => VerificationError::error(
             "missing_item_vitamin_max_stat_exp",
@@ -679,14 +679,12 @@ fn item_payload_issue_diagnostic(
         ItemPayloadIssue::InvalidVitaminMaxStatExp { max } => VerificationError::error(
             "invalid_item_vitamin_max_stat_exp",
             item_id,
-            format!(
-                "VITAMIN requires vitamin_max_stat_exp >= vitamin_stat_exp and positive, found {max}"
-            ),
+            format!("VITAMIN requires the source high-byte limit 25600, found {max}"),
         ),
         ItemPayloadIssue::InvalidRareCandyLevelGain { level_gain } => VerificationError::error(
             "invalid_item_rare_candy_level_gain",
             item_id,
-            format!("rare_candy_level_gain must be positive, found {level_gain}"),
+            format!("rare_candy_level_gain must equal the source increment 1, found {level_gain}"),
         ),
         ItemPayloadIssue::MissingBattleStatBoostStat => VerificationError::error(
             "missing_item_battle_stat_boost_stat",
@@ -710,29 +708,19 @@ fn item_payload_issue_diagnostic(
             "invalid_item_battle_stat_boost_stages",
             item_id,
             format!(
-                "{} requires battle_stat_boost_stages from 1 to 6, found {stages}",
+                "{} requires the source battle_stat_boost_stages value 1, found {stages}",
                 item.effect
             ),
         ),
         ItemPayloadIssue::MissingBattleStatDropGuard => VerificationError::error(
             "missing_item_battle_stat_drop_guard",
             item_id,
-            "battle_stat_drop_guard_turns requires explicit battle_stat_drop_guard",
+            "Guard Spec requires explicit battle_stat_drop_guard",
         ),
         ItemPayloadIssue::InvalidBattleStatDropGuard => VerificationError::error(
             "invalid_item_battle_stat_drop_guard",
             item_id,
             "battle_stat_drop_guard must be true when declared",
-        ),
-        ItemPayloadIssue::MissingBattleStatDropGuardTurns => VerificationError::error(
-            "missing_item_battle_stat_drop_guard_turns",
-            item_id,
-            "battle_stat_drop_guard requires explicit battle_stat_drop_guard_turns",
-        ),
-        ItemPayloadIssue::InvalidBattleStatDropGuardTurns { turns } => VerificationError::error(
-            "invalid_item_battle_stat_drop_guard_turns",
-            item_id,
-            format!("battle_stat_drop_guard_turns must be positive, found {turns}"),
         ),
         ItemPayloadIssue::InvalidBattleEscapeMode { mode } => VerificationError::error(
             "invalid_item_battle_escape_mode",
@@ -744,10 +732,15 @@ fn item_payload_issue_diagnostic(
             item_id,
             "battle_capture_ball must be true when declared",
         ),
+        ItemPayloadIssue::InvalidEscapeRopeMode { mode } => VerificationError::error(
+            "invalid_item_escape_rope_mode",
+            item_id,
+            format!("escape_rope_mode must be 'DIG_WARP' when declared, found '{mode}'"),
+        ),
         ItemPayloadIssue::InvalidRepelSteps { steps } => VerificationError::error(
             "invalid_item_repel_steps",
             item_id,
-            format!("repel_steps must be positive when declared, found {steps}"),
+            format!("repel_steps must be 100, 200, or 250 when declared, found {steps}"),
         ),
         ItemPayloadIssue::InvalidBattleFocusEnergy => VerificationError::error(
             "invalid_item_battle_focus_energy",
@@ -913,6 +906,11 @@ fn evolution_table_issue_diagnostic(issue: EvolutionTableIssue) -> VerificationE
             "unknown_trade_evolution_item",
             source_species_id,
             format!("TRADE evolution references missing held item '{item_id}'"),
+        ),
+        EvolutionTableIssue::MissingTradeItem { source_species_id } => VerificationError::error(
+            "missing_trade_evolution_item",
+            source_species_id,
+            "TRADE evolution requires an exact held-item operand or the explicit -1 sentinel",
         ),
         EvolutionTableIssue::InvalidTradeItem {
             source_species_id,
@@ -5810,6 +5808,7 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
             .map(runtime_spawn_point_catalog_issue_diagnostic),
     );
     verify_runtime_spawn_points_within_declared_maps(data, diagnostics);
+    verify_fly_destinations(data, diagnostics);
 
     diagnostics.extend(
         initialize_events_issues(&data.initialize_events)
@@ -5960,6 +5959,102 @@ fn verify_runtime_pack_data(data: &GameDataSet, diagnostics: &mut Vec<Verificati
             .into_iter()
             .map(frontpic_anim_catalog_issue_diagnostic),
     );
+}
+
+fn verify_fly_destinations(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    let mut spawn_bindings = BTreeMap::<u16, &str>::new();
+    let mut landmark_bindings = BTreeMap::<&str, &str>::new();
+    let landmark_constants = data
+        .pokegear_landmarks
+        .landmarks
+        .iter()
+        .map(|landmark| landmark.constant.as_str())
+        .collect::<BTreeSet<_>>();
+
+    for (key, destination) in &data.fly_destinations {
+        if key != &destination.flypoint_flag {
+            diagnostics.push(VerificationError::error(
+                "fly_destination_flag_mismatch",
+                key,
+                format!(
+                    "fly destination key '{key}' does not match record flypoint_flag '{}'",
+                    destination.flypoint_flag
+                ),
+            ));
+        }
+        if !is_exact_pack_token(key) || !is_exact_pack_token(&destination.flypoint_flag) {
+            diagnostics.push(VerificationError::error(
+                "invalid_fly_destination_flag",
+                key,
+                "fly destination keys and flypoint flags must be exact non-empty pack tokens",
+            ));
+        }
+        if !is_valid_pokegear_landmark_constant(&destination.label) {
+            diagnostics.push(VerificationError::error(
+                "invalid_fly_destination_landmark",
+                key,
+                format!(
+                    "fly destination landmark '{}' must be an exact LANDMARK_ pack token",
+                    destination.label
+                ),
+            ));
+        }
+
+        let spawn_identifier = destination.destination_spawn_identifier;
+        if spawn_identifier
+            >= crystal_core::systems::special_routines::CRYSTAL_NUM_SPAWN_POINTS
+        {
+            diagnostics.push(VerificationError::error(
+                "fly_destination_spawn_out_of_range",
+                key,
+                format!(
+                    "fly destination spawn identifier {spawn_identifier} is outside Crystal's SpawnPoints table"
+                ),
+            ));
+        } else if !data
+            .runtime_spawn_points
+            .contains_key(&spawn_identifier.to_string())
+        {
+            diagnostics.push(VerificationError::error(
+                "unknown_fly_destination_spawn",
+                key,
+                format!(
+                    "fly destination references missing runtime spawn point {spawn_identifier}"
+                ),
+            ));
+        }
+
+        if !landmark_constants.contains(destination.label.as_str()) {
+            diagnostics.push(VerificationError::error(
+                "unknown_fly_destination_landmark",
+                key,
+                format!(
+                    "fly destination references missing Pokegear landmark '{}'",
+                    destination.label
+                ),
+            ));
+        }
+
+        if let Some(existing_key) = spawn_bindings.insert(spawn_identifier, key) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_fly_destination_spawn",
+                key,
+                format!(
+                    "fly destination reuses spawn point {spawn_identifier} already bound by '{existing_key}'"
+                ),
+            ));
+        }
+        if let Some(existing_key) = landmark_bindings.insert(destination.label.as_str(), key) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_fly_destination_landmark",
+                key,
+                format!(
+                    "fly destination reuses landmark '{}' already bound by '{existing_key}'",
+                    destination.label
+                ),
+            ));
+        }
+    }
 }
 
 fn verify_definitive_map_modules(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
@@ -6276,6 +6371,16 @@ fn runtime_spawn_point_catalog_issue_diagnostic(
     issue: RuntimeSpawnPointCatalogIssue,
 ) -> VerificationError {
     match issue {
+        RuntimeSpawnPointCatalogIssue::IdentifierOutOfRange { key, identifier } => {
+            VerificationError::error(
+                "runtime_spawn_point_identifier_out_of_range",
+                &key,
+                format!(
+                    "runtime spawn point identifier {identifier} is outside Crystal's 0..{} table",
+                    crystal_core::systems::special_routines::CRYSTAL_NUM_SPAWN_POINTS
+                ),
+            )
+        }
         RuntimeSpawnPointCatalogIssue::IdentifierMismatch { key, identifier } => {
             VerificationError::error(
                 "runtime_spawn_point_identifier_mismatch",
@@ -7908,13 +8013,15 @@ fn type_effectiveness_table_issue_diagnostic(
                 format!("{prefix} defender {defender:?} is not declared in type categories"),
             )
         }
-        TypeEffectivenessTableIssue::MissingMatchup { attacker, defender } => {
+        TypeEffectivenessTableIssue::DuplicateMatchup {
+            table,
+            attacker,
+            defender,
+        } => {
             VerificationError::error(
-                "missing_type_effectiveness_matchup",
-                "type_effectiveness:matchups",
-                format!(
-                    "type effectiveness matchup {attacker:?} -> {defender:?} must be declared explicitly"
-                ),
+                "duplicate_type_effectiveness_matchup",
+                table.subject(),
+                format!("type effectiveness matchup {attacker:?} -> {defender:?} is duplicated"),
             )
         }
     }
@@ -10343,7 +10450,7 @@ fn field_move_catalog_issue_diagnostic(issue: FieldMoveCatalogIssue) -> Verifica
         FieldMoveCatalogIssue::InvalidEscapeItemMode => VerificationError::error(
             "invalid_field_escape_item_mode",
             "field_moves:escape_rope",
-            "field escape item mode must be exact and nonempty",
+            "field escape item mode must be the implemented DIG_WARP behavior",
         ),
         FieldMoveCatalogIssue::UnknownEscapeItemRule {
             item_id,

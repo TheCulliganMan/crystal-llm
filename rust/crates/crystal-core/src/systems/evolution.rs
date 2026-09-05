@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::models::pokemon::StatExperience;
-use crate::models::{LearnedMove, Move, Pokemon, PokemonSpecies, calculate_stats};
+use crate::models::{
+    LearnedMove, Move, Pokemon, PokemonSpecies, calculate_stats, pokemon_species_display_name,
+};
 use crate::systems::learnsets::{LearnsetEntry, SpeciesLearnsets, level_up_moves_for_species};
 use crate::world::encounters::TimeOfDay;
 
@@ -81,6 +83,9 @@ pub enum EvolutionTableIssue {
         item_id: String,
     },
     MissingHappinessWindow {
+        source_species_id: String,
+    },
+    MissingTradeItem {
         source_species_id: String,
     },
     InvalidHappinessWindow {
@@ -198,22 +203,27 @@ pub fn evolution_table_issues(
                         source_species_id: source_species_id.clone(),
                     }),
                 },
-                METHOD_TRADE => {
-                    if let Some(item_id) = entry.held_item.as_deref() {
-                        if item_id != TRADE_ANY_ITEM && !is_exact_nonempty_evolution_token(item_id)
-                        {
-                            issues.push(EvolutionTableIssue::InvalidTradeItem {
-                                source_species_id: source_species_id.clone(),
-                                item_id: item_id.to_string(),
-                            });
-                        } else if item_id != TRADE_ANY_ITEM && !item_ids.contains(item_id) {
-                            issues.push(EvolutionTableIssue::UnknownTradeItem {
-                                source_species_id: source_species_id.clone(),
-                                item_id: item_id.to_string(),
-                            });
-                        }
+                METHOD_TRADE => match entry.held_item.as_deref() {
+                    Some(item_id)
+                        if item_id != TRADE_ANY_ITEM
+                            && !is_exact_nonempty_evolution_token(item_id) =>
+                    {
+                        issues.push(EvolutionTableIssue::InvalidTradeItem {
+                            source_species_id: source_species_id.clone(),
+                            item_id: item_id.to_string(),
+                        });
                     }
-                }
+                    Some(item_id) if item_id != TRADE_ANY_ITEM && !item_ids.contains(item_id) => {
+                        issues.push(EvolutionTableIssue::UnknownTradeItem {
+                            source_species_id: source_species_id.clone(),
+                            item_id: item_id.to_string(),
+                        });
+                    }
+                    Some(_) => {}
+                    None => issues.push(EvolutionTableIssue::MissingTradeItem {
+                        source_species_id: source_species_id.clone(),
+                    }),
+                },
                 METHOD_STAT => {
                     if entry.level.is_none() {
                         issues.push(EvolutionTableIssue::MissingStatLevel {
@@ -419,13 +429,13 @@ impl EvolutionEntry {
         }
     }
 
-    pub fn trade(species: impl Into<String>, held_item: Option<impl Into<String>>) -> Self {
+    pub fn trade(species: impl Into<String>, held_item: impl Into<String>) -> Self {
         Self {
             method: METHOD_TRADE.to_string(),
             species: species.into(),
             level: None,
             item: None,
-            held_item: held_item.map(Into::into),
+            held_item: Some(held_item.into()),
             happiness: None,
             stat_ratio: None,
         }
@@ -500,6 +510,8 @@ pub enum EvolutionError {
     MissingRequiredLevel { species_id: String },
     #[error("happiness evolution for {species_id} is missing required window")]
     MissingHappinessWindow { species_id: String },
+    #[error("trade evolution for {species_id} is missing required held-item operand")]
+    MissingTradeItem { species_id: String },
     #[error("invalid happiness window {window} for {species_id}")]
     InvalidHappinessWindow { species_id: String, window: String },
     #[error("stat evolution for {species_id} is missing required ratio")]
@@ -670,9 +682,13 @@ pub fn find_evolution_candidate<'a>(
                 if context.link_mode == LinkMode::None || is_holding_everstone(pokemon) {
                     continue;
                 }
-                let Some(required) = entry.held_item.as_deref() else {
-                    return Ok(Some(entry));
-                };
+                let required =
+                    entry
+                        .held_item
+                        .as_deref()
+                        .ok_or_else(|| EvolutionError::MissingTradeItem {
+                            species_id: species_id.to_string(),
+                        })?;
                 if required == TRADE_ANY_ITEM {
                     return Ok(Some(entry));
                 }
@@ -738,13 +754,8 @@ pub fn evolve_pokemon(
     let old_species_id = pokemon.species.id.clone();
     let old_max_hp = pokemon.max_hp;
     let old_hp = pokemon.hp;
-    if !pokemon.nickname.trim().is_empty()
-        && pokemon
-            .nickname
-            .trim()
-            .eq_ignore_ascii_case(&old_species_id)
-    {
-        pokemon.nickname = target_species.id.to_uppercase();
+    if pokemon.nickname == pokemon_species_display_name(&old_species_id) {
+        pokemon.nickname = pokemon_species_display_name(&target_species.id);
     }
     pokemon.species = target_species.clone();
     refresh_evolved_stats(pokemon, old_max_hp, old_hp);
@@ -974,9 +985,18 @@ mod tests {
                         EvolutionEntry::happiness("BAYLEEF", " MORNING"),
                         EvolutionEntry::happiness("BAYLEEF", "TR MORNDAY"),
                         EvolutionEntry::happiness("BAYLEEF", "MORNING"),
-                        EvolutionEntry::trade("BAYLEEF", Some(" kings_rock")),
-                        EvolutionEntry::trade("BAYLEEF", Some("KINGS ROCK")),
-                        EvolutionEntry::trade("BAYLEEF", Some("kings_rock")),
+                        EvolutionEntry::trade("BAYLEEF", " kings_rock"),
+                        EvolutionEntry::trade("BAYLEEF", "KINGS ROCK"),
+                        EvolutionEntry::trade("BAYLEEF", "kings_rock"),
+                        EvolutionEntry {
+                            method: METHOD_TRADE.to_string(),
+                            species: "BAYLEEF".to_string(),
+                            level: None,
+                            item: None,
+                            held_item: None,
+                            happiness: None,
+                            stat_ratio: None,
+                        },
                         EvolutionEntry {
                             method: METHOD_STAT.to_string(),
                             species: "BAYLEEF".to_string(),
@@ -1097,6 +1117,9 @@ mod tests {
                 EvolutionTableIssue::UnknownTradeItem {
                     source_species_id: "CHIKORITA".to_string(),
                     item_id: "kings_rock".to_string(),
+                },
+                EvolutionTableIssue::MissingTradeItem {
+                    source_species_id: "CHIKORITA".to_string(),
                 },
                 EvolutionTableIssue::MissingStatLevel {
                     source_species_id: "CHIKORITA".to_string(),
@@ -1250,6 +1273,46 @@ mod tests {
     }
 
     #[test]
+    fn evolution_renames_only_the_exact_default_species_display_name() {
+        let species_map = [
+            ("IVYSAUR".to_string(), species("IVYSAUR", 60, 60, 60)),
+            ("HO_OH".to_string(), species("HO_OH", 106, 130, 90)),
+        ]
+        .into_iter()
+        .collect();
+        let moves = BTreeMap::new();
+        let learnsets = [
+            ("IVYSAUR".to_string(), Vec::new()),
+            ("HO_OH".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let context = context(&species_map, &moves, &learnsets);
+
+        let mut custom_case = pokemon("BULBASAUR", 16);
+        custom_case.nickname = "bulbasaur".to_string();
+        evolve_pokemon(
+            &mut custom_case,
+            &EvolutionEntry::level("IVYSAUR", 16),
+            &context,
+            true,
+        )
+        .expect("evolve custom-case nickname");
+        assert_eq!(custom_case.nickname, "bulbasaur");
+
+        let mut punctuation = pokemon("MR__MIME", 16);
+        punctuation.nickname = "MR.MIME".to_string();
+        evolve_pokemon(
+            &mut punctuation,
+            &EvolutionEntry::level("HO_OH", 16),
+            &context,
+            true,
+        )
+        .expect("evolve exact default display nickname");
+        assert_eq!(punctuation.nickname, "HO-OH");
+    }
+
+    #[test]
     fn level_evolution_is_blocked_by_exact_everstone_only() {
         let species_map = [("IVYSAUR".to_string(), species("IVYSAUR", 60, 60, 60))]
             .into_iter()
@@ -1319,7 +1382,7 @@ mod tests {
                 ),
                 (
                     "ONIX".to_string(),
-                    vec![EvolutionEntry::trade("STEELIX", Some("METAL_COAT"))],
+                    vec![EvolutionEntry::trade("STEELIX", "METAL_COAT")],
                 ),
             ]
             .into_iter()
@@ -1367,6 +1430,29 @@ mod tests {
                 .map(|entry| entry.species.as_str()),
             Some("STEELIX")
         );
+
+        let missing_trade_operand = EvolutionTable(
+            [(
+                "ONIX".to_string(),
+                vec![EvolutionEntry {
+                    method: METHOD_TRADE.to_string(),
+                    species: "STEELIX".to_string(),
+                    level: None,
+                    item: None,
+                    held_item: None,
+                    happiness: None,
+                    stat_ratio: None,
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            find_evolution_candidate(&onix, &missing_trade_operand, &link_context),
+            Err(EvolutionError::MissingTradeItem {
+                species_id: "ONIX".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1384,7 +1470,7 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let entry = EvolutionEntry::trade("STEELIX", Some("METAL_COAT"));
+        let entry = EvolutionEntry::trade("STEELIX", "METAL_COAT");
         let mut context = context(&species_map, &moves, &learnsets);
         context.link_mode = LinkMode::Link;
         let mut onix = pokemon("ONIX", 30);

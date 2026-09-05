@@ -2,9 +2,6 @@ const TITLE_MAIN_MENU_TIME_BOX_X: usize = 0;
 const TITLE_MAIN_MENU_TIME_BOX_Y: usize = 14;
 const TITLE_MAIN_MENU_TIME_BOX_WIDTH: usize = 20;
 const TITLE_MAIN_MENU_TIME_BOX_HEIGHT: usize = 4;
-const TITLE_MAIN_MENU_CURSOR_PERIOD: u32 = 16;
-const TITLE_MAIN_MENU_CURSOR_OFFSET: usize = 1;
-const TITLE_MAIN_MENU_FADE_SPEED: u32 = 24;
 const TITLE_MAIN_MENU_DAY_STRINGS: [&str; 7] =
     ["SUN", "MON", "TUES", "WEDNES", "THURS", "FRI", "SATUR"];
 const BOOT_UI_WHITE: [u8; 4] = [255, 255, 255, 255];
@@ -567,15 +564,14 @@ fn load_visible_title_main_menu_frame(
         .cursor
         .option_index
         .min(options.len().saturating_sub(1));
-    let cursor_bob = visible_title_main_menu_cursor_bob(title.main_menu_frame);
     for (index, option) in options.iter().enumerate() {
-        let y = (title.main_menu.top + 2 + index) * SOURCE_TILE_SIZE;
+        let y = visible_title_main_menu_item_tile_y(title, index) * SOURCE_TILE_SIZE;
         if index == selected {
             draw_time_set_text(
                 &font,
                 "▶",
                 (title.main_menu.left + 1) * SOURCE_TILE_SIZE,
-                y + cursor_bob,
+                y,
                 &mut data,
             )?;
         }
@@ -615,17 +611,6 @@ fn load_visible_title_main_menu_frame(
         )?;
     }
 
-    let fade_alpha = visible_title_main_menu_fade_alpha(title.main_menu_frame);
-    if fade_alpha > 0 {
-        for pixel in data.chunks_exact_mut(4) {
-            let alpha = fade_alpha;
-            let inv_alpha = 255_u16.saturating_sub(alpha);
-            pixel[0] = ((u16::from(pixel[0]) * inv_alpha) / 255) as u8;
-            pixel[1] = ((u16::from(pixel[1]) * inv_alpha) / 255) as u8;
-            pixel[2] = ((u16::from(pixel[2]) * inv_alpha) / 255) as u8;
-        }
-    }
-
     let mut image = Image::new(
         Extent3d {
             width: width as u32,
@@ -642,6 +627,12 @@ fn load_visible_title_main_menu_frame(
         handle: images.add(image),
         size: Vec2::new(width as f32, height as f32),
     })
+}
+
+fn visible_title_main_menu_item_tile_y(title: &TitleMenu, index: usize) -> usize {
+    // RunMenuItemPrintingFunction advances HL by two tile rows after every
+    // item; STATICMENU_CURSOR uses the same InitVerticalMenuCursor spacing.
+    title.main_menu.top + 2 + index * 2
 }
 
 fn visible_title_menu_option_label(option: &RuntimeTitleMainMenuItem) -> &str {
@@ -743,18 +734,6 @@ fn load_visible_continue_screen_frame(
         handle: images.add(image),
         size: Vec2::new(width as f32, height as f32),
     })
-}
-
-fn visible_title_main_menu_cursor_bob(frame: u32) -> usize {
-    if frame % TITLE_MAIN_MENU_CURSOR_PERIOD < TITLE_MAIN_MENU_CURSOR_PERIOD / 2 {
-        0
-    } else {
-        TITLE_MAIN_MENU_CURSOR_OFFSET
-    }
-}
-
-fn visible_title_main_menu_fade_alpha(frame: u32) -> u16 {
-    255_u16.saturating_sub(frame.saturating_mul(TITLE_MAIN_MENU_FADE_SPEED).min(255) as u16)
 }
 
 fn visible_title_main_menu_clock_strings(snapshot: &RuntimeShellSnapshot) -> (String, String) {
@@ -2063,6 +2042,15 @@ fn load_gender_selection_frame(
     gender: &VisibleGenderSelection,
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
+    load_gender_selection_frame_with_black_fade(asset_root, gender, 0, images)
+}
+
+fn load_gender_selection_frame_with_black_fade(
+    asset_root: &AssetRoot,
+    gender: &VisibleGenderSelection,
+    black_alpha: u8,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
     let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode gender-selection font PNG")?
@@ -2109,6 +2097,14 @@ fn load_gender_selection_frame(
         )?;
     }
     apply_gender_selection_fade(gender.fade_counter, &mut data);
+    if black_alpha > 0 {
+        let keep = u16::from(255 - black_alpha);
+        for pixel in data.chunks_exact_mut(4) {
+            for channel in &mut pixel[0..3] {
+                *channel = ((u16::from(*channel) * keep) / 255) as u8;
+            }
+        }
+    }
 
     let mut image = Image::new(
         Extent3d {
@@ -2212,6 +2208,7 @@ fn spawn_visible_time_set_screen(
 ) -> Result<()> {
     let key = TimeSetArtKey {
         phase: time_set.phase,
+        startup_palette_step: time_set.startup_palette_step,
         hour: time_set.hour,
         minute: time_set.minute,
         visible_dialog: visible_time_set_visible_dialog(time_set),
@@ -2283,6 +2280,26 @@ fn load_time_set_frame(
     time_set: &VisibleTimeSetScreen,
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
+    if matches!(
+        time_set.phase,
+        VisibleTimeSetPhase::StartupDelay | VisibleTimeSetPhase::StartupFadeOut
+    ) {
+        let black_alpha = if time_set.phase == VisibleTimeSetPhase::StartupFadeOut {
+            visible_time_set_palette_black_alpha(
+                time_set.startup_palette_step,
+                time_set.startup_palette_steps,
+                false,
+            )
+        } else {
+            0
+        };
+        return load_gender_selection_frame_with_black_fade(
+            asset_root,
+            &time_set.startup_gender,
+            black_alpha,
+            images,
+        );
+    }
     let assets = asset_root.runtime_assets();
     let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode time-set font PNG")?
@@ -2304,12 +2321,37 @@ fn load_time_set_frame(
         pixel.copy_from_slice(&BOOT_UI_WHITE);
     }
 
+    if matches!(
+        time_set.phase,
+        VisibleTimeSetPhase::StartupLoad | VisibleTimeSetPhase::StartupFadeIn
+    ) {
+        let black_alpha = if time_set.phase == VisibleTimeSetPhase::StartupLoad {
+            255
+        } else {
+            visible_time_set_palette_black_alpha(
+                time_set.startup_palette_step,
+                time_set.startup_palette_steps,
+                true,
+            )
+        };
+        let keep = u16::from(255 - black_alpha);
+        for pixel in data.chunks_exact_mut(4) {
+            for channel in &mut pixel[0..3] {
+                *channel = ((u16::from(*channel) * keep) / 255) as u8;
+            }
+        }
+    }
+
     match time_set.phase {
+        VisibleTimeSetPhase::StartupDelay
+        | VisibleTimeSetPhase::StartupFadeOut
+        | VisibleTimeSetPhase::StartupLoad
+        | VisibleTimeSetPhase::StartupFadeIn => {}
         VisibleTimeSetPhase::SetHour => {
             draw_time_set_textbox(
                 &font,
                 &frame,
-                "What time is it?",
+                &time_set.hour_prompt,
                 0,
                 TIME_SET_TEXTBOX_Y,
                 20,
@@ -2337,7 +2379,7 @@ fn load_time_set_frame(
             draw_time_set_textbox(
                 &font,
                 &frame,
-                "How many minutes?",
+                &time_set.minute_prompt,
                 0,
                 TIME_SET_TEXTBOX_Y,
                 20,
@@ -2427,6 +2469,16 @@ fn load_time_set_frame(
         handle: images.add(image),
         size: Vec2::new(width as f32, height as f32),
     })
+}
+
+fn visible_time_set_palette_black_alpha(step: u8, steps: u8, fade_in: bool) -> u8 {
+    if steps <= 1 {
+        return if fade_in { 0 } else { 255 };
+    }
+    let progress = u16::from(step.saturating_sub(1).min(steps - 1));
+    let denominator = u16::from(steps - 1);
+    let alpha = ((255 * progress) / denominator) as u8;
+    if fade_in { 255 - alpha } else { alpha }
 }
 
 fn draw_time_set_textbox(
@@ -3039,16 +3091,10 @@ fn load_oak_intro_screen_frame(
     }
 
     if oak_intro.wipe_active {
-        let wipe_x = usize::from(oak_intro.wipe_window_x.min(VISIBLE_OAK_WIPE_END_X));
-        fill_native_rect(
-            &mut data,
-            width,
-            wipe_x,
-            0,
-            width.saturating_sub(wipe_x),
-            height,
-            255,
-        );
+        // The Game Boy window begins at WX - 7. Intro_WipeInFrontpic moves
+        // WX left from $77 to $07, revealing the portrait right-to-left.
+        let concealed_width = usize::from(oak_intro.wipe_window_x.saturating_sub(7));
+        fill_native_rect(&mut data, width, 0, 0, concealed_width, height, 255);
     }
     if oak_intro.fade_active || oak_intro.fade_alpha > 0 {
         fade_native_to_white(&mut data, oak_intro.fade_alpha);
@@ -3154,37 +3200,48 @@ fn render_visible_credits_frame_from_sources(
     credits: &VisibleCreditsScreen,
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
-    let palette_set = sources
-        .palette_sets
-        .get(usize::from(credits.scene_index & 0x03))
-        .context("credits palette set missing")?;
-    let bg_palette = &palette_set[0];
-    let border_palette = &palette_set[1];
-    let text_palette = &palette_set[2];
     let mut data = vec![0_u8; CREDITS_SCREEN_WIDTH * CREDITS_SCREEN_HEIGHT * 4];
-    fill_visible_credits_rect(
-        &mut data,
-        0,
-        0,
-        CREDITS_SCREEN_WIDTH,
-        CREDITS_SCREEN_HEIGHT,
-        bg_palette[0],
-    );
-    draw_visible_credits_mon_strip(sources, credits, bg_palette, &mut data)?;
-    fill_visible_credits_rect(
-        &mut data,
-        0,
-        5 * SOURCE_TILE_SIZE,
-        CREDITS_SCREEN_WIDTH,
-        12 * SOURCE_TILE_SIZE,
-        text_palette[0],
-    );
-    draw_visible_credits_border_rows(sources, border_palette, &mut data);
-    draw_visible_credits_text(sources, credits, text_palette, &mut data)?;
-    if credits.show_the_end || credits.awaiting_exit {
-        draw_visible_credits_the_end(sources, text_palette, &mut data);
+    if credits.exit_clear_frames_remaining.is_some() {
+        fill_visible_credits_rect(
+            &mut data,
+            0,
+            0,
+            CREDITS_SCREEN_WIDTH,
+            CREDITS_SCREEN_HEIGHT,
+            credits.program.exit_clear_color,
+        );
+    } else {
+        let palette_set = sources
+            .palette_sets
+            .get(usize::from(credits.scene_index & 0x03))
+            .context("credits palette set missing")?;
+        let bg_palette = &palette_set[0];
+        let border_palette = &palette_set[1];
+        let text_palette = &palette_set[2];
+        fill_visible_credits_rect(
+            &mut data,
+            0,
+            0,
+            CREDITS_SCREEN_WIDTH,
+            CREDITS_SCREEN_HEIGHT,
+            bg_palette[0],
+        );
+        draw_visible_credits_mon_strip(sources, credits, bg_palette, &mut data)?;
+        fill_visible_credits_rect(
+            &mut data,
+            0,
+            5 * SOURCE_TILE_SIZE,
+            CREDITS_SCREEN_WIDTH,
+            12 * SOURCE_TILE_SIZE,
+            text_palette[0],
+        );
+        draw_visible_credits_border_rows(sources, border_palette, &mut data);
+        draw_visible_credits_text(sources, credits, text_palette, &mut data)?;
+        if credits.displayed_show_the_end {
+            draw_visible_credits_the_end(sources, text_palette, &mut data);
+        }
+        apply_visible_credits_line_scroll(credits, &mut data);
     }
-    apply_visible_credits_line_scroll(credits, &mut data);
     let mut image = Image::new(
         Extent3d {
             width: CREDITS_SCREEN_WIDTH as u32,
@@ -3425,33 +3482,30 @@ fn draw_visible_credits_text(
     palette: &Palette,
     target: &mut [u8],
 ) -> Result<()> {
-    for line in &credits.lines {
-        if line.token == "COPYRIGHT" {
-            draw_visible_credits_copyright(sources, credits, palette, target);
+    for (row, displayed) in &credits.displayed_text_rows {
+        if displayed.token == "COPYRIGHT" {
+            draw_visible_credits_copyright(sources, *row, palette, target);
             continue;
         }
-        for (line_offset, tile_ids) in line.tiles.iter().enumerate() {
-            let mut draw_x = 0;
-            let draw_y = (6 + usize::from(line.line_index) * 2) * SOURCE_TILE_SIZE
-                + line_offset * SOURCE_TILE_SIZE;
-            for tile_id in tile_ids {
-                if *tile_id != 0x7f {
-                    let levels = sources.font.levels.get(tile_id).with_context(|| {
-                        format!("credits font tile 0x{tile_id:02x} unavailable")
-                    })?;
-                    blit_visible_credits_levels(
-                        target,
-                        levels,
-                        SOURCE_TILE_SIZE,
-                        SOURCE_TILE_SIZE,
-                        draw_x,
-                        draw_y,
-                        palette,
-                        false,
-                    );
-                }
-                draw_x += SOURCE_TILE_SIZE;
+        let mut draw_x = 0;
+        let draw_y = row * SOURCE_TILE_SIZE;
+        for tile_id in &displayed.tiles {
+            if *tile_id != 0x7f {
+                let levels = sources.font.levels.get(tile_id).with_context(|| {
+                    format!("credits font tile 0x{tile_id:02x} unavailable")
+                })?;
+                blit_visible_credits_levels(
+                    target,
+                    levels,
+                    SOURCE_TILE_SIZE,
+                    SOURCE_TILE_SIZE,
+                    draw_x,
+                    draw_y,
+                    palette,
+                    false,
+                );
             }
+            draw_x += SOURCE_TILE_SIZE;
         }
     }
     Ok(())
@@ -3459,19 +3513,11 @@ fn draw_visible_credits_text(
 
 fn draw_visible_credits_copyright(
     sources: &CreditsRenderSources,
-    credits: &VisibleCreditsScreen,
+    row: usize,
     palette: &Palette,
     target: &mut [u8],
 ) {
-    let draw_y = (6 + usize::from(
-        credits
-            .lines
-            .iter()
-            .find(|line| line.token == "COPYRIGHT")
-            .map(|line| line.line_index)
-            .unwrap_or(0),
-    ) * 2)
-        * SOURCE_TILE_SIZE;
+    let draw_y = row * SOURCE_TILE_SIZE;
     for (tile_index, levels) in sources.copyright_tiles.iter().enumerate() {
         blit_visible_credits_levels(
             target,
@@ -3685,11 +3731,11 @@ fn visible_credits_gray_level(red: u8, green: u8, blue: u8, alpha: u8) -> u8 {
         return 0;
     }
     let value = ((u16::from(red) + u16::from(green) + u16::from(blue)) / 3) as u8;
-    if value > 213 {
+    if value >= 213 {
         0
-    } else if value > 160 {
+    } else if value >= 128 {
         1
-    } else if value > 96 {
+    } else if value >= 43 {
         2
     } else {
         3
@@ -3759,7 +3805,10 @@ fn apply_visible_credits_line_scroll(credits: &VisibleCreditsScreen, target: &mu
     if shift == 0 {
         return;
     }
-    for (start, count) in [(0x1f_usize, 8_usize), (0x87_usize, 8_usize)] {
+    // Credits_LYOverride writes eight consecutive entries, but the final SCX
+    // value remains latched for the following scanline. The ROM therefore
+    // scrolls nine visible lines at each border (31..=39 and 135..=143).
+    for (start, count) in [(0x1f_usize, 9_usize), (0x87_usize, 9_usize)] {
         for y in start..(start + count).min(CREDITS_SCREEN_HEIGHT) {
             for x in 0..CREDITS_SCREEN_WIDTH {
                 let source_x = (x as i16 + shift).rem_euclid(CREDITS_SCREEN_WIDTH as i16) as usize;
@@ -3934,7 +3983,7 @@ fn visible_credits_screen_lines(credits: &VisibleCreditsScreen) -> Vec<String> {
         .iter()
         .map(|line| line.text.clone())
         .collect::<Vec<_>>();
-    if credits.show_the_end || credits.awaiting_exit {
+    if credits.show_the_end {
         lines.push("THE END".to_string());
     }
     lines
@@ -4287,7 +4336,17 @@ fn render_playfield(
         fixed_battle_canvases,
     } = entity_queries;
     let mut queued_despawns = std::collections::HashSet::new();
-    if let Some(intro) = runtime_shell.intro_screen.clone() {
+    if let Some(current_intro) = runtime_shell.intro_screen.clone() {
+        let mut intro = runtime_shell
+            .intro_display_screen
+            .clone()
+            .unwrap_or_else(|| current_intro.clone());
+        // VBlank has already copied hSCX, palettes, BG data, and shadow OAM
+        // from the preceding CPU step. The LCD STAT callback runs later in
+        // the visible frame and reads the LY table and callback pointer after
+        // the current scene step has updated them.
+        intro.ly_overrides = current_intro.ly_overrides;
+        intro.lcdc_pointer = current_intro.lcdc_pointer;
         let shell_render_key = shell_render_key(&runtime_shell);
         if rendered.title_active && rendered.shell_render_key == Some(shell_render_key) {
             return;

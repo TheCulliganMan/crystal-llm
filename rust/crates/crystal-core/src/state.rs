@@ -100,8 +100,9 @@ pub struct GameState {
     pub battle_active_party_index: Option<usize>,
     pub battle_active_enemy_party_index: Option<usize>,
     pub battle_rewarded_enemy_party_indices: BTreeSet<usize>,
+    /// Exact party-bit projection of `wEvolvableFlags` during battle.
+    pub battle_evolvable_party_indices: BTreeSet<usize>,
     pub battle_escape_attempts: u8,
-    pub battle_player_stat_drop_guard_turns: u8,
     pub battle_pay_day_money: u32,
     pub battle_amulet_coin_active: bool,
     pub wild_encounter_cooldown: u8,
@@ -119,7 +120,10 @@ pub struct GameState {
     pub previous_warp_index: Option<u16>,
     pub backup_warp_map_name: Option<String>,
     pub backup_warp_index: Option<u16>,
-    pub last_spawn_identifier: Option<u16>,
+    /// Exact map constant represented by `wLastSpawnMapGroup` and
+    /// `wLastSpawnMapNumber`. This may name a map absent from `SpawnPoints`;
+    /// Teleport and whiteout perform that table lookup only when used.
+    pub last_spawn_map_constant: Option<String>,
     pub kenji_break_timer: u8,
     pub player_palette_id: u8,
     pub map_block_overrides: BTreeMap<String, BTreeMap<(u16, u16), u16>>,
@@ -207,8 +211,8 @@ impl<'de> Deserialize<'de> for GameState {
             battle_active_party_index: Option<usize>,
             battle_active_enemy_party_index: Option<usize>,
             battle_rewarded_enemy_party_indices: BTreeSet<usize>,
+            battle_evolvable_party_indices: BTreeSet<usize>,
             battle_escape_attempts: u8,
-            battle_player_stat_drop_guard_turns: u8,
             battle_pay_day_money: u32,
             battle_amulet_coin_active: bool,
             wild_encounter_cooldown: u8,
@@ -227,7 +231,7 @@ impl<'de> Deserialize<'de> for GameState {
             backup_warp_map_name: Option<String>,
             #[serde(default)]
             backup_warp_index: Option<u16>,
-            last_spawn_identifier: Option<u16>,
+            last_spawn_map_constant: Option<String>,
             kenji_break_timer: u8,
             player_palette_id: u8,
             map_block_overrides: BTreeMap<String, BTreeMap<(u16, u16), u16>>,
@@ -300,8 +304,8 @@ impl<'de> Deserialize<'de> for GameState {
             battle_active_party_index: raw.battle_active_party_index,
             battle_active_enemy_party_index: raw.battle_active_enemy_party_index,
             battle_rewarded_enemy_party_indices: raw.battle_rewarded_enemy_party_indices,
+            battle_evolvable_party_indices: raw.battle_evolvable_party_indices,
             battle_escape_attempts: raw.battle_escape_attempts,
-            battle_player_stat_drop_guard_turns: raw.battle_player_stat_drop_guard_turns,
             battle_pay_day_money: raw.battle_pay_day_money,
             battle_amulet_coin_active: raw.battle_amulet_coin_active,
             wild_encounter_cooldown: raw.wild_encounter_cooldown,
@@ -316,7 +320,7 @@ impl<'de> Deserialize<'de> for GameState {
             previous_warp_index: raw.previous_warp_index,
             backup_warp_map_name: raw.backup_warp_map_name,
             backup_warp_index: raw.backup_warp_index,
-            last_spawn_identifier: raw.last_spawn_identifier,
+            last_spawn_map_constant: raw.last_spawn_map_constant,
             kenji_break_timer: raw.kenji_break_timer,
             player_palette_id: raw.player_palette_id,
             map_block_overrides: raw.map_block_overrides,
@@ -413,8 +417,8 @@ impl GameState {
             battle_active_party_index: None,
             battle_active_enemy_party_index: None,
             battle_rewarded_enemy_party_indices: BTreeSet::new(),
+            battle_evolvable_party_indices: BTreeSet::new(),
             battle_escape_attempts: 0,
-            battle_player_stat_drop_guard_turns: 0,
             battle_pay_day_money: 0,
             battle_amulet_coin_active: false,
             wild_encounter_cooldown: 0,
@@ -429,7 +433,7 @@ impl GameState {
             previous_warp_index: None,
             backup_warp_map_name: None,
             backup_warp_index: None,
-            last_spawn_identifier: None,
+            last_spawn_map_constant: None,
             kenji_break_timer: 0,
             player_palette_id: 0,
             map_block_overrides: BTreeMap::new(),
@@ -8667,6 +8671,12 @@ impl GameState {
                         .to_string(),
                 );
             }
+            if !self.battle_evolvable_party_indices.is_empty() {
+                return Err(
+                    "battle_evolvable_party_indices cannot be saved without an active battle"
+                        .to_string(),
+                );
+            }
             return Ok(());
         };
 
@@ -8704,6 +8714,18 @@ impl GameState {
                 ));
             }
         }
+        for index in &self.battle_evolvable_party_indices {
+            if *index >= PARTY_SIZE {
+                return Err(format!(
+                    "battle_evolvable_party_indices contains {index}, outside party range 0..{PARTY_SIZE}"
+                ));
+            }
+            if self.storage.party.pokemon[*index].is_none() {
+                return Err(format!(
+                    "battle_evolvable_party_indices contains empty party slot {index}"
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -8712,12 +8734,6 @@ impl GameState {
             if self.battle_escape_attempts != 0 {
                 return Err(
                     "battle_escape_attempts cannot be saved without an active battle".to_string(),
-                );
-            }
-            if self.battle_player_stat_drop_guard_turns != 0 {
-                return Err(
-                    "battle_player_stat_drop_guard_turns cannot be saved without an active battle"
-                        .to_string(),
                 );
             }
             if self.battle_pay_day_money != 0 {
@@ -8897,6 +8913,7 @@ impl GameState {
                     "dig_warp_index {index} cannot be saved without dig_warp_map_name"
                 ));
             }
+            (_, Some(0)) => return Err("dig_warp_index cannot be zero".to_string()),
             _ => {}
         }
         validate_optional_script_runtime_token(
@@ -10349,7 +10366,6 @@ mod tests {
         assert_eq!(state.battle_active_enemy_party_index, None);
         assert!(state.battle_rewarded_enemy_party_indices.is_empty());
         assert_eq!(state.battle_escape_attempts, 0);
-        assert_eq!(state.battle_player_stat_drop_guard_turns, 0);
         assert_eq!(state.wild_encounter_cooldown, 0);
         assert_eq!(state.repel_steps_remaining, 0);
         assert_eq!(state.active_repel_item, None);
@@ -10962,6 +10978,12 @@ mod tests {
         state.dig_warp_map_name = Some("AzaleaTown".to_string());
         state.dig_warp_index = Some(2);
         assert_eq!(state.validate_saved_state(), Ok(()));
+
+        state.dig_warp_index = Some(0);
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("dig_warp_index cannot be zero".to_string())
+        );
 
         state = GameState::default();
         state
@@ -12612,18 +12634,6 @@ mod tests {
         assert_eq!(
             state.validate_saved_state(),
             Err("battle_escape_attempts cannot be saved without an active battle".to_string())
-        );
-
-        state = GameState {
-            battle_player_stat_drop_guard_turns: 1,
-            ..GameState::default()
-        };
-        assert_eq!(
-            state.validate_saved_state(),
-            Err(
-                "battle_player_stat_drop_guard_turns cannot be saved without an active battle"
-                    .to_string()
-            )
         );
 
         state = GameState {

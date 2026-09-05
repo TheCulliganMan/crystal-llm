@@ -95,7 +95,11 @@ fn prepare_visible_battle_entry_with_music_reset(
         enemy_target_pixels: enemy_pixels,
         enemy_frames_until_step: 0,
     });
-    let player_name = active_player.pokemon.nickname.as_str();
+    let player_send_out_message = visible_player_send_out_message(
+        &snapshot,
+        active_player.index,
+        true,
+    )?;
     match &battle.kind {
         crate::RuntimeBattleKind::Trainer { trainer_name, .. } => {
             runtime_shell
@@ -107,7 +111,7 @@ fn prepare_visible_battle_entry_with_music_reset(
             ));
             runtime_shell
                 .battle_messages
-                .push_back(format!("Go! {player_name}!"));
+                .push_back(player_send_out_message.clone());
         }
         crate::RuntimeBattleKind::Wild { .. } | crate::RuntimeBattleKind::StaticWild { .. } => {
             runtime_shell
@@ -116,7 +120,7 @@ fn prepare_visible_battle_entry_with_music_reset(
             if battle.battle_type != "BATTLETYPE_TUTORIAL" {
                 runtime_shell
                     .battle_messages
-                    .push_back(format!("Go! {player_name}!"));
+                    .push_back(player_send_out_message.clone());
             }
         }
     }
@@ -2617,27 +2621,6 @@ fn apply_visible_heal_party(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
         "special heal outcome={:?} checksum={:?}",
         special.outcome.effect, special.state_checksum
     ));
-    Ok(())
-}
-
-fn warp_visible_to_spawn_point(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    record_visible_runtime_action(runtime_shell, "special:warp_to_spawn_point")?;
-    let special = runtime_shell.shell.warp_to_spawn_point()?;
-    runtime_shell.last_audio_events.push(format!(
-        "spawn warp outcome={:?} checksum={:?}",
-        special.outcome.effect, special.state_checksum
-    ));
-    if runtime_shell
-        .shell
-        .snapshot()?
-        .script_events
-        .pending_script_warp
-        .is_some()
-    {
-        execute_visible_pending_script_warp(runtime_shell)?;
-    } else {
-        settle_visible_overworld_arrival(runtime_shell, "spawn_warp")?;
-    }
     Ok(())
 }
 
@@ -7745,7 +7728,13 @@ fn sync_runtime_title_music(mut runtime_shell: ResMut<BevyRuntimeShell>) {
     let Some(title) = runtime_shell.title_menu.as_ref() else {
         return;
     };
-    if runtime_shell.credits_screen.is_some() || matches!(title.phase, VisibleTitlePhase::Entrance)
+    if runtime_shell.credits_screen.is_some()
+        || matches!(
+            title.source_phase(),
+            VisibleTitlePhase::Entrance
+                | VisibleTitlePhase::MainMenu
+                | VisibleTitlePhase::Teardown
+        )
     {
         return;
     }
@@ -8200,7 +8189,7 @@ fn defer_visible_party_index_cry_after_send_out(
         runtime_shell,
         slot.pokemon.species.id.clone(),
         reason,
-        visible_player_send_out_message(&snapshot, party_index)?,
+        visible_player_send_out_message(&snapshot, party_index, false)?,
     );
     runtime_shell.battle_enemy_hp_at_player_send_out = snapshot
         .battle
@@ -8212,6 +8201,7 @@ fn defer_visible_party_index_cry_after_send_out(
 fn visible_player_send_out_message(
     snapshot: &RuntimeShellSnapshot,
     party_index: usize,
+    battle_has_just_started: bool,
 ) -> Result<String> {
     let slot = snapshot
         .party
@@ -8223,13 +8213,27 @@ fn visible_player_send_out_message(
         .battle
         .as_ref()
         .context("player send-out text requires an active battle")?;
+    let nickname = &slot.pokemon.nickname;
+    if snapshot.link_session.link_mode != 0 && !battle_has_just_started {
+        return Ok(format!("Go! {nickname}!"));
+    }
     let enemy = &battle.enemy_pokemon;
-    let percent = if enemy.hp == 0 || enemy.max_hp == 0 {
+    let percent = if enemy.hp == 0 {
         100
     } else {
-        u32::from(enemy.hp).saturating_mul(100) / u32::from(enemy.max_hp)
+        // SendOutMonText avoids a two-byte divisor by multiplying current HP
+        // by 25 and shifting max HP right twice before the four-byte Divide.
+        // The truncation happens before division, so HP * 100 / max HP is not
+        // equivalent at the dialogue thresholds.
+        let divisor = enemy.max_hp >> 2;
+        anyhow::ensure!(
+            divisor != 0,
+            "SendOutMonText would not terminate with enemy max HP {}",
+            enemy.max_hp
+        );
+        // The routine branches on hQuotient + 3, not the wider quotient.
+        ((u32::from(enemy.hp) * 25) / u32::from(divisor)) as u8
     };
-    let nickname = &slot.pokemon.nickname;
     Ok(match percent {
         70.. => format!("Go! {nickname}!"),
         40..=69 => format!("Do it! {nickname}!"),
@@ -8827,11 +8831,10 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
         title.save_path.hash(&mut hasher);
         title.cursor.surface_id.hash(&mut hasher);
         title.cursor.option_index.hash(&mut hasher);
-        title.phase.hash(&mut hasher);
-        title.frame.hash(&mut hasher);
-        title.main_menu_frame.hash(&mut hasher);
-        title.scx.hash(&mut hasher);
-        title.title_timer.hash(&mut hasher);
+        title.source_phase().hash(&mut hasher);
+        title.source_suicune_frame().hash(&mut hasher);
+        title.source_scx().hash(&mut hasher);
+        title.source_title_timer().hash(&mut hasher);
         title.crystal_oam_target.hash(&mut hasher);
         title.crystal_initial_y.hash(&mut hasher);
         title.suicune_frames.hash(&mut hasher);
@@ -8860,6 +8863,34 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
             .hash(&mut hasher);
         title.presentation_machine.memory.hash(&mut hasher);
         title.presentation_machine.values.hash(&mut hasher);
+        if let Some(cursor) = &title.title_teardown {
+            true.hash(&mut hasher);
+            cursor.subprogram.hash(&mut hasher);
+            cursor.phase.hash(&mut hasher);
+            cursor.operation_index.hash(&mut hasher);
+            cursor.end_operation_index.hash(&mut hasher);
+            cursor.wait_frames_remaining.hash(&mut hasher);
+        } else {
+            false.hash(&mut hasher);
+        }
+        if let Some(interpreter) = &title.main_menu_entry_interpreter {
+            true.hash(&mut hasher);
+            interpreter.entrypoint.hash(&mut hasher);
+            interpreter.block.hash(&mut hasher);
+            interpreter.operation_index.hash(&mut hasher);
+        } else {
+            false.hash(&mut hasher);
+        }
+        if let Some(interpreter) = &title.main_menu_phase_interpreter {
+            true.hash(&mut hasher);
+            interpreter.subprogram.hash(&mut hasher);
+            interpreter.phase.hash(&mut hasher);
+            interpreter.operation_index.hash(&mut hasher);
+            interpreter.current_label.hash(&mut hasher);
+        } else {
+            false.hash(&mut hasher);
+        }
+        title.main_menu_waiting_for_input.hash(&mut hasher);
         title.joypad_mask.hash(&mut hasher);
     } else {
         false.hash(&mut hasher);
@@ -9854,7 +9885,7 @@ fn spawn_title_screen(
         )?;
         return Ok(());
     }
-    if visible_title_main_menu_ready(title) {
+    if visible_title_main_menu_active(title) {
         let frame = load_visible_title_main_menu_frame(runtime_shell, title, rendered_art, images)?;
         commit_presented_fullscreen_frame(
             commands,

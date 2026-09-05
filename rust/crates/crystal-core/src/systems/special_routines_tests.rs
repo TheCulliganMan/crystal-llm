@@ -707,7 +707,6 @@ fn item_data(id: &str) -> Item {
         battle_capture_ball: None,
         battle_focus_energy: None,
         battle_stat_drop_guard: None,
-        battle_stat_drop_guard_turns: None,
         confusion_heal: None,
         repel_steps: None,
         escape_rope_mode: None,
@@ -1569,10 +1568,10 @@ fn heal_party_restores_hp_status_and_pp_from_exact_move_catalog() {
             .expect("party pokemon");
         assert_eq!(pokemon.hp, pokemon.max_hp);
         assert_eq!(pokemon.status, None);
-        assert_eq!(pokemon.sleep_turns, 3);
+        assert_eq!(pokemon.sleep_turns, 0);
         assert_eq!(pokemon.confusion_turns, 2);
         assert!(pokemon.focus_energy);
-        assert_eq!(pokemon.moves[0].current_pp, 35);
+        assert_eq!(pokemon.moves[0].current_pp, 42);
         assert_eq!(pokemon.moves[1].current_pp, 40);
         assert_eq!(
             state.party.pokemon[slot]
@@ -1605,7 +1604,7 @@ fn special_routines_reject_unknown_or_case_changed_routines_without_mutation() {
 }
 
 #[test]
-fn heal_party_preserves_unknown_move_pp_and_heals_known_fields() {
+fn heal_party_rejects_unknown_move_without_partial_healing() {
     let mut state = GameState::default();
     let mut pokemon = pokemon("CHIKORITA");
     pokemon.moves[0].name = "tackle".to_string();
@@ -1614,21 +1613,18 @@ fn heal_party_preserves_unknown_move_pp_and_heals_known_fields() {
         .register_capture_in_box(0, pokemon)
         .expect("store");
     state.sync_party_from_storage();
-    let outcome = apply_special_routine(&mut state, &moves(), "HealParty").expect("heal party");
+    let before = state.clone();
 
     assert_eq!(
-        outcome.effect,
-        SpecialRoutineEffect::HealParty {
-            healed_slots: vec![0]
+        apply_special_routine(&mut state, &moves(), "HealParty")
+            .expect_err("unknown party move must not receive a partial heal"),
+        SpecialRoutineError::UnknownMove {
+            routine: "HealParty".to_string(),
+            party_slot: 0,
+            move_id: "tackle".to_string(),
         }
     );
-    let healed = state.storage.party.pokemon[0]
-        .as_ref()
-        .expect("party Pokemon");
-    assert_eq!(healed.hp, healed.max_hp);
-    assert_eq!(healed.status, None);
-    assert_eq!(healed.moves[0].current_pp, 1);
-    assert_eq!(healed.moves[1].current_pp, 40);
+    assert_eq!(state, before);
 }
 
 #[test]
@@ -11550,7 +11546,7 @@ fn give_odd_egg_rejects_full_party_without_pc_fallback() {
 #[test]
 fn warp_to_spawn_point_only_clears_runtime_status_bits() {
     let mut state = GameState::default();
-    state.last_spawn_identifier = Some(21);
+    state.last_spawn_map_constant = Some("GOLDENROD_CITY".to_string());
     state.overworld = OverworldMemory::Active {
         map_name: "Route29".to_string(),
         tile: TilePosition::new(7, 4),
@@ -11596,7 +11592,10 @@ fn warp_to_spawn_point_only_clears_runtime_status_bits() {
         state.flags.is_engine_flag_set("ENGINE_SAFARI_ZONE"),
         Ok(false)
     );
-    assert_eq!(state.last_spawn_identifier, Some(21));
+    assert_eq!(
+        state.last_spawn_map_constant.as_deref(),
+        Some("GOLDENROD_CITY")
+    );
     assert_eq!(state.overworld, before_overworld);
     assert_eq!(
         state.script_runtime.pending_script_warp,
@@ -12106,6 +12105,33 @@ fn runtime_spawn_point_catalog_issues_reject_reserved_pack_prefix_tokens() {
                 identifier: 1,
             },
         ],
+    );
+}
+
+#[test]
+fn runtime_spawn_point_catalog_rejects_identifiers_past_num_spawns() {
+    let spawn_points = [(
+        "28".to_string(),
+        RuntimeSpawnPointRef {
+            identifier: 28,
+            map_constant: "ROUTE_29".to_string(),
+            map_name: "Route29".to_string(),
+            group_name: "GROUP_ROUTE_29".to_string(),
+            ..spawn_point(28, "ROUTE_29", 1, 1, 0, 0)
+        },
+    )]
+    .into_iter()
+    .collect();
+    let runtime_map_names = [("ROUTE_29".to_string(), "Route29".to_string())]
+        .into_iter()
+        .collect();
+
+    assert_eq!(
+        runtime_spawn_point_catalog_issues(&spawn_points, &runtime_map_names),
+        vec![RuntimeSpawnPointCatalogIssue::IdentifierOutOfRange {
+            key: "28".to_string(),
+            identifier: 28,
+        }]
     );
 }
 

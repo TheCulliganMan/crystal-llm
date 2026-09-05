@@ -1112,6 +1112,12 @@ export function exportStoryEvents(): void {
     "bug_contest",
     "contest.asm",
   );
+  const forcedMovementScriptsPath = path.join(
+    getDisassemblyRoot(),
+    "engine",
+    "events",
+    "forced_movement.asm",
+  );
   const clearSpritesPath = path.join(
     getDisassemblyRoot(),
     "home",
@@ -1161,6 +1167,22 @@ export function exportStoryEvents(): void {
           "BugCatchingContestIsOverText",
         ],
         standardTargets: ["BugContestResultsWarpScript"],
+      },
+      {
+        filePath: forcedMovementScriptsPath,
+        roots: ["Script_ForcedMovement"],
+        reachableLabels: [
+          "Script_ForcedMovement",
+          ".up@Script_ForcedMovement",
+          ".down@Script_ForcedMovement",
+          ".right@Script_ForcedMovement",
+          ".left@Script_ForcedMovement",
+          ".MovementData_up@Script_ForcedMovement",
+          ".MovementData_down@Script_ForcedMovement",
+          ".MovementData_right@Script_ForcedMovement",
+          ".MovementData_left@Script_ForcedMovement",
+        ],
+        standardTargets: [],
       },
     ],
     [

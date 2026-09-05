@@ -988,6 +988,38 @@ fn exported_radius_one_walker_rejects_its_adjacent_asm_boundary() {
 }
 
 #[test]
+fn entering_pokecenter_records_the_raw_source_even_without_a_spawn_row() {
+    let mut data = AssetRoot::new(repository_root_for_tests())
+        .load_base_game_data()
+        .expect("load base game data");
+    let warp = data
+        .map_module("CherrygroveCity")
+        .expect("load Cherrygrove City")
+        .events
+        .warps
+        .iter()
+        .find(|warp| warp.target_map_constant == "CHERRYGROVE_POKECENTER_1F")
+        .cloned()
+        .expect("Cherrygrove Pokecenter warp");
+    data.runtime_spawn_points.remove("15");
+    let mut state = GameState::default();
+    let trigger = WarpTrigger {
+        map_name: "CherrygroveCity".to_string(),
+        tile: warp_tile_position_checked(&warp).expect("warp coordinate"),
+        permission: 0x71,
+        warp,
+    };
+
+    data.resolve_warp_transition_with_state(&mut state, &trigger)
+        .expect("resolve Pokecenter entry");
+
+    assert_eq!(
+        state.last_spawn_map_constant.as_deref(),
+        Some("CHERRYGROVE_CITY")
+    );
+}
+
+#[test]
 fn warp_transition_requires_declared_target_map_constant() {
     let root = repository_root_for_tests();
     let data = AssetRoot::new(root)
@@ -1901,7 +1933,6 @@ fn modpack_items_require_explicit_script_name() {
         battle_capture_ball: None,
         battle_focus_energy: None,
         battle_stat_drop_guard: None,
-        battle_stat_drop_guard_turns: None,
         confusion_heal: None,
         repel_steps: None,
         escape_rope_mode: None,

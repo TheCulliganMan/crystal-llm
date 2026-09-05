@@ -192,6 +192,53 @@ SharedScript:
     );
   });
 
+  it("exports the exact Whirlpool forced-movement script closure", () => {
+    const root = path.resolve(__dirname, "../../../../vendor/pokecrystal");
+    const standardSource = path.join(root, "engine/events/std_scripts.asm");
+    const forcedMovementSource = path.join(
+      root,
+      "engine/events/forced_movement.asm",
+    );
+    const reachableLabels = [
+      "Script_ForcedMovement",
+      ".up@Script_ForcedMovement",
+      ".down@Script_ForcedMovement",
+      ".right@Script_ForcedMovement",
+      ".left@Script_ForcedMovement",
+      ".MovementData_up@Script_ForcedMovement",
+      ".MovementData_down@Script_ForcedMovement",
+      ".MovementData_right@Script_ForcedMovement",
+      ".MovementData_left@Script_ForcedMovement",
+    ];
+    const payload = parseStandardScriptsFile(standardSource, [], [
+      {
+        filePath: forcedMovementSource,
+        roots: ["Script_ForcedMovement"],
+        reachableLabels,
+        standardTargets: [],
+      },
+    ]);
+
+    expect(payload.globalScriptRoots).toEqual(["Script_ForcedMovement"]);
+    expect(Object.keys(payload.scripts).filter((label) => reachableLabels.includes(label))).toEqual(
+      reachableLabels,
+    );
+    expect(payload.scripts.Script_ForcedMovement.slice(0, 5)).toEqual([
+      { command: "readvar", args: ["VAR_FACING"] },
+      { command: "ifequal", args: ["DOWN", ".down"] },
+      { command: "ifequal", args: ["UP", ".up"] },
+      { command: "ifequal", args: ["LEFT", ".left"] },
+      { command: "ifequal", args: ["RIGHT", ".right"] },
+    ]);
+    expect(payload.scripts[".MovementData_right@Script_ForcedMovement"]).toEqual([
+      { command: "step_dig", args: ["16"] },
+      { command: "turn_in", args: ["LEFT"] },
+      { command: "step_dig", args: ["16"] },
+      { command: "turn_head", args: ["LEFT"] },
+      { command: "step_end", args: [] },
+    ]);
+  });
+
   it("exports Fly's exact external CPU helpers as definition-only bodies", () => {
     const root = path.resolve(__dirname, "../../../../vendor/pokecrystal");
     const standardSource = path.join(root, "engine/events/std_scripts.asm");

@@ -16,7 +16,7 @@ use crate::state::GameState;
 
 const SAVE_MAGIC: &[u8; 12] = b"CRYSTALSAVE\0";
 pub const SAVE_EXTENSION: &str = "crystalsave";
-pub const SAVE_FORMAT_VERSION: u16 = 23;
+pub const SAVE_FORMAT_VERSION: u16 = 24;
 const SAVE_VERSION_OFFSET: usize = SAVE_MAGIC.len();
 const SAVE_PAYLOAD_LENGTH_OFFSET: usize = SAVE_VERSION_OFFSET + 2;
 const SAVE_PAYLOAD_HASH_OFFSET: usize = SAVE_PAYLOAD_LENGTH_OFFSET + 4;

@@ -29,6 +29,37 @@ fn intro_scanline_scroll_moves_only_the_background_rows() {
 }
 
 #[test]
+fn intro_cleanup_waits_on_the_source_white_lcd_surface() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    skip_visible_intro_screen(&mut runtime_shell, GameButton::Start)
+        .expect("begin CrystalIntro cleanup");
+    let intro = runtime_shell
+        .intro_screen
+        .as_ref()
+        .expect("intro remains active for WaitBGMap");
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let mut rendered_art = RenderedTilesetArt::default();
+    let mut images = Assets::<Image>::default();
+    let frame = intro_scene_frame_for_art(
+        &mut rendered_art,
+        &asset_root,
+        intro,
+        &mut images,
+    )
+    .expect("render CrystalIntro cleanup wait");
+    let data = &images.get(&frame.handle).expect("cleanup image").data;
+
+    assert!(
+        data.chunks_exact(4).all(|pixel| pixel == [u8::MAX; 4]),
+        "ClearBGPalettes must expose an opaque white LCD throughout WaitBGMap"
+    );
+}
+
+#[test]
 fn intro_grass_vram_request_changes_tiles_from_exported_resource_table() {
     let runtime_shell = core_modular_title_shell_for_test();
     let program = runtime_shell.runtime.title_presentation_program();
@@ -73,6 +104,50 @@ fn intro_grass_vram_request_changes_tiles_from_exported_resource_table() {
     .expect("render third grass frame");
     let third_data = &images.get(&third.handle).expect("third grass image").data;
     assert_ne!(first_data, *third_data);
+}
+
+#[test]
+fn intro_scene16_tilemap_xor_changes_only_the_exported_tile_domain() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let program = runtime_shell.runtime.title_presentation_program();
+    let mut intro = runtime_shell.intro_screen.clone().expect("intro screen");
+    intro.jumptable_index = 15;
+    apply_visible_intro_background_binding(&mut intro, program).expect("scene 16 background");
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let mut rendered_art = RenderedTilesetArt::default();
+    let mut images = Assets::<Image>::default();
+
+    let first = intro_scene_frame_for_art(
+        &mut rendered_art,
+        &asset_root,
+        &intro,
+        &mut images,
+    )
+    .expect("render first colored Suicune frame");
+    let first_data = images
+        .get(&first.handle)
+        .expect("first colored Suicune image")
+        .data
+        .clone();
+
+    intro.tilemap_xor_mask = 8;
+    let second = intro_scene_frame_for_art(
+        &mut rendered_art,
+        &asset_root,
+        &intro,
+        &mut images,
+    )
+    .expect("render XOR-swapped colored Suicune frame");
+    let second_data = &images
+        .get(&second.handle)
+        .expect("second colored Suicune image")
+        .data;
+    assert_ne!(first_data, *second_data);
 }
 
 #[test]
@@ -717,8 +792,18 @@ fn native_title_screen_frame_uses_title_palettes_and_window_layer() {
     );
 
     let mut main_title = title.clone();
-    main_title.phase = VisibleTitlePhase::MainMenu;
-    main_title.scx = 0;
+    main_title
+        .presentation_machine
+        .memory
+        .insert("wJumptableIndex".to_string(), 0x82);
+    main_title
+        .presentation_machine
+        .memory
+        .insert("wTitleScreenSelectedOption".to_string(), 0);
+    main_title
+        .presentation_machine
+        .memory
+        .insert("hSCX".to_string(), 0);
     let main_frame = load_title_screen_frame(&runtime_shell.asset_root, &main_title, &mut images)
         .expect("render title main frame");
     let main_data = images
@@ -733,6 +818,30 @@ fn native_title_screen_frame_uses_title_palettes_and_window_layer() {
 }
 
 #[test]
+fn title_teardown_renders_the_source_cleared_palette_surface() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    finish_and_drain_visible_intro_for_test(&mut runtime_shell, "test")
+        .expect("finish intro");
+    advance_visible_title_to_press_start(&mut runtime_shell);
+    press_visible_title_confirm_button(&mut runtime_shell, GameButton::Start)
+        .expect("start title teardown");
+    let title = runtime_shell.title_menu.as_ref().expect("title menu");
+    assert!(matches!(title.source_phase(), VisibleTitlePhase::Teardown));
+
+    let mut images = Assets::<Image>::default();
+    let frame = load_title_screen_frame(&runtime_shell.asset_root, title, &mut images)
+        .expect("render title teardown");
+    let image = images.get(&frame.handle).expect("teardown image");
+    assert!(
+        image
+            .data
+            .chunks_exact(4)
+            .all(|pixel| pixel == [255, 255, 255, 255]),
+        "ClearPalettes must expose a fully white LCD surface throughout the timed title teardown"
+    );
+}
+
+#[test]
 fn native_title_layers_use_asm_scy_and_wy_coordinates() {
     let entrance_scroll = NativeTitleScroll::EntranceInterlaced(112);
     assert_eq!(entrance_scroll.at_scanline(0), 112);
@@ -742,9 +851,18 @@ fn native_title_layers_use_asm_scy_and_wy_coordinates() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     runtime_shell.intro_screen = None;
     let mut title = runtime_shell.title_menu.take().expect("title menu");
-    title.phase = VisibleTitlePhase::PressStart;
-    title.frame = 0;
-    title.scx = 0;
+    title
+        .presentation_machine
+        .memory
+        .insert("wJumptableIndex".to_string(), 2);
+    title
+        .presentation_machine
+        .values
+        .insert("title_suicune_frame".to_string(), 0);
+    title
+        .presentation_machine
+        .memory
+        .insert("hSCX".to_string(), 0);
 
     let logo = image::RgbaImage::from_pixel(160, 64, image::Rgba([0, 0, 0, 255]));
     let suicune = image::RgbaImage::from_pixel(128, 128, image::Rgba([0, 0, 0, 255]));
@@ -812,9 +930,18 @@ fn native_title_preserves_every_suicune_pixel_including_the_head() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     runtime_shell.intro_screen = None;
     let mut title = runtime_shell.title_menu.take().expect("title menu");
-    title.phase = VisibleTitlePhase::PressStart;
-    title.frame = 0;
-    title.scx = 0;
+    title
+        .presentation_machine
+        .memory
+        .insert("wJumptableIndex".to_string(), 2);
+    title
+        .presentation_machine
+        .values
+        .insert("title_suicune_frame".to_string(), 0);
+    title
+        .presentation_machine
+        .memory
+        .insert("hSCX".to_string(), 0);
     let mut images = Assets::<Image>::default();
     let source = image::open(
         runtime_shell
@@ -829,12 +956,18 @@ fn native_title_preserves_every_suicune_pixel_including_the_head() {
 
     let origin_x = 6 * SOURCE_TILE_SIZE;
     let origin_y = TITLE_SUICUNE_ASM_Y_TILE * SOURCE_TILE_SIZE - TITLE_BG_SCY;
-    for (phase, scx, label) in [
-        (VisibleTitlePhase::PressStart, 0, "settled"),
-        (VisibleTitlePhase::Entrance, 112, "entrance"),
+    for (scene, scx, label) in [
+        (2, 0, "settled"),
+        (0, 112, "entrance"),
     ] {
-        title.phase = phase;
-        title.scx = scx;
+        title
+            .presentation_machine
+            .memory
+            .insert("wJumptableIndex".to_string(), scene);
+        title
+            .presentation_machine
+            .memory
+            .insert("hSCX".to_string(), scx);
         let frame = load_title_screen_frame(&runtime_shell.asset_root, &title, &mut images)
             .expect("render title frame");
         let actual = &images.get(&frame.handle).expect("title image").data;
@@ -918,10 +1051,10 @@ fn native_title_crystal_pixels_respect_bg_window_priority() {
 
 #[test]
 fn native_title_suicune_uses_the_source_preincrement_frame_counter() {
-    let index = |ticks| native_title_suicune_frame_index(ticks, 0x18, 1, true);
+    let index = |counter| native_title_suicune_frame_index(counter, 0x18, 1, true);
     assert_eq!(index(0), 0);
     assert_eq!(index(1), 0);
-    assert_eq!(index(8), 0);
+    assert_eq!(index(8), 1);
     assert_eq!(index(9), 1);
     assert_eq!(index(17), 2);
     assert_eq!(index(25), 3);
@@ -933,8 +1066,14 @@ fn visible_title_screen_spawns_only_native_frame_without_status_text_overlay() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     runtime_shell.intro_screen = None;
     let mut title = runtime_shell.title_menu.clone().expect("title menu");
-    title.phase = VisibleTitlePhase::PressStart;
-    title.scx = 0;
+    title
+        .presentation_machine
+        .memory
+        .insert("wJumptableIndex".to_string(), 2);
+    title
+        .presentation_machine
+        .memory
+        .insert("hSCX".to_string(), 0);
     runtime_shell.title_menu = Some(title);
 
     let mut app = App::new();
@@ -963,13 +1102,16 @@ fn visible_title_screen_spawns_only_native_frame_without_status_text_overlay() {
 }
 
 #[test]
-fn title_main_menu_frame_uses_typescript_window_layout_without_title_overlay() {
+fn title_main_menu_frame_uses_source_window_layout_without_title_overlay() {
     let mut runtime_shell = core_modular_title_shell_for_test();
-    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    finish_and_drain_visible_intro_for_test(&mut runtime_shell, "test")
+        .expect("finish intro");
     advance_visible_title_to_press_start(&mut runtime_shell);
     open_visible_title_main_menu(&mut runtime_shell).expect("open main menu");
-    let mut title = runtime_shell.title_menu.clone().expect("title menu");
-    title.main_menu_frame = TITLE_MAIN_MENU_CURSOR_PERIOD;
+    let title = runtime_shell.title_menu.clone().expect("title menu");
+    assert_eq!(visible_title_main_menu_item_tile_y(&title, 0), 2);
+    assert_eq!(visible_title_main_menu_item_tile_y(&title, 1), 4);
+    assert_eq!(visible_title_main_menu_item_tile_y(&title, 2), 6);
     let mut images = Assets::<Image>::default();
     let mut rendered_art = RenderedTilesetArt::default();
 
@@ -1009,13 +1151,13 @@ fn title_main_menu_frame_uses_typescript_window_layout_without_title_overlay() {
 }
 
 #[test]
-fn title_main_menu_cursor_bobs_on_typescript_frame_period() {
+fn title_main_menu_static_cursor_does_not_move_between_redraws() {
     let mut runtime_shell = core_modular_title_shell_for_test();
-    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    finish_and_drain_visible_intro_for_test(&mut runtime_shell, "test")
+        .expect("finish intro");
     advance_visible_title_to_press_start(&mut runtime_shell);
     open_visible_title_main_menu(&mut runtime_shell).expect("open main menu");
     let mut title = runtime_shell.title_menu.clone().expect("title menu");
-    title.main_menu_frame = TITLE_MAIN_MENU_CURSOR_PERIOD;
     let mut images = Assets::<Image>::default();
     let mut rendered_art = RenderedTilesetArt::default();
 
@@ -1027,65 +1169,45 @@ fn title_main_menu_cursor_bobs_on_typescript_frame_period() {
         .expect("unbobbed image")
         .data
         .clone();
-    title.main_menu_frame = TITLE_MAIN_MENU_CURSOR_PERIOD + TITLE_MAIN_MENU_CURSOR_PERIOD / 2;
-    let bobbed =
+    title
+        .presentation_machine
+        .values
+        .insert("title_suicune_frame".to_string(), 24);
+    let redrawn =
         load_visible_title_main_menu_frame(&runtime_shell, &title, &mut rendered_art, &mut images)
-            .expect("render bobbed main menu");
-    let bobbed_data = images
-        .get(&bobbed.handle)
-        .expect("bobbed image")
+            .expect("redraw static main menu");
+    let redrawn_data = images
+        .get(&redrawn.handle)
+        .expect("redrawn image")
         .data
         .clone();
 
-    assert_ne!(
-        still_data, bobbed_data,
-        "MainMenu cursor should bob one pixel after half the 16-frame period"
-    );
-    assert_eq!(visible_title_main_menu_cursor_bob(0), 0);
     assert_eq!(
-        visible_title_main_menu_cursor_bob(TITLE_MAIN_MENU_CURSOR_PERIOD / 2),
-        TITLE_MAIN_MENU_CURSOR_OFFSET
-    );
-    assert_eq!(
-        visible_title_main_menu_cursor_bob(TITLE_MAIN_MENU_CURSOR_PERIOD),
-        0
+        still_data, redrawn_data,
+        "ASM STATICMENU_CURSOR must remain on its exact menu row across redraws"
     );
 }
 
 #[test]
-fn title_main_menu_fades_in_on_typescript_speed() {
+fn title_main_menu_draws_immediately_without_a_host_fade() {
     let mut runtime_shell = core_modular_title_shell_for_test();
-    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    finish_and_drain_visible_intro_for_test(&mut runtime_shell, "test")
+        .expect("finish intro");
     advance_visible_title_to_press_start(&mut runtime_shell);
     open_visible_title_main_menu(&mut runtime_shell).expect("open main menu");
-    let mut title = runtime_shell.title_menu.clone().expect("title menu");
+    let title = runtime_shell.title_menu.clone().expect("title menu");
     let mut images = Assets::<Image>::default();
     let mut rendered_art = RenderedTilesetArt::default();
 
-    title.main_menu_frame = 0;
-    let black =
+    let frame =
         load_visible_title_main_menu_frame(&runtime_shell, &title, &mut rendered_art, &mut images)
-            .expect("render initial fade frame");
-    let black_image = images.get(&black.handle).expect("initial fade image");
+            .expect("render source main menu frame");
+    let image = images.get(&frame.handle).expect("main menu image");
     assert_eq!(
-        &black_image.data[0..4],
-        &[0, 0, 0, 255],
-        "MainMenu starts with the TypeScript fade-in overlay fully black"
-    );
-
-    title.main_menu_frame = 11;
-    let clear =
-        load_visible_title_main_menu_frame(&runtime_shell, &title, &mut rendered_art, &mut images)
-            .expect("render cleared fade frame");
-    let clear_image = images.get(&clear.handle).expect("cleared fade image");
-    assert_eq!(
-        &clear_image.data[0..4],
+        &image.data[0..4],
         &[255, 255, 255, 255],
-        "MainMenu fade-in clears after repeated 24-alpha steps"
+        "ASM MainMenu draws its white cleared tilemap immediately"
     );
-    assert_eq!(visible_title_main_menu_fade_alpha(0), 255);
-    assert_eq!(visible_title_main_menu_fade_alpha(10), 15);
-    assert_eq!(visible_title_main_menu_fade_alpha(11), 0);
 }
 
 #[test]
@@ -1275,6 +1397,123 @@ fn intro_suicune_close_head_uses_its_asm_palette_banks() {
 }
 
 #[test]
+fn representative_intro_latched_scene_boundaries_match_the_asm_rom_oracle() {
+    use sha2::{Digest, Sha256};
+
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let sprite_bundle = crate::read_runtime_asset_to_string(
+        &asset_root
+            .runtime_assets()
+            .join("data/sprite_anim_bundle.json"),
+    )
+    .expect("read sprite animation bundle");
+    for (scene_index, frame_counter, expected_hash) in [
+        (
+            3,
+            128,
+            "62963d21aba81ca626213032883eb5c676e33403473cd6371d5df72f352a8669",
+        ),
+        (
+            7,
+            94,
+            "3ff9aac822a49c1e568358cb107784c9396e6fee8e719d7b614fba0c3302870f",
+        ),
+        (
+            9,
+            192,
+            "bf686eed7abce51c6e5df4569ea2fa6642cc6b182a0543f4811479098fcac031",
+        ),
+        (
+            13,
+            128,
+            "37db34b69f884eebf449c2385c756c7ea10f3c42d17cc79fdb9ca21361829bb1",
+        ),
+        (
+            17,
+            96,
+            "6b221d34984119e40e758a9194de49468ae78696944ae652e46011782441114d",
+        ),
+        (
+            19,
+            152,
+            "e7c0c06b8783a257afd42cf6fd5cbe0022895ede8737f2852c7e33a744999273",
+        ),
+        (
+            26,
+            128,
+            "9796e7f10069f44626d7b1a1cede9df16d8f1aca5b86628528e3e9faa6613c8e",
+        ),
+    ] {
+        for _ in 0..3_000 {
+            let at_checkpoint = runtime_shell.intro_screen.as_ref().is_some_and(|intro| {
+                intro.jumptable_index == scene_index
+                    && intro.scene_frame_counter == frame_counter
+            });
+            if at_checkpoint {
+                break;
+            }
+            tick_visible_intro_screen(&mut runtime_shell)
+                .expect("advance CrystalIntro to ROM checkpoint");
+        }
+        let current = runtime_shell
+            .intro_screen
+            .as_ref()
+            .expect("intro remains active at ROM checkpoint");
+        assert_eq!(current.jumptable_index, scene_index);
+        assert_eq!(current.scene_frame_counter, frame_counter);
+
+        let mut render_intro = runtime_shell
+            .intro_display_screen
+            .clone()
+            .expect("intro checkpoint has a VBlank-latched display state");
+        let current = runtime_shell
+            .intro_screen
+            .as_ref()
+            .expect("intro remains active while composing its LCD");
+        render_intro.ly_overrides = current.ly_overrides.clone();
+        render_intro.lcdc_pointer = current.lcdc_pointer;
+        apply_visible_intro_background_binding(
+            &mut render_intro,
+            runtime_shell.runtime.title_presentation_program(),
+        )
+        .expect("bind intro checkpoint background");
+        let mut rendered_art = RenderedTilesetArt::default();
+        let mut images = Assets::<Image>::default();
+        let frame = intro_scene_frame_for_art_with_bundle(
+            &mut rendered_art,
+            &asset_root,
+            &sprite_bundle,
+            &render_intro,
+            &mut images,
+        );
+        assert!(
+            frame.is_some(),
+            "render IntroScene{} terminal LCD: {:?}",
+            scene_index + 1,
+            rendered_art.intro_scene_errors
+        );
+        let frame = frame.expect("checked intro checkpoint frame");
+        let image = images.get(&frame.handle).expect("intro checkpoint image");
+        let rgb5 = image
+            .data
+            .chunks_exact(4)
+            .flat_map(|pixel| [pixel[0] >> 3, pixel[1] >> 3, pixel[2] >> 3])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(rgb5)),
+            expected_hash,
+            "IntroScene{} terminal pixels must match intro_trace.py's unmodified ROM",
+            scene_index + 1
+        );
+    }
+}
+
+#[test]
 fn intro_scene_renderer_composites_real_oam_sprites_from_bundle() {
     let program = core_modular_title_shell_for_test()
         .runtime
@@ -1345,6 +1584,7 @@ fn intro_scene_renderer_composites_real_oam_sprites_from_bundle() {
 fn intro_oam_tiles_clip_at_the_lcd_edge_instead_of_wrapping() {
     let source = image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 255, 255, 255]));
     let mut target = vec![0_u8; 32 * SOURCE_TILE_SIZE * 32 * SOURCE_TILE_SIZE * 4];
+    let background_priority = vec![0_u8; 32 * SOURCE_TILE_SIZE * 32 * SOURCE_TILE_SIZE];
     let palette = [[0, 0, 0], [10, 20, 30], [40, 50, 60], [70, 80, 90]];
 
     blit_intro_sprite_source_tile(
@@ -1357,6 +1597,8 @@ fn intro_oam_tiles_clip_at_the_lcd_edge_instead_of_wrapping() {
         false,
         -8,
         0,
+        0,
+        &background_priority,
         &mut target,
     );
 
@@ -1368,6 +1610,48 @@ fn intro_oam_tiles_clip_at_the_lcd_edge_instead_of_wrapping() {
         &[0, 0, 0, 0],
         "an offscreen OAM tile must not reappear at the opposite BG edge"
     );
+}
+
+#[test]
+fn intro_oam_priority_hides_obj_pixels_behind_nonzero_bg_pixels() {
+    let source = image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255]));
+    let palette = [[0, 0, 0], [10, 20, 30], [40, 50, 60], [70, 80, 90]];
+    let mut target = vec![0_u8; 32 * SOURCE_TILE_SIZE * 32 * SOURCE_TILE_SIZE * 4];
+    let mut background_priority = vec![0_u8; 32 * SOURCE_TILE_SIZE * 32 * SOURCE_TILE_SIZE];
+    background_priority[0] = 1;
+
+    blit_intro_sprite_source_tile(
+        &source,
+        8,
+        0,
+        &palette,
+        true,
+        false,
+        false,
+        0,
+        0,
+        0x80,
+        &background_priority,
+        &mut target,
+    );
+    assert_eq!(&target[..4], &[0, 0, 0, 0]);
+
+    background_priority[0] = 0;
+    blit_intro_sprite_source_tile(
+        &source,
+        8,
+        0,
+        &palette,
+        true,
+        false,
+        false,
+        0,
+        0,
+        0x80,
+        &background_priority,
+        &mut target,
+    );
+    assert_eq!(&target[..4], &[70, 80, 90, 255]);
 }
 
 #[test]
@@ -1542,19 +1826,13 @@ fn intro_tile_resolution_rejects_missing_source_tiles_instead_of_wrapping() {
 }
 
 #[test]
-fn credits_parser_reads_asm_script_and_strings() {
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repository root");
-    let asset_root = AssetRoot::new(repo_root);
-
-    let constants =
-        load_visible_credit_constant_indices(&asset_root).expect("load credits constants");
-    let strings = load_visible_credits_strings(&asset_root).expect("load credits strings");
-    let string_tiles =
-        load_visible_credits_string_tiles(&asset_root).expect("load credits string tiles");
-    let script = load_visible_credits_script(&asset_root).expect("load credits script");
+fn credits_parser_reads_exported_source_script_and_strings() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let program = load_visible_credits_program(&runtime_shell).expect("load exported credits data");
+    let constants = program.constant_indices;
+    let strings = program.strings;
+    let string_tiles = program.string_tiles;
+    let script = program.ops;
 
     let staff_index = constants.get("STAFF").copied().expect("STAFF constant");
     assert_eq!(
@@ -1563,14 +1841,11 @@ fn credits_parser_reads_asm_script_and_strings() {
     );
     let staff_tiles = string_tiles.get(staff_index).expect("STAFF tile rows");
     assert_eq!(staff_tiles.len(), 3);
-    assert!(
-        staff_tiles[0].contains(&0x54),
-        "STAFF first row must preserve the ASM #MON glyph tile"
-    );
+    assert_eq!(&staff_tiles[0][6..10], &[0x8f, 0x8e, 0x8a, 0xea]);
     assert_eq!(
         staff_tiles[0].len(),
-        "      #MON".len(),
-        "credits tile parser should preserve ASM spacing"
+        "      POKéMON".chars().count(),
+        "PlaceString must expand # to POKé while preserving ASM spacing"
     );
     assert!(matches!(script.first(), Some(VisibleCreditsOp::Clear)));
     assert!(
@@ -1587,7 +1862,7 @@ fn credits_parser_reads_asm_script_and_strings() {
 }
 
 #[test]
-fn credits_screen_opens_from_asm_and_reaches_music_opcode_by_tick() {
+fn credits_screen_opens_from_exported_program_and_reaches_music_opcode_by_tick() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
@@ -1647,10 +1922,16 @@ fn credits_screen_opens_from_asm_and_reaches_music_opcode_by_tick() {
                 .lines
                 .first()
                 .and_then(|line| line.tiles.first())
-                .is_some_and(|tiles| tiles.contains(&0x54)),
-            "credits rendering should preserve the parsed #MON tile"
+                .is_some_and(|tiles| tiles.windows(4).any(|run| run == [0x8f, 0x8e, 0x8a, 0xea])),
+            "credits rendering should preserve PlaceString's expanded POKé tiles"
         );
         assert_eq!(credits.timer, 8);
+        assert_eq!(credits.bg_map_mode, 1);
+        assert_eq!(credits.bg_map_third, 1);
+        assert!(
+            credits.displayed_text_rows.is_empty(),
+            "the first Credits VBlank transfers rows 0-5, before STAFF at rows 8-10"
+        );
         assert_eq!(visible_credits_step_index(credits), 1);
         assert_eq!(runtime_shell.active_music.as_deref(), None);
     }
@@ -1667,16 +1948,40 @@ fn credits_screen_opens_from_asm_and_reaches_music_opcode_by_tick() {
             credits.timer, 8,
             "wait counters should only decrement on the parse step, not every frame"
         );
+        assert_eq!(
+            credits
+                .displayed_text_rows
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![8, 10, 12],
+            "the middle and bottom transfers must commit STAFF with <NEXT>'s blank rows"
+        );
         assert_eq!(credits.ly_override, 0xfe);
         assert_eq!(runtime_shell.active_music.as_deref(), None);
     }
 
     for _ in 0..140 {
-        if runtime_shell.active_music.as_deref() == Some("MUSIC_CREDITS") {
+        if runtime_shell
+            .credits_screen
+            .as_ref()
+            .is_some_and(|credits| credits.music_start_delay_frames == 1)
+        {
             break;
         }
         tick_visible_credits_screen(&mut runtime_shell);
     }
+    assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_NONE"));
+    assert_eq!(
+        runtime_shell
+            .credits_screen
+            .as_ref()
+            .expect("credits screen during music delay")
+            .music_start_delay_frames,
+        1,
+        "Credits .music must retain the source DelayFrame between MUSIC_NONE and MUSIC_CREDITS"
+    );
+    tick_visible_credits_screen(&mut runtime_shell);
 
     let credits = runtime_shell
         .credits_screen
@@ -1695,6 +2000,341 @@ fn credits_screen_opens_from_asm_and_reaches_music_opcode_by_tick() {
             .iter()
             .any(|command| command.audio_id == "MUSIC_CREDITS"),
         "credits music should be queued from the parsed CREDITS_MUSIC opcode"
+    );
+}
+
+#[test]
+fn credits_bg_transfer_preserves_next_spacing_across_hardware_thirds() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    open_visible_credits_screen(&mut runtime_shell, true).expect("open credits");
+    {
+        let credits = runtime_shell.credits_screen.as_mut().expect("credits screen");
+        credits.lines = vec![VisibleCreditsLine {
+            token: "US_VERSION_STAFF".to_string(),
+            text: "three rows".to_string(),
+            tiles: vec![vec![1], vec![2], vec![3]],
+            line_index: 2,
+        }];
+        credits.bg_map_mode = 1;
+        credits.bg_map_third = 0;
+    }
+
+    commit_visible_credits_bg_map_third(&mut runtime_shell);
+    assert!(
+        runtime_shell
+            .credits_screen
+            .as_ref()
+            .expect("credits screen")
+            .displayed_text_rows
+            .is_empty()
+    );
+    commit_visible_credits_bg_map_third(&mut runtime_shell);
+    assert_eq!(
+        runtime_shell
+            .credits_screen
+            .as_ref()
+            .expect("credits screen")
+            .displayed_text_rows
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![10]
+    );
+    commit_visible_credits_bg_map_third(&mut runtime_shell);
+    assert_eq!(
+        runtime_shell
+            .credits_screen
+            .as_ref()
+            .expect("credits screen")
+            .displayed_text_rows
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![10, 12, 14]
+    );
+}
+
+#[test]
+fn credits_first_top_third_lcd_matches_the_asm_rom_oracle() {
+    use sha2::{Digest, Sha256};
+
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    open_visible_credits_screen(&mut runtime_shell, true).expect("open credits");
+    tick_visible_credits_screen(&mut runtime_shell);
+    let credits = runtime_shell.credits_screen.as_ref().expect("credits screen");
+    assert_eq!(credits.bg_map_third, 1);
+    assert!(credits.displayed_text_rows.is_empty());
+
+    let mut images = Assets::<Image>::default();
+    let frame = render_visible_credits_frame(&runtime_shell.asset_root, credits, &mut images)
+        .expect("render first Credits top-third transfer");
+    let image = images.get(&frame.handle).expect("Credits image");
+    let rgb5 = image
+        .data
+        .chunks_exact(4)
+        .flat_map(|pixel| [pixel[0] >> 3, pixel[1] >> 3, pixel[2] >> 3])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(rgb5)),
+        "2c92d82fc2af02cbdcb74a5b2dab786188e7300a247c58894027dc71549f252e",
+        "normalized RGB5 pixels must match credits_trace.py's first_bg_third_1 checkpoint"
+    );
+
+    tick_visible_credits_screen(&mut runtime_shell);
+    let credits = runtime_shell.credits_screen.as_ref().expect("credits screen");
+    assert_eq!(credits.bg_map_third, 2);
+    assert_eq!(
+        credits
+            .displayed_text_rows
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![8, 10]
+    );
+    let frame = render_visible_credits_frame(&runtime_shell.asset_root, credits, &mut images)
+        .expect("render first Credits middle-third transfer");
+    let image = images.get(&frame.handle).expect("Credits image");
+    let rgb5 = image
+        .data
+        .chunks_exact(4)
+        .flat_map(|pixel| [pixel[0] >> 3, pixel[1] >> 3, pixel[2] >> 3])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(rgb5)),
+        "862bde42f6311313b3df66a7756be0a37b4ea2973255ae1e25f62dd1af6ae215",
+        "the middle-third pixels must match the ROM's following LCD scan"
+    );
+
+    tick_visible_credits_screen(&mut runtime_shell);
+    let credits = runtime_shell.credits_screen.as_ref().expect("credits screen");
+    assert_eq!(credits.bg_map_third, 0);
+    assert_eq!(
+        credits
+            .displayed_text_rows
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![8, 10, 12]
+    );
+    let frame = render_visible_credits_frame(&runtime_shell.asset_root, credits, &mut images)
+        .expect("render completed first Credits transfer");
+    let image = images.get(&frame.handle).expect("Credits image");
+    let rgb5 = image
+        .data
+        .chunks_exact(4)
+        .flat_map(|pixel| [pixel[0] >> 3, pixel[1] >> 3, pixel[2] >> 3])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(rgb5)),
+        "54d33685f05fa9338bfce703844edc0c2d058a2265b8b44eeb7d66542932c6a4",
+        "the completed three-third transfer must match the ROM's following LCD scan"
+    );
+}
+
+#[test]
+fn credits_accelerated_exit_lcd_matches_the_asm_rom_oracle() {
+    use sha2::{Digest, Sha256};
+
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    open_visible_credits_screen(&mut runtime_shell, true).expect("open credits");
+    for _ in 0..2_000 {
+        press_visible_credits_b_button(&mut runtime_shell).expect("press Credits B");
+        tick_visible_credits_screen(&mut runtime_shell);
+        if runtime_shell
+            .credits_screen
+            .as_ref()
+            .is_some_and(|credits| credits.awaiting_exit)
+        {
+            break;
+        }
+    }
+    let credits = runtime_shell.credits_screen.as_ref().expect("credits screen");
+    assert!(credits.awaiting_exit, "accelerated Credits did not terminate");
+    assert_eq!(credits.consumed_bytes, 351);
+    assert_eq!(credits.scene_index, 3);
+    assert_eq!(credits.border_mon_index, 3);
+    assert_eq!(credits.border_frame_counter, Some(2));
+    assert_eq!(credits.bg_map_mode, 0);
+    assert_eq!(credits.bg_map_third, 0);
+    assert_eq!(credits.ly_override, 126);
+    assert!(credits.displayed_show_the_end);
+
+    let mut images = Assets::<Image>::default();
+    let frame = render_visible_credits_frame(&runtime_shell.asset_root, credits, &mut images)
+        .expect("render accelerated Credits exit");
+    let image = images.get(&frame.handle).expect("Credits image");
+    let rgb5 = image
+        .data
+        .chunks_exact(4)
+        .flat_map(|pixel| [pixel[0] >> 3, pixel[1] >> 3, pixel[2] >> 3])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(rgb5)),
+        "f4cafc5f7c7d019df0efcb3d8d483d8d602f21e0b729c6daa47fc76c2f967a94",
+        "accelerated exit pixels must match credits_trace.py's awaiting_exit checkpoint"
+    );
+}
+
+#[test]
+fn credits_end_starts_source_post_credits_fade_and_return_does_not_stop_it() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    assert_eq!(runtime_shell.h_in_menu, 0);
+    open_visible_credits_screen(&mut runtime_shell, true).expect("open credits");
+    assert_eq!(
+        runtime_shell.h_in_menu, 1,
+        "Credits must reproduce the source hInMenu write"
+    );
+    runtime_shell.active_music = Some("MUSIC_CREDITS".to_string());
+    {
+        let credits = runtime_shell.credits_screen.as_mut().expect("credits screen");
+        credits.program.ops = vec![VisibleCreditsOp::TheEnd, VisibleCreditsOp::End];
+        credits.script_index = 0;
+        credits.jumptable_index &= 0xf0;
+    }
+
+    tick_visible_credits_screen(&mut runtime_shell);
+    let fade = runtime_shell.music_fade.as_ref().expect("post-credits music fade");
+    assert_eq!(fade.target_music, "MUSIC_POST_CREDITS");
+    assert_eq!(fade.rate, 32);
+    assert!(!fade.fading_in);
+    assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_CREDITS"));
+    assert!(runtime_shell.credits_screen.as_ref().expect("credits screen").awaiting_exit);
+
+    let (frame, step) = {
+        let credits = runtime_shell.credits_screen.as_ref().expect("credits screen");
+        (credits.frame, visible_credits_step_index(credits))
+    };
+    tick_visible_credits_screen(&mut runtime_shell);
+    let credits = runtime_shell.credits_screen.as_ref().expect("credits screen");
+    assert_eq!(credits.frame, frame + 1);
+    assert_eq!(visible_credits_step_index(credits), (step + 1) & 0x0f);
+    assert!(credits.show_the_end);
+
+    press_visible_credits_a_button(&mut runtime_shell).expect("return from Credits");
+    assert_eq!(
+        runtime_shell
+            .credits_screen
+            .as_ref()
+            .expect("Credits remains active for ClearBGPalettes")
+            .exit_clear_frames_remaining,
+        Some(4)
+    );
+    let mut images = Assets::<Image>::default();
+    let clear_frame = render_visible_credits_frame(
+        &runtime_shell.asset_root,
+        runtime_shell
+            .credits_screen
+            .as_ref()
+            .expect("Credits clear frame"),
+        &mut images,
+    )
+    .expect("render Credits ClearBGPalettes frame");
+    let clear_image = images
+        .get(&clear_frame.handle)
+        .expect("Credits ClearBGPalettes image");
+    assert!(
+        clear_image
+            .data
+            .chunks_exact(4)
+            .all(|pixel| pixel == [255, 255, 255, 255]),
+        "ClearBGPalettes must make every Credits pixel white while its four-frame wait runs"
+    );
+    for remaining in [3, 2, 1] {
+        tick_visible_credits_screen(&mut runtime_shell);
+        assert_eq!(
+            runtime_shell
+                .credits_screen
+                .as_ref()
+                .expect("Credits remains active during ClearBGPalettes")
+                .exit_clear_frames_remaining,
+            Some(remaining)
+        );
+    }
+    tick_visible_credits_screen(&mut runtime_shell);
+    assert!(runtime_shell.credits_screen.is_none());
+    let fade = runtime_shell.music_fade.as_ref().expect("fade survives Credits return");
+    assert_eq!(fade.target_music, "MUSIC_POST_CREDITS");
+    assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_CREDITS"));
+    assert_eq!(
+        runtime_shell.h_in_menu, 1,
+        "the source Credits exit does not restore hInMenu"
+    );
+}
+
+#[test]
+fn credits_end_clears_wram_but_retains_the_end_pixels_until_exit() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    open_visible_credits_screen(&mut runtime_shell, true).expect("open credits");
+    let the_end_index = runtime_shell
+        .credits_screen
+        .as_ref()
+        .expect("credits screen")
+        .program
+        .ops
+        .iter()
+        .position(|op| matches!(op, VisibleCreditsOp::TheEnd))
+        .expect("source CREDITS_THEEND");
+    {
+        let credits = runtime_shell.credits_screen.as_mut().expect("credits screen");
+        assert!(matches!(
+            credits.program.ops.get(the_end_index + 1),
+            Some(VisibleCreditsOp::Wait(20))
+        ));
+        assert!(matches!(
+            credits.program.ops.get(the_end_index + 2),
+            Some(VisibleCreditsOp::End)
+        ));
+        credits.script_index = the_end_index;
+        credits.jumptable_index &= 0xf0;
+    }
+
+    tick_visible_credits_screen(&mut runtime_shell);
+    {
+        let credits = runtime_shell.credits_screen.as_ref().expect("credits screen");
+        assert!(credits.show_the_end);
+        assert!(!credits.displayed_show_the_end);
+        assert_eq!(credits.bg_map_third, 1);
+        assert_eq!(credits.timer, 20);
+        assert!(visible_credits_screen_lines(credits).iter().any(|line| line == "THE END"));
+    }
+
+    tick_visible_credits_screen(&mut runtime_shell);
+    {
+        let credits = runtime_shell.credits_screen.as_ref().expect("credits screen");
+        assert!(credits.displayed_show_the_end);
+        assert_eq!(credits.bg_map_third, 2);
+    }
+
+    {
+        let credits = runtime_shell.credits_screen.as_mut().expect("credits screen");
+        credits.timer = 0;
+        credits.jumptable_index &= 0xf0;
+    }
+    tick_visible_credits_screen(&mut runtime_shell);
+    let credits = runtime_shell.credits_screen.as_ref().expect("credits screen");
+    assert!(credits.awaiting_exit);
+    assert!(!credits.show_the_end);
+    assert!(credits.displayed_show_the_end);
+    assert!(
+        visible_credits_screen_lines(credits)
+            .iter()
+            .all(|line| line != "THE END"),
+        "ParseCredits clears rows 5-16 before consuming CREDITS_END"
+    );
+    let mut images = Assets::<Image>::default();
+    let frame = render_visible_credits_frame(&runtime_shell.asset_root, credits, &mut images)
+        .expect("render retained post-THE-END exit frame");
+    let image = images.get(&frame.handle).expect("post-THE-END image");
+    let mut colors = BTreeSet::new();
+    for y in 9 * SOURCE_TILE_SIZE..11 * SOURCE_TILE_SIZE {
+        for x in 6 * SOURCE_TILE_SIZE..14 * SOURCE_TILE_SIZE {
+            let offset = (y * CREDITS_SCREEN_WIDTH + x) * 4;
+            colors.insert(image.data[offset..offset + 4].to_vec());
+        }
+    }
+    assert!(
+        colors.len() > 1,
+        "CREDITS_END disables BG-map transfer after clearing WRAM, so THE END remains in VRAM"
     );
 }
 
@@ -1759,8 +2399,10 @@ fn credits_frame_renders_real_assets_and_special_font_tiles() {
         .expect("credits screen active");
     let font = load_visible_credits_font_tiles(&asset_root).expect("load credits font");
     assert!(
-        font.levels.contains_key(&0x54),
-        "credits font must include the #MON Poke glyph tile used by STAFF"
+        [0x8f, 0x8e, 0x8a, 0xea]
+            .into_iter()
+            .all(|tile| font.levels.contains_key(&tile)),
+        "credits font must include PlacePOKEText's expanded POKé glyph tiles"
     );
 
     let mut images = Assets::<Image>::default();
@@ -1781,9 +2423,10 @@ fn credits_frame_renders_real_assets_and_special_font_tiles() {
         .filter(|rgba| rgba[3] != 0)
         .map(|rgba| [rgba[0], rgba[1], rgba[2]])
         .collect::<BTreeSet<_>>();
-    assert!(
-        unique_colors.len() >= 3,
-        "first credits frame should contain tinted background, border, and text colors"
+    assert_eq!(
+        unique_colors,
+        BTreeSet::from([[90, 115, 255], [255, 41, 41]]),
+        "the first top-third frame has only the Pichu blue and red palette colors"
     );
 
     let mut staged_credits = credits.clone();

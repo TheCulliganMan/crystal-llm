@@ -2905,28 +2905,35 @@ describe("exportRuntimeAssets", () => {
 
     const table = exportTypeEffectivenessTable();
 
-    expect(
-      Object.values(table.matchups).flatMap((defenders) =>
-        Object.values(defenders),
-      ),
-    ).toHaveLength(64);
-    expect(table.matchups.NORMAL.ROCK).toEqual({
-      numerator: 1,
-      denominator: 2,
-    });
-    expect(table.matchups.FIRE.GRASS).toEqual({ numerator: 2, denominator: 1 });
-    expect(table.matchups.ELECTRIC.GROUND).toEqual({
-      numerator: 0,
-      denominator: 1,
-    });
-    expect(table.matchups.NORMAL.NORMAL).toEqual({
-      numerator: 1,
-      denominator: 1,
-    });
-    expect(table.foresight_matchups).toEqual({
-      NORMAL: { GHOST: { numerator: 0, denominator: 1 } },
-      FIGHTING: { GHOST: { numerator: 0, denominator: 1 } },
-    });
+    expect(table.matchups).toEqual([
+      {
+        attacker: "NORMAL",
+        defender: "ROCK",
+        multiplier: { numerator: 1, denominator: 2 },
+      },
+      {
+        attacker: "FIRE",
+        defender: "GRASS",
+        multiplier: { numerator: 2, denominator: 1 },
+      },
+      {
+        attacker: "ELECTRIC",
+        defender: "GROUND",
+        multiplier: { numerator: 0, denominator: 1 },
+      },
+    ]);
+    expect(table.foresight_matchups).toEqual([
+      {
+        attacker: "NORMAL",
+        defender: "GHOST",
+        multiplier: { numerator: 0, denominator: 1 },
+      },
+      {
+        attacker: "FIGHTING",
+        defender: "GHOST",
+        multiplier: { numerator: 0, denominator: 1 },
+      },
+    ]);
     const dataDir = path.join(mockAssetsRoot, "data");
     expect(
       JSON.parse(

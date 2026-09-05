@@ -1514,6 +1514,13 @@ pub fn trainer_ai_damage(
             ),
             defender_metal_powder: state.player.species.id == "DITTO"
                 && state.player.item.as_deref() == Some("METAL_POWDER"),
+            attacker_species_item_boost: if physical {
+                matches!(state.enemy.species.id.as_str(), "CUBONE" | "MAROWAK")
+                    && state.enemy.item.as_deref() == Some("THICK_CLUB")
+            } else {
+                state.enemy.species.id == "PIKACHU"
+                    && state.enemy.item.as_deref() == Some("LIGHT_BALL")
+            },
             defender_screen: if physical {
                 state.player_reflect_turns != 0
             } else {
@@ -1522,6 +1529,16 @@ pub fn trainer_ai_damage(
             link_colosseum: state.link_colosseum,
             held_type_boost_percent,
             attacker_burn_penalty: state.enemy_burn_attack_penalty_active,
+            attacker_loaded_stat: Some(if physical {
+                state.enemy_loaded_stats.attack
+            } else {
+                state.enemy_loaded_stats.special_attack
+            }),
+            defender_loaded_stat: Some(if physical {
+                state.player_loaded_stats.defense
+            } else {
+                state.player_loaded_stats.special_defense
+            }),
             ..DamageContext::default()
         },
     )

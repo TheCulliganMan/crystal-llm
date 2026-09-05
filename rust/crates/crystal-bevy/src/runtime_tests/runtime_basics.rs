@@ -285,6 +285,7 @@ fn runtime_title_program() -> crystal_assets::RuntimePresentationProgram {
                     (".end@TitleScreenMain".to_string(), 26),
                     (".reset_clock@TitleScreenMain".to_string(), 30),
                     ("TitleScreenEnd".to_string(), 33),
+                    ("SuicuneFrameIterator".to_string(), 41),
                 ]
                 .into_iter()
                 .collect(),
@@ -436,6 +437,21 @@ fn runtime_title_program() -> crystal_assets::RuntimePresentationProgram {
                         }),
                     ),
                     source_operation(
+                        "postincrement_memory_byte",
+                        serde_json::json!({
+                            "target": "wSuicuneFrame",
+                            "result": "title_suicune_frame",
+                            "delta": 1
+                        }),
+                    ),
+                    source_operation(
+                        "return_unless_masked_zero",
+                        serde_json::json!({
+                            "value": "title_suicune_frame",
+                            "mask": 7
+                        }),
+                    ),
+                    source_operation(
                         "draw_indexed_title_suicune_frame",
                         serde_json::json!({
                             "frames": [128, 136, 0, 8],
@@ -446,6 +462,23 @@ fn runtime_title_program() -> crystal_assets::RuntimePresentationProgram {
                             }
                         }),
                     ),
+                    source_operation("wait_frames", serde_json::json!({ "frames": 1 })),
+                    source_operation("return_with_carry", serde_json::json!({})),
+                    operation("fill_memory", "wShadowOAM", "value", 0),
+                    source_operation("wait_frames", serde_json::json!({ "frames": 4 })),
+                    source_operation("wait_frames", serde_json::json!({ "frames": 4 })),
+                    source_operation("wait_frames", serde_json::json!({ "frames": 4 })),
+                    source_operation("wait_frames", serde_json::json!({ "frames": 4 })),
+                    source_operation(
+                        "dispatch_table",
+                        serde_json::json!({
+                            "dispatcher": "StartTitleScreen option tail",
+                            "entries": [
+                                "Intro_MainMenu", "DeleteSaveData", "IntroSequence",
+                                "IntroSequence", "ResetClock"
+                            ]
+                        }),
+                    ),
                 ],
             }],
             source_span: span.clone(),
@@ -454,33 +487,227 @@ fn runtime_title_program() -> crystal_assets::RuntimePresentationProgram {
         ..crystal_assets::RuntimePresentationProgram::default()
     };
     program
+        .entrypoints
+        .insert("main_menu".to_string(), "Intro_MainMenu".to_string());
+    program.blocks.insert(
+        "Intro_MainMenu".to_string(),
+        crystal_assets::RuntimePresentationBlock {
+            source_span: span.clone(),
+            operations: vec![
+                source_operation("stop_audio", serde_json::json!({ "audio": "MUSIC_NONE" })),
+                source_operation("wait_frames", serde_json::json!({ "frames": 1 })),
+                source_operation(
+                    "write_memory_byte",
+                    serde_json::json!({
+                        "target": "wMapMusic",
+                        "value": "MUSIC_MAIN_MENU"
+                    }),
+                ),
+                source_operation(
+                    "play_audio",
+                    serde_json::json!({ "audio": "MUSIC_MAIN_MENU" }),
+                ),
+                source_operation(
+                    "call_subprogram",
+                    serde_json::json!({ "program": "main_menu" }),
+                ),
+            ],
+        },
+    );
+    program
         .subprograms
         .push(crystal_assets::RuntimePresentationSubprogram {
             id: "crystal_intro".to_string(),
             source_entry: "CrystalIntro".to_string(),
             accepted_call_forms: vec!["farcall".to_string()],
-            phases: vec![crystal_assets::RuntimePresentationPhase {
-                id: "scene_dispatch".to_string(),
-                source_span: span.clone(),
-                operations: vec![source_operation(
-                    "intro_background_binding",
-                    serde_json::json!({
-                        "dispatcher_entry": 0,
-                        "tilemap_resource": "gfx/intro/background.tilemap.lz",
-                        "attrmap_resource": "gfx/intro/background.attrmap.lz",
-                        "palette_resource": "gfx/intro/background.pal",
-                        "tile_addressing": "signed_8800",
-                        "tile_bindings": [{
-                            "tile_id_start": 0,
-                            "tile_id_end": 127,
-                            "target_vram_bank": 0,
-                            "resource": "gfx/intro/background.2bpp.lz",
-                            "resource_tile_start": 0
-                        }]
-                    }),
-                )],
-                ..crystal_assets::RuntimePresentationPhase::default()
-            }],
+            phases: vec![
+                crystal_assets::RuntimePresentationPhase {
+                    id: "entry_init".to_string(),
+                    source_span: span.clone(),
+                    operations: vec![
+                        source_operation(
+                            "save_memory_byte",
+                            serde_json::json!({
+                                "source": "rWBK",
+                                "storage": { "kind": "cpu_stack", "register_pair": "af", "stack_slot": 0 },
+                                "restore_required": true
+                            }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "rWBK", "value": "BANK(wGBCPalettes)" }),
+                        ),
+                        source_operation(
+                            "save_memory_byte",
+                            serde_json::json!({
+                                "source": "hInMenu",
+                                "storage": { "kind": "cpu_stack", "register_pair": "af", "stack_slot": 1 },
+                                "restore_required": true
+                            }),
+                        ),
+                        source_operation(
+                            "save_memory_byte",
+                            serde_json::json!({
+                                "source": "hVBlank",
+                                "storage": { "kind": "cpu_stack", "register_pair": "af", "stack_slot": 2 },
+                                "restore_required": true
+                            }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "hVBlank", "value": 0 }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "hInMenu", "value": 1 }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "hMapAnims", "value": 0 }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "wJumptableIndex", "value": 0 }),
+                        ),
+                    ],
+                    ..crystal_assets::RuntimePresentationPhase::default()
+                },
+                crystal_assets::RuntimePresentationPhase {
+                    id: "scene_dispatch".to_string(),
+                    source_span: span.clone(),
+                    labels: [("IntroScene1".to_string(), 0)].into_iter().collect(),
+                    operations: vec![
+                    source_operation(
+                        "dispatch_table",
+                        serde_json::json!({
+                            "table": "IntroScenes",
+                            "entries": ["IntroScene1"]
+                        }),
+                    ),
+                    source_operation(
+                        "intro_background_binding",
+                        serde_json::json!({
+                            "dispatcher_entry": 0,
+                            "tilemap_resource": "gfx/intro/background.tilemap.lz",
+                            "attrmap_resource": "gfx/intro/background.attrmap.lz",
+                            "palette_resource": "gfx/intro/background.pal",
+                            "tile_addressing": "signed_8800",
+                            "tile_bindings": [{
+                                "tile_id_start": 0,
+                                "tile_id_end": 127,
+                                "target_vram_bank": 0,
+                                "resource": "gfx/intro/background.2bpp.lz",
+                                "resource_tile_start": 0
+                            }]
+                        }),
+                    ),
+                    ],
+                    ..crystal_assets::RuntimePresentationPhase::default()
+                },
+                crystal_assets::RuntimePresentationPhase {
+                    id: "button_cancel".to_string(),
+                    source_span: span.clone(),
+                    operations: vec![source_operation(
+                        "stop_audio",
+                        serde_json::json!({ "audio": "MUSIC_NONE" }),
+                    )],
+                    ..crystal_assets::RuntimePresentationPhase::default()
+                },
+                crystal_assets::RuntimePresentationPhase {
+                    id: "cleanup".to_string(),
+                    source_span: span.clone(),
+                    operations: vec![
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "rBGP", "value": 0 }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "rOBP0", "value": 0 }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "rOBP1", "value": 0 }),
+                        ),
+                        source_operation(
+                            "fill_memory",
+                            serde_json::json!({ "target": "wBGPals2", "value": 255 }),
+                        ),
+                        source_operation("palette_transfer_request", serde_json::json!({})),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "hBGMapMode", "value": 1 }),
+                        ),
+                        source_operation(
+                            "wait_frames",
+                            serde_json::json!({ "frames": 4 }),
+                        ),
+                        source_operation(
+                            "fill_memory",
+                            serde_json::json!({ "target": "wShadowOAM", "value": 0 }),
+                        ),
+                        source_operation(
+                            "fill_memory",
+                            serde_json::json!({ "target": "wTilemap", "value": 127 }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "hBGMapMode", "value": 1 }),
+                        ),
+                        source_operation(
+                            "wait_frames",
+                            serde_json::json!({ "frames": 4 }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "hSCX", "value": 0 }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "hSCY", "value": 0 }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "hWX", "value": 7 }),
+                        ),
+                        source_operation(
+                            "write_memory_byte",
+                            serde_json::json!({ "target": "hWY", "value": 144 }),
+                        ),
+                        source_operation(
+                            "restore_memory_byte",
+                            serde_json::json!({
+                                "target": "hVBlank",
+                                "storage": { "kind": "cpu_stack", "register_pair": "af", "stack_slot": 2 }
+                            }),
+                        ),
+                        source_operation(
+                            "restore_memory_byte",
+                            serde_json::json!({
+                                "target": "hInMenu",
+                                "storage": { "kind": "cpu_stack", "register_pair": "af", "stack_slot": 1 }
+                            }),
+                        ),
+                        source_operation(
+                            "restore_memory_byte",
+                            serde_json::json!({
+                                "target": "rWBK",
+                                "storage": { "kind": "cpu_stack", "register_pair": "af", "stack_slot": 0 }
+                            }),
+                        ),
+                        source_operation("return", serde_json::json!({})),
+                    ],
+                    ..crystal_assets::RuntimePresentationPhase::default()
+                },
+            ],
+            loop_: serde_json::json!({
+                "scene_dispatch": {
+                    "entries": ["IntroScene1"],
+                    "entry_offsets": { "IntroScene1": 0 },
+                    "completion_wait_frames": [0]
+                },
+                "frame_wait": { "source_span": span.clone() }
+            }),
             source_span: span.clone(),
             ..crystal_assets::RuntimePresentationSubprogram::default()
         });
@@ -491,15 +718,58 @@ fn runtime_title_program() -> crystal_assets::RuntimePresentationProgram {
             phases: vec![crystal_assets::RuntimePresentationPhase {
                 id: "main_menu".to_string(),
                 source_span: span.clone(),
+                labels: [
+                    (".loop@MainMenu".to_string(), 0),
+                    (".quit@MainMenu".to_string(), 14),
+                ]
+                .into_iter()
+                .collect(),
                 operations: vec![
+                    operation("write_memory_byte", "wDisableTextAcceleration", "value", 0),
+                    source_operation(
+                        "prepare_main_menu_display",
+                        serde_json::json!({
+                            "map_animations": 0,
+                            "clear_tilemap": true,
+                            "fonts": ["LoadFontsExtra", "LoadStandardFont"],
+                            "clear_window_data": true
+                        }),
+                    ),
+                    source_operation(
+                        "apply_palette_layout",
+                        serde_json::json!({
+                            "layout": { "symbol": "SCGB_DIPLOMA", "value": 8 }
+                        }),
+                    ),
+                    source_operation(
+                        "set_default_palettes",
+                        serde_json::json!({ "routine": "SetDefaultBGPAndOBP" }),
+                    ),
+                    source_operation(
+                        "clear_memory_bit",
+                        serde_json::json!({
+                            "target": "wGameTimerPaused",
+                            "bit": "GAME_TIMER_COUNTING_F"
+                        }),
+                    ),
                     source_operation(
                         "select_main_menu_variant",
                         serde_json::json!({
+                            "result": "wWhichIndexSet",
                             "variants": [
                                 { "id": "new_game", "value": 0 },
                                 { "id": "continue", "value": 1 },
                                 { "id": "mystery", "value": 6 }
                             ]
+                        }),
+                    ),
+                    source_operation(
+                        "render_main_menu_time_and_day",
+                        serde_json::json!({
+                            "only_when": {
+                                "source": "wSaveFileExists",
+                                "predicate": "nonzero"
+                            }
                         }),
                     ),
                     source_operation(
@@ -520,16 +790,48 @@ fn runtime_title_program() -> crystal_assets::RuntimePresentationProgram {
                         }),
                     ),
                     source_operation(
+                        "menu_input_loop",
+                        serde_json::json!({
+                            "sampler": "GetScrollingMenuJoypad",
+                            "result": "wMenuJoypad",
+                            "accept": "PAD_A",
+                            "cancel": "PAD_B",
+                            "wrap_vertical": true,
+                            "refresh_before_each_poll": "MainMenu_PrintCurrentTimeAndDay"
+                        }),
+                    ),
+                    source_operation(
+                        "close_window",
+                        serde_json::json!({ "routine": "CloseWindow" }),
+                    ),
+                    source_operation(
+                        "branch_result",
+                        serde_json::json!({
+                            "result": "main_menu_input",
+                            "equals": "cancelled",
+                            "target": ".quit@MainMenu"
+                        }),
+                    ),
+                    source_operation("clear_tilemap", serde_json::json!({})),
+                    source_operation(
                         "dispatch_table",
                         serde_json::json!({
                             "dispatcher": "MainMenu selection",
+                            "table": ".Jumptable@MainMenu",
+                            "index": "wMenuSelection",
                             "entries": [
                                 "MainMenu_Continue", "MainMenu_NewGame", "MainMenu_Option",
                                 "MainMenu_MysteryGift", "MainMenu_Mobile",
                                 "MainMenu_MobileStudium"
-                            ]
+                            ],
+                            "domain": { "values": [0, 1, 2, 3] }
                         }),
                     ),
+                    source_operation(
+                        "jump",
+                        serde_json::json!({ "target": ".loop@MainMenu" }),
+                    ),
+                    source_operation("return", serde_json::json!({})),
                 ],
                 ..crystal_assets::RuntimePresentationPhase::default()
             }],
@@ -589,6 +891,9 @@ fn load_minimal_compiled_runtime_with_runtime_files(
 ) -> (std::path::PathBuf, AssetRoot, CrystalRuntime) {
     let root = temp_repository_root(name);
     write_pcm(&root.join("apps/web/assets/data/content-packs/test/music/MUSIC_ROUTE_29.pcm"));
+    write_pcm(&root.join(
+        "apps/web/assets/data/content-packs/test/music/MUSIC_MAIN_MENU.pcm",
+    ));
     write_pcm(&root.join("apps/web/assets/data/content-packs/test/music/MUSIC_ROUTE_30.pcm"));
     write_pcm(
         &root.join("apps/web/assets/data/content-packs/test/music/MUSIC_JOHTO_WILD_BATTLE.pcm"),
@@ -744,7 +1049,6 @@ fn runtime_item(id: &str, pocket: ItemPocket) -> Item {
         battle_capture_ball: None,
         battle_focus_energy: None,
         battle_stat_drop_guard: None,
-        battle_stat_drop_guard_turns: None,
         confusion_heal: None,
         repel_steps: None,
         escape_rope_mode: None,
@@ -934,6 +1238,11 @@ fn minimal_runtime_data() -> GameDataSet {
             )
             .expect("route 29 music asset"),
             ModpackAudioAsset::music(
+                "MUSIC_MAIN_MENU",
+                "content-packs/test/music/MUSIC_MAIN_MENU.pcm",
+            )
+            .expect("main menu music asset"),
+            ModpackAudioAsset::music(
                 "MUSIC_JOHTO_WILD_BATTLE",
                 "content-packs/test/music/MUSIC_JOHTO_WILD_BATTLE.pcm",
             )
@@ -1098,34 +1407,19 @@ fn minimal_runtime_data() -> GameDataSet {
             special: vec!["FIRE".to_string(), "WATER".to_string()],
         },
         type_effectiveness: crystal_core::battle::damage::TypeEffectivenessTable {
-            matchups: ["NORMAL", "FIGHTING", "FIRE", "WATER"]
-                .into_iter()
-                .map(|attacker| {
-                    (
-                        attacker.to_string(),
-                        ["NORMAL", "FIGHTING", "FIRE", "WATER"]
-                            .into_iter()
-                            .map(|defender| {
-                                (
-                                    defender.to_string(),
-                                    crystal_core::battle::damage::TypeMultiplier::one(),
-                                )
-                            })
-                            .collect(),
-                    )
-                })
-                .collect(),
-            foresight_matchups: [(
-                "NORMAL".to_string(),
-                [(
-                    "FIGHTING".to_string(),
-                    crystal_core::battle::damage::TypeMultiplier::zero(),
-                )]
-                .into_iter()
-                .collect(),
-            )]
-            .into_iter()
-            .collect(),
+            matchups: vec![crystal_core::battle::damage::TypeEffectivenessEntry {
+                attacker: "FIRE".to_string(),
+                defender: "WATER".to_string(),
+                multiplier: crystal_core::battle::damage::TypeMultiplier {
+                    numerator: 1,
+                    denominator: 2,
+                },
+            }],
+            foresight_matchups: vec![crystal_core::battle::damage::TypeEffectivenessEntry {
+                attacker: "NORMAL".to_string(),
+                defender: "GHOST".to_string(),
+                multiplier: crystal_core::battle::damage::TypeMultiplier::zero(),
+            }],
         },
         weather_modifiers: crystal_core::battle::damage::WeatherModifiers {
             type_modifiers: [(
@@ -3190,6 +3484,93 @@ fn minimal_runtime_data_with_fishing() -> GameDataSet {
 
 fn minimal_runtime_data_with_scripted_battles() -> GameDataSet {
     let mut data = minimal_runtime_data();
+    let happiness = data
+        .happiness_data
+        .as_mut()
+        .expect("minimal runtime happiness data");
+    happiness.changes.extend([
+        (
+            1,
+            crystal_core::systems::special_routines::HappinessChangeEntry {
+                code: "HAPPINESS_GAINLEVEL".to_string(),
+                low: 5,
+                mid: 3,
+                high: 2,
+            },
+        ),
+        (
+            19,
+            crystal_core::systems::special_routines::HappinessChangeEntry {
+                code: "HAPPINESS_GAINLEVELATHOME".to_string(),
+                low: 10,
+                mid: 6,
+                high: 4,
+            },
+        ),
+        (
+            2,
+            crystal_core::systems::special_routines::HappinessChangeEntry {
+                code: "HAPPINESS_USEDITEM".to_string(),
+                low: 5,
+                mid: 3,
+                high: 2,
+            },
+        ),
+        (
+            3,
+            crystal_core::systems::special_routines::HappinessChangeEntry {
+                code: "HAPPINESS_USEDXITEM".to_string(),
+                low: 1,
+                mid: 1,
+                high: 0,
+            },
+        ),
+        (
+            4,
+            crystal_core::systems::special_routines::HappinessChangeEntry {
+                code: "HAPPINESS_GYMBATTLE".to_string(),
+                low: 3,
+                mid: 2,
+                high: 1,
+            },
+        ),
+        (
+            5,
+            crystal_core::systems::special_routines::HappinessChangeEntry {
+                code: "HAPPINESS_LEARNMOVE".to_string(),
+                low: 1,
+                mid: 1,
+                high: 0,
+            },
+        ),
+        (
+            15,
+            crystal_core::systems::special_routines::HappinessChangeEntry {
+                code: "HAPPINESS_BITTERPOWDER".to_string(),
+                low: -5,
+                mid: -5,
+                high: -10,
+            },
+        ),
+        (
+            16,
+            crystal_core::systems::special_routines::HappinessChangeEntry {
+                code: "HAPPINESS_ENERGYROOT".to_string(),
+                low: -10,
+                mid: -10,
+                high: -15,
+            },
+        ),
+        (
+            17,
+            crystal_core::systems::special_routines::HappinessChangeEntry {
+                code: "HAPPINESS_REVIVALHERB".to_string(),
+                low: -15,
+                mid: -15,
+                high: -20,
+            },
+        ),
+    ]);
     data.items
         .insert("MASTER_BALL".to_string(), runtime_ball_item("MASTER_BALL"));
     data.items.insert(
@@ -4100,9 +4481,24 @@ fn continue_load_preserves_live_hram_rng_counter_and_divider() {
 
 #[test]
 fn visible_title_new_game_name_input_is_controlled_before_spawn() {
-    let (root, asset_root, runtime) = load_minimal_compiled_runtime("title-name-input");
+    let root = repository_root_for_tests();
+    let asset_root = AssetRoot::new(root.clone());
+    let pack = asset_root
+        .load_verified_compiled_game_pack("content-packs/core-modular.crystalpack")
+        .expect("load canonical title runtime");
+    let runtime = CrystalRuntime::from_compiled_pack(&asset_root, pack, identity())
+        .expect("load canonical title runtime");
+    let spawn_identifier = runtime
+        .title_new_game_spawn_identifier()
+        .expect("canonical new-game spawn identifier");
 
-    let smoke = smoke_visible_shell_title_name_input(asset_root, runtime, 0, None, "AB")
+    let smoke = smoke_visible_shell_title_name_input(
+        asset_root,
+        runtime,
+        spawn_identifier,
+        None,
+        "AB",
+    )
         .expect("visible title name input smoke must type and confirm player name");
 
     assert_eq!(smoke.selected, "NEW_GAME");
@@ -4147,11 +4543,10 @@ fn visible_title_new_game_name_input_is_controlled_before_spawn() {
         smoke.typed_name_entries
     );
     assert_eq!(smoke.trainer_name, "AB");
-    assert_eq!(smoke.map, "RuntimeMap");
-    assert_eq!(smoke.tile_x, 0);
-    assert_eq!(smoke.tile_y, 0);
+    assert_eq!(smoke.map, "PlayersHouse2F");
+    assert_eq!(smoke.tile_x, 3);
+    assert_eq!(smoke.tile_y, 3);
     assert_ne!(smoke.state_hash.hash(), 0);
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -4482,7 +4877,7 @@ fn runtime_game_shell_ticks_snapshots_and_saves_against_exact_pack_impl() {
     assert_eq!(initial.boot.modpack_id, "core-modular");
     assert_eq!(initial.overworld.map_name, "RuntimeMap");
     assert_eq!(initial.phase, RuntimeShellPhase::Overworld);
-    assert_eq!(initial.progression.last_spawn_identifier, Some(0));
+    assert_eq!(initial.progression.last_spawn_map_constant, None);
     assert_eq!(initial.trainer.player_gender, PLAYER_GENDER_MALE);
     assert!(shell.runtime().has_item("MASTER_BALL"));
     assert!(!shell.runtime().has_item("master_ball"));
@@ -6216,7 +6611,6 @@ fn runtime_game_shell_ticks_snapshots_and_saves_against_exact_pack_impl() {
         battle_escape_mode: None,
         battle_focus_energy: None,
         battle_stat_drop_guard: None,
-        battle_stat_drop_guard_turns: None,
     };
     let wrong_item_battle_use = RuntimeItemBattleUseKey {
         battle_usable: false,
@@ -6751,12 +7145,20 @@ fn runtime_game_shell_ticks_snapshots_and_saves_against_exact_pack_impl() {
     assert!(shell.runtime().require_weather("WEATHER_RAIN").is_ok());
     assert!(shell.runtime().require_weather("weather_rain").is_err());
     let type_effectiveness = RuntimeTypeEffectivenessKey {
-        attacking_type: "NORMAL".to_string(),
-        defending_type: "FIGHTING".to_string(),
+        attacking_type: "FIRE".to_string(),
+        defending_type: "WATER".to_string(),
     };
     let wrong_type_effectiveness = RuntimeTypeEffectivenessKey {
+        attacking_type: "fire".to_string(),
+        defending_type: "WATER".to_string(),
+    };
+    let foresight_type_effectiveness = RuntimeTypeEffectivenessKey {
+        attacking_type: "NORMAL".to_string(),
+        defending_type: "GHOST".to_string(),
+    };
+    let wrong_foresight_type_effectiveness = RuntimeTypeEffectivenessKey {
         attacking_type: "normal".to_string(),
-        defending_type: "FIGHTING".to_string(),
+        defending_type: "GHOST".to_string(),
     };
     assert!(shell.runtime().has_type_effectiveness(&type_effectiveness));
     assert!(
@@ -6785,29 +7187,29 @@ fn runtime_game_shell_ticks_snapshots_and_saves_against_exact_pack_impl() {
     assert!(
         shell
             .runtime()
-            .has_foresight_type_effectiveness(&type_effectiveness)
+            .has_foresight_type_effectiveness(&foresight_type_effectiveness)
     );
     assert!(
         !shell
             .runtime()
-            .has_foresight_type_effectiveness(&wrong_type_effectiveness)
+            .has_foresight_type_effectiveness(&wrong_foresight_type_effectiveness)
     );
     assert!(
         shell
             .runtime()
             .foresight_type_effectiveness_keys()
-            .contains(&type_effectiveness)
+            .contains(&foresight_type_effectiveness)
     );
     assert!(
         shell
             .runtime()
-            .require_foresight_type_effectiveness(&type_effectiveness)
+            .require_foresight_type_effectiveness(&foresight_type_effectiveness)
             .is_ok()
     );
     assert!(
         shell
             .runtime()
-            .require_foresight_type_effectiveness(&wrong_type_effectiveness)
+            .require_foresight_type_effectiveness(&wrong_foresight_type_effectiveness)
             .is_err()
     );
     let weather_type_modifier = RuntimeWeatherTypeModifierKey {
@@ -7502,15 +7904,15 @@ fn runtime_game_shell_ticks_snapshots_and_saves_against_exact_pack_impl() {
             .require_type_effectiveness(&type_effectiveness)
             .is_ok()
     );
-    assert!(shell.has_foresight_type_effectiveness(&type_effectiveness));
+    assert!(shell.has_foresight_type_effectiveness(&foresight_type_effectiveness));
     assert!(
         shell
             .foresight_type_effectiveness_keys()
-            .contains(&type_effectiveness)
+            .contains(&foresight_type_effectiveness)
     );
     assert!(
         shell
-            .require_foresight_type_effectiveness(&type_effectiveness)
+            .require_foresight_type_effectiveness(&foresight_type_effectiveness)
             .is_ok()
     );
     assert!(shell.has_weather_type_modifier(&weather_type_modifier));
@@ -9012,10 +9414,6 @@ fn runtime_game_shell_ticks_snapshots_and_saves_against_exact_pack_impl() {
     shell.session_mut().state.battle_active_party_index = Some(0);
     shell.session_mut().state.battle_active_enemy_party_index = Some(0);
     shell.session_mut().state.battle_escape_attempts = 2;
-    shell
-        .session_mut()
-        .state
-        .battle_player_stat_drop_guard_turns = 3;
     let battle_snapshot = shell
         .snapshot()
         .expect("battle snapshot")
@@ -9035,6 +9433,6 @@ fn runtime_game_shell_ticks_snapshots_and_saves_against_exact_pack_impl() {
     assert_eq!(battle_snapshot.active_enemy_party_index, Some(0));
     assert!(battle_snapshot.rewarded_enemy_party_indices.is_empty());
     assert_eq!(battle_snapshot.escape_attempts, 2);
-    assert_eq!(battle_snapshot.player_stat_drop_guard_turns, 3);
+    assert!(!battle_snapshot.player_mist_active);
     let _ = std::fs::remove_dir_all(root);
 }

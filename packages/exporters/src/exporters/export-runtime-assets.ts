@@ -213,8 +213,8 @@ export type WeatherModifiers = {
 };
 
 export type TypeEffectivenessTable = {
-  matchups: Record<string, Record<string, TypeMultiplier>>;
-  foresight_matchups: Record<string, Record<string, TypeMultiplier>>;
+  matchups: TypeEffectivenessEntry[];
+  foresight_matchups: TypeEffectivenessEntry[];
 };
 
 export type TypeEffectivenessEntry = {
@@ -3723,48 +3723,10 @@ export const exportTypeEffectivenessTable = (): TypeEffectivenessTable => {
       );
     }
   }
-  const sparseByPair = new Map(
-    sparseMatchups.map((entry) => [
-      `${entry.attacker}\u0000${entry.defender}`,
-      entry.multiplier,
-    ]),
-  );
-  const matchups = Object.fromEntries(
-    types.map((attacker) => [
-      attacker,
-      Object.fromEntries(
-        types.map((defender) => [
-          defender,
-          sparseByPair.get(`${attacker}\u0000${defender}`) ?? {
-            numerator: 1,
-            denominator: 1,
-          },
-        ]),
-      ),
-    ]),
-  );
-  const foresightByPair = new Map(
-    foresightMatchups.map((entry) => [
-      `${entry.attacker}\u0000${entry.defender}`,
-      entry.multiplier,
-    ]),
-  );
-  const foresightPayload = Object.fromEntries(
-    [...new Set(foresightMatchups.map((entry) => entry.attacker))]
-      .sort()
-      .map((attacker) => [
-        attacker,
-        Object.fromEntries(
-          foresightMatchups
-            .filter((entry) => entry.attacker === attacker)
-            .map((entry) => [
-              entry.defender,
-              foresightByPair.get(`${attacker}\u0000${entry.defender}`)!,
-            ]),
-        ),
-      ]),
-  );
-  const payload = { matchups, foresight_matchups: foresightPayload };
+  const payload = {
+    matchups: sparseMatchups,
+    foresight_matchups: foresightMatchups,
+  };
   writeJsonToTargets("type_effectiveness.json", payload, { indent: 2 });
   return payload;
 };

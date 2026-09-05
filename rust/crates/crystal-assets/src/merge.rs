@@ -634,17 +634,25 @@ fn insert_type_effectiveness(
 
 fn validate_type_effectiveness_table(
     description: &str,
-    table: &BTreeMap<String, BTreeMap<String, crystal_core::battle::damage::TypeMultiplier>>,
+    table: &[crystal_core::battle::damage::TypeEffectivenessEntry],
 ) -> Result<()> {
-    for (attacker, defenders) in table {
-        validate_battle_table_token(attacker, &format!("{description} attacker id"))?;
-        for (defender, multiplier) in defenders {
-            validate_battle_table_token(defender, &format!("{description} defender id"))?;
-            if multiplier.denominator == 0 {
-                anyhow::bail!(
-                    "{description} '{attacker}' into '{defender}' denominator must not be zero"
-                );
-            }
+    let mut pairs = BTreeSet::new();
+    for entry in table {
+        validate_battle_table_token(&entry.attacker, &format!("{description} attacker id"))?;
+        validate_battle_table_token(&entry.defender, &format!("{description} defender id"))?;
+        if entry.multiplier.denominator == 0 {
+            anyhow::bail!(
+                "{description} '{}' into '{}' denominator must not be zero",
+                entry.attacker,
+                entry.defender
+            );
+        }
+        if !pairs.insert((entry.attacker.as_str(), entry.defender.as_str())) {
+            anyhow::bail!(
+                "{description} duplicates '{}' into '{}'",
+                entry.attacker,
+                entry.defender
+            );
         }
     }
     Ok(())
@@ -924,6 +932,52 @@ fn validate_runtime_title_screen(title_screen: &RuntimeTitleScreen) -> Result<()
             );
         }
     }
+    let text_command_opcodes = [
+        "text",
+        "text_start",
+        "text_block",
+        "text_ram",
+        "text_decimal",
+        "text_today",
+        "text_pause",
+        "text_low",
+        "text_promptbutton",
+        "text_end",
+        "line",
+        "next",
+        "para",
+        "cont",
+        "prompt",
+        "done",
+    ];
+    let mut text_ids = std::collections::BTreeSet::new();
+    for text in &program.text {
+        anyhow::ensure!(
+            !text.id.is_empty() && text_ids.insert(text.id.as_str()),
+            "runtime_title_screen program has a missing or duplicate text id"
+        );
+        anyhow::ensure!(
+            !text.commands.is_empty(),
+            "runtime_title_screen text {} has no source commands",
+            text.id
+        );
+        for command in &text.commands {
+            anyhow::ensure!(
+                text_command_opcodes.contains(&command.command.as_str()),
+                "runtime_title_screen text {} has unknown command {}",
+                text.id,
+                command.command
+            );
+            anyhow::ensure!(
+                !command.source_span.file.is_empty()
+                    && command.source_span.start_line > 0
+                    && command.source_span.end_line >= command.source_span.start_line,
+                "runtime_title_screen text {} command {} has an invalid source span",
+                text.id,
+                command.command
+            );
+        }
+    }
     let mut subprogram_ids = std::collections::BTreeSet::new();
     for subprogram in &program.subprograms {
         anyhow::ensure!(
@@ -1182,10 +1236,12 @@ fn validate_field_move_travel_rule(
 
 fn validate_field_escape_item_rule(rule: &FieldEscapeItemRule) -> Result<()> {
     validate_modpack_payload_token(&rule.item_id, "field_moves:escape_rope item id")?;
-    validate_battle_table_token(
-        &rule.escape_rope_mode,
-        "field_moves:escape_rope escape mode id",
-    )
+    anyhow::ensure!(
+        rule.escape_rope_mode == crystal_core::systems::field_moves::ESCAPE_ROPE_MODE_DIG_WARP,
+        "field_moves:escape_rope escape mode id must be DIG_WARP, found '{}'",
+        rule.escape_rope_mode
+    );
+    Ok(())
 }
 
 fn validate_field_item_rule(subject: &str, rule: &FieldItemRule) -> Result<()> {

@@ -351,7 +351,7 @@ fn runtime_overworld_debug_start_preserves_aligned_runtime_coordinates() {
         }
     );
     assert_eq!(session.overworld.player.tile, TilePosition::new(1, 1));
-    assert_eq!(session.state.last_spawn_identifier, None);
+    assert_eq!(session.state.last_spawn_map_constant, None);
 
     let turned = session
         .apply_buttons(&runtime, &asset_root, [GameButton::Right])
@@ -4863,11 +4863,11 @@ fn runtime_escape_rope_uses_saved_dig_warp_without_fallback_destination() {
     );
     let asset_root = AssetRoot::new(&root);
     let mut data = runtime_data_with_escape_rope_maps();
-    data.field_moves.escape_rope.escape_rope_mode = "MOD_WARP".to_string();
+    data.field_moves.escape_rope.escape_rope_mode = "DIG_WARP".to_string();
     {
         let escape_rope = data.items.get_mut("ESCAPE_ROPE").expect("escape rope");
         escape_rope.effect = "MOD_ESCAPE".to_string();
-        escape_rope.escape_rope_mode = Some("MOD_WARP".to_string());
+        escape_rope.escape_rope_mode = Some("DIG_WARP".to_string());
     }
     let runtime = CrystalRuntime::from_compiled_pack(
         &asset_root,

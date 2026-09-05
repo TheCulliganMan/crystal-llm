@@ -47,6 +47,8 @@ const runtimePresentationAudioIds = new Set([
   "MUSIC_MAIN_MENU",
   "MUSIC_CRYSTAL_OPENING",
   "MUSIC_ROUTE_30",
+  "MUSIC_CREDITS",
+  "MUSIC_POST_CREDITS",
   "MUSIC_MOBILE_ADAPTER_MENU",
   "SFX_TITLE_SCREEN_ENTRANCE",
   "SFX_GAME_FREAK_PRESENTS",
@@ -1852,8 +1854,51 @@ describe("runtime title presentation source CFG", () => {
         expect.objectContaining({
           op: "initialize_clock",
           default_hour: 10,
+          default_minute: 0,
           hour_range: [0, 23],
           minute_range: [0, 59],
+          startup_delay_frames: 8,
+          startup_sequence: [
+            { op: "save_menu_state", register: "hInMenu" },
+            { op: "set_menu_state", register: "hInMenu", value: 1 },
+            { op: "disable_sprite_updates", register: "wSpriteUpdatesEnabled" },
+            { op: "fade_music", audio: "MUSIC_NONE", rate: 16 },
+            { op: "wait", frames: 8 },
+            { op: "rotate_palettes_left", steps: 4, frames_per_step: 8 },
+            { op: "clear_tilemap" },
+            { op: "clear_sprites" },
+            { op: "load_sgb_layout", layout: "SCGB_DIPLOMA" },
+            { op: "disable_bg_map_updates", register: "hBGMapMode" },
+            { op: "load_standard_font" },
+            {
+              op: "load_1bpp_tiles",
+              entries: [
+                { gfx: "TimeSetBackgroundGFX", tile: 0, count: 1 },
+                { gfx: "TimeSetUpArrowGFX", tile: 1, count: 1 },
+                { gfx: "TimeSetDownArrowGFX", tile: 2, count: 1 },
+              ],
+              frames_per_entry: 1,
+            },
+            { op: "clear_screen" },
+            { op: "wait_bg_map", frames: 4 },
+            { op: "rotate_palettes_right", steps: 4, frames_per_step: 8 },
+          ],
+          selection_delay_frames: 10,
+          selection_directions: ["up", "down"],
+          held_direction_repeat: {
+            h_in_menu: 1,
+            press_counter: 15,
+            restart_counter: 5,
+            redraw_wait_frames: 4,
+            idle_wait_frames: 1,
+            first_repeat_frames: 10,
+            later_repeat_frames: 5,
+          },
+          response_text_by_period: {
+            nite: "OakTimeSoDarkText",
+            morn: "OakTimeOversleptText",
+            day: "OakTimeYikesText",
+          },
         }),
         expect.objectContaining({
           op: "present_intro_portrait",
@@ -1870,8 +1915,84 @@ describe("runtime title presentation source CFG", () => {
           custom_naming_mode: "NAME_PLAYER",
           empty_fallbacks: { male: "CHRIS", female: "KRIS" },
         }),
+        expect.objectContaining({
+          op: "name_player",
+          preset_choices: {
+            male: ["NEW NAME", "CHRIS", "MAT", "ALLAN", "JON"],
+            female: ["NEW NAME", "KRIS", "AMANDA", "JUANA", "JODI"],
+          },
+          preset_menu: {
+            coordinates: { left: 0, top: 0, right: 10, bottom: 11 },
+            default_option: 1,
+            title: "NAME",
+            title_indent: 2,
+            flags: ["STATICMENU_CURSOR", "STATICMENU_PLACE_TITLE", "STATICMENU_DISABLE_B"],
+          },
+          picture_motion: {
+            right_tiles: 7,
+            left_tiles: 7,
+            steps: 8,
+            bg_map_wait_frames: 4,
+            delay_frames: 1,
+          },
+          custom_return: {
+            fade_out: { steps: 3, frames_per_step: 8 },
+            clear_tilemap: true,
+            bg_map_wait_frames: 4,
+            player_picture: {
+              species_value: 0,
+              coordinate: [6, 4],
+              dimensions: [7, 7],
+              palette_layout: "SCGB_TRAINER_OR_MON_FRONTPIC_PALS",
+            },
+            fade_in: { steps: 3, frames_per_step: 8 },
+          },
+        }),
       ]),
     );
+    const oakPortraits = oakSpeech?.phases[0]?.operations.filter(
+      (operation) => operation.op === "present_intro_portrait",
+    );
+    expect(oakPortraits).toEqual([
+      expect.objectContaining({
+        kind: "trainer",
+        trainer_class: "POKEMON_PROF",
+        fade: { words: 6, frames_per_word: 10 },
+      }),
+      expect.objectContaining({
+        kind: "pokemon",
+        species: "WOOPER",
+        wipe: { window_x_start: 0x77, delta: -8, stop_before: -1 },
+      }),
+      expect.objectContaining({
+        kind: "trainer",
+        trainer_class: "POKEMON_PROF",
+        fade: { words: 6, frames_per_word: 10 },
+      }),
+      expect.objectContaining({
+        kind: "player",
+        gender_source: "wPlayerGender",
+        fade: { words: 6, frames_per_word: 10 },
+      }),
+    ]);
+    expect(
+      oakSpeech?.phases[0]?.operations.filter(
+        (operation) => operation.op === "dismiss_intro_portrait",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        fade: { words: 3, frames_per_word: 8 },
+        clear_tilemap: true,
+      }),
+      expect.objectContaining({
+        fade: { words: 3, frames_per_word: 8 },
+        clear_tilemap: true,
+      }),
+      expect.objectContaining({
+        fade: { words: 3, frames_per_word: 8 },
+        clear_tilemap: true,
+      }),
+    ]);
     const initializeWorld = checkpoint.subprograms.find(
       (subprogram) => subprogram.id === "initialize_world",
     );
@@ -2029,9 +2150,323 @@ describe("runtime title presentation source CFG", () => {
     const crystalIntroScenePhase = crystalIntro?.phases.find(
       (phase) => phase.id === "scene_dispatch",
     );
+    const crystalIntroSceneDispatch = crystalIntro?.loop.scene_dispatch as {
+      entries?: string[];
+      entry_offsets?: Record<string, number>;
+      completion_wait_frames?: number[];
+    };
+    expect(crystalIntroSceneDispatch.entries).toEqual(
+      Array.from({ length: 28 }, (_, index) => `IntroScene${index + 1}`),
+    );
+    expect(Object.keys(crystalIntroSceneDispatch.entry_offsets ?? {})).toEqual(
+      crystalIntroSceneDispatch.entries,
+    );
+    expect(Object.values(crystalIntroSceneDispatch.entry_offsets ?? {})).toEqual(
+      expect.arrayContaining(Array.from({ length: 28 }, (_, index) => expect.any(Number))),
+    );
+    expect(
+      Object.values(crystalIntroSceneDispatch.entry_offsets ?? {}).every(
+        (offset, index, offsets) => index === 0 || offset > offsets[index - 1]!,
+      ),
+    ).toBe(true);
+    expect(crystalIntroSceneDispatch.completion_wait_frames).toEqual([
+      2, 0, 2, 0, 2, 0, 2, 0, 6, 0, 2, 0, 2, 0,
+      2, 0, 2, 0, 2, 0, 3, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    const sceneOperations = crystalIntroScenePhase?.operations ?? [];
+    const sceneLocalTargets = [
+      ...new Set(
+        sceneOperations
+          .map((operation) => operation.target)
+          .filter(
+            (target): target is string =>
+              typeof target === "string" &&
+              target.startsWith(".") &&
+              !target.endsWith("@CrystalIntro"),
+          ),
+      ),
+    ];
+    expect(sceneLocalTargets.length).toBeGreaterThan(0);
+    expect(crystalIntroScenePhase?.labels).toEqual(
+      expect.objectContaining(
+        Object.fromEntries(
+          sceneLocalTargets.map((target) => [target, expect.any(Number)]),
+        ),
+      ),
+    );
+    expect(crystalIntroScenePhase?.labels?.IntroScene1).toBe(0);
+    expect(crystalIntroScenePhase?.labels?.IntroScene2).toBe(
+      crystalIntroSceneDispatch.entry_offsets?.IntroScene2,
+    );
+    for (const operation of sceneOperations.filter(
+      (candidate) => candidate.op === "request_2bpp_transfer",
+    )) {
+      expect(operation).toEqual(
+        expect.objectContaining({
+          chunking: {
+            default_tiles_per_vblank: 8,
+            mobile_tiles_per_vblank: 6,
+            mobile_condition: {
+              wLinkMode: "LINK_MOBILE",
+              hMobile: 0,
+            },
+          },
+          completion: {
+            blocking: true,
+            wait: "DelayFrame",
+            until: "wRequested2bppSize == 0",
+          },
+        }),
+      );
+    }
+    expect(
+      sceneOperations
+        .filter((operation) => ["sprite_init_group", "sprite_activate"].includes(operation.op))
+        .map((operation) => [
+          operation.dispatcher_entry,
+          operation.dispatch_tick,
+          operation.op === "sprite_init_group"
+            ? (operation.instances as unknown[]).length
+            : 1,
+        ]),
+    ).toEqual([
+      [1, 97, 4],
+      [5, 33, 4],
+      [5, 97, 4],
+      [6, 1, 1],
+      [9, 65, 1],
+      [9, 33, 1],
+      [12, 1, 1],
+      [14, 1, 1],
+      [14, 1, 1],
+      [18, 1, 1],
+    ]);
+    expect(
+      (crystalIntroScenePhase?.operations ?? [])
+        .filter((operation) => operation.op === "play_audio")
+        .map((operation) => [
+          operation.dispatcher_entry,
+          operation.dispatch_tick,
+          operation.audio,
+        ]),
+    ).toEqual([
+      [1, 97, "SFX_INTRO_UNOWN_1"],
+      [5, 33, "SFX_INTRO_UNOWN_2"],
+      [5, 97, "SFX_INTRO_UNOWN_1"],
+      [7, 65, "SFX_INTRO_SUICUNE_3"],
+      [7, 95, "SFX_INTRO_SUICUNE_2"],
+      [9, 65, "SFX_INTRO_PICHU"],
+      [9, 33, "SFX_INTRO_PICHU"],
+      [12, 1, "MUSIC_CRYSTAL_OPENING"],
+      [13, 97, "SFX_INTRO_SUICUNE_4"],
+      [27, 121, "SFX_INTRO_WHOOSH"],
+    ]);
     expect(crystalIntro).toMatchObject({
       source_entry: "CrystalIntro",
       accepted_call_forms: ["farcall"],
+      loop: {
+        interrupt_timing: {
+          unit: "sm83_machine_cycles",
+          entry_to_first_input_machine_cycles: 59,
+          joy_text_delay: {
+            pressed_repeat_reset_machine_cycles: 101,
+            repeat_suppressed_machine_cycles: 107,
+            repeat_restart_machine_cycles: 110,
+            common_instruction_machine_cycles: [
+              6, 4, 4, 4, 4, 4, 2, 2, 3, 1, 3, 1, 1, 1, 1, 3, 1, 1,
+              3, 1, 1, 3, 3, 3, 3, 3, 4, 3, 1, 3, 2, 3, 3, 3, 1,
+            ],
+            pressed_repeat_reset_tail_machine_cycles: [2, 2, 4, 4],
+            repeat_suppressed_tail_machine_cycles: [3, 4, 1, 2, 1, 3, 4],
+            repeat_restart_tail_machine_cycles: [3, 4, 1, 3, 2, 4, 4],
+            source_spans: expect.arrayContaining([
+              expect.objectContaining({ file: "home/joypad.asm" }),
+            ]),
+          },
+          outer_loop_body: {
+            after_input_before_scene_dispatch: 21,
+            scene_dispatch_to_sprite_scheduler: 48,
+            sprite_scheduler_to_frame_wait: 49,
+            source_span: expect.objectContaining({ file: "engine/movie/intro.asm" }),
+          },
+          frame_clock: {
+            frame_t_cycles: 70224,
+            intro_entry_phase_t_cycles: 2980,
+            timing_oracle: {
+              runner: "tools/asm-oracle/intro_trace.py --timing",
+              rom_sha1: "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133",
+            },
+          },
+          hardware_entry: 5,
+          vectors: {
+            instruction: "jp",
+            machine_cycles: 4,
+            source_span: expect.objectContaining({ file: "home/header.asm" }),
+          },
+          lcd_stat: {
+            handler: "LCD",
+            trigger_register: "rSTAT",
+            trigger_mask: "STAT_MODE_0",
+            trigger: "hblank",
+            scanline_t_cycles: 456,
+            hblank_request_t_cycles: 250,
+            vblank_request_t_cycles: 65664,
+            interrupts_per_visible_frame: 144,
+            callback_pointer: "hLCDCPointer",
+            callback_zero_machine_cycles: 27,
+            callback_nonzero_machine_cycles: 49,
+            setup_source_span: expect.objectContaining({ file: "home/init.asm" }),
+            source_span: expect.objectContaining({ file: "home/lcd.asm" }),
+          },
+          timer: {
+            handler: "MobileTimer",
+            enable: "IE_TIMER",
+            inactive_guard: { source: "hMobile", predicate: "zero" },
+            request_period_t_cycles: 262144,
+            first_request_after_intro_entry_t_cycles: 258428,
+            inactive_machine_cycles: 48,
+            setup_source_span: expect.objectContaining({ file: "home/init.asm" }),
+            source_span: expect.objectContaining({ file: "home/mobile.asm" }),
+          },
+          vblank_normal: {
+            handler: "VBlank_Normal",
+            selector: { source: "hVBlank", value: 0 },
+            inactive_game_timer_machine_cycles: 47,
+            wrapper_epilogue_machine_cycles: 16,
+            game_timer_source_spans: expect.arrayContaining([
+              expect.objectContaining({ file: "home/game_time.asm" }),
+              expect.objectContaining({ file: "home/vblank.asm" }),
+            ]),
+            audio_update: {
+              routine: "_UpdateSound",
+              cadence: "every_vblank",
+              playing_guard: { source: "wMusicPlaying", predicate: "nonzero" },
+              timing: "state_dependent",
+              all_channels_inactive: {
+                predicate: "all_SOUND_CHANNEL_ON_flags_clear",
+                machine_cycles: 341,
+                source_spans: expect.arrayContaining([
+                  expect.objectContaining({ file: "audio/engine.asm" }),
+                ]),
+              },
+              helper_inactive_paths: {
+                apply_pitch_slide: expect.objectContaining({
+                  guard: "SOUND_PITCH_SLIDE_clear",
+                  machine_cycles: 13,
+                }),
+                handle_track_vibrato: expect.objectContaining({
+                  guard:
+                    "SOUND_DUTY_LOOP_SOUND_PITCH_OFFSET_SOUND_VIBRATO_clear",
+                  machine_cycles: 37,
+                }),
+                handle_noise: expect.objectContaining({
+                  guard: "SOUND_NOISE_clear",
+                  machine_cycles: 13,
+                }),
+                play_danger: expect.objectContaining({
+                  guard: "DANGER_ON_clear",
+                  machine_cycles: 11,
+                }),
+                fade_music: expect.objectContaining({
+                  guard: "wMusicFade_zero",
+                  machine_cycles: 10,
+                }),
+              },
+              active_channel_paths: {
+                guard: {
+                  sfx_priority: "zero",
+                  sustained_note_duration: "at_least_2",
+                },
+                extra_over_inactive_channel_machine_cycles: {
+                  music_without_active_sfx: 118,
+                  sfx: 109,
+                  music_shadowed_by_active_sfx: 98,
+                },
+                note_over_extra_before_parse_machine_cycles: 12,
+                source_spans: expect.arrayContaining([
+                  expect.objectContaining({ file: "audio/engine.asm" }),
+                ]),
+              },
+              helper_cycle_models: {
+                handle_track_vibrato: {
+                  base_machine_cycles: 37,
+                  duty_loop_extra_machine_cycles: 25,
+                  pitch_offset_extra_machine_cycles: 31,
+                  vibrato_extra_machine_cycles: {
+                    delay_count_nonzero: 16,
+                    zero_extent: 20,
+                    rate_count_nonzero: 37,
+                    toggle_up_no_borrow: 83,
+                    toggle_up_borrow: 87,
+                    toggle_down_no_carry: 84,
+                    toggle_down_carry: 85,
+                  },
+                  source_spans: expect.arrayContaining([
+                    expect.objectContaining({ file: "audio/engine.asm" }),
+                  ]),
+                },
+                update_channels_intro_paths: {
+                  pulse1: { unchanged: 71, noise_sampling: 88 },
+                  pulse2: { unchanged: 49, vibrato_override: 67 },
+                  wave: { unchanged: 45, noise_sampling: 201 },
+                  noise: { unchanged: 40, noise_sampling: 65 },
+                  source_spans: expect.arrayContaining([
+                    expect.objectContaining({ file: "audio/engine.asm" }),
+                  ]),
+                },
+                parse_music_intro_paths: {
+                  normal_note_base_machine_cycles: 201,
+                  music_noise_note_base_machine_cycles: 220,
+                  octave_command_machine_cycles: 145,
+                  set_note_duration: {
+                    fixed_machine_cycles: 64,
+                    multiply_per_bit_machine_cycles: 13,
+                    multiply_fixed_machine_cycles: 5,
+                    multiply_set_bit_extra_machine_cycles: 1,
+                    minimum_multiply_iterations: 1,
+                  },
+                  get_frequency: {
+                    fixed_machine_cycles: 60,
+                    per_right_shift_machine_cycles: 12,
+                    target_octave: 7,
+                  },
+                  source_spans: expect.arrayContaining([
+                    expect.objectContaining({ file: "audio/engine.asm" }),
+                    expect.objectContaining({ file: "home/audio.asm" }),
+                  ]),
+                },
+                handle_noise: {
+                  inactive_machine_cycles: 13,
+                  prefix_to_delay_check_machine_cycles: {
+                    sfx_channel: 19,
+                    music_channel_with_ch8_off: 27,
+                    music_channel_with_non_noise_ch8: 31,
+                  },
+                  music_blocked_by_noise_ch8_machine_cycles: 34,
+                  delay_machine_cycles: {
+                    nonzero_return: 16,
+                    zero_to_sample_reader: 8,
+                  },
+                  sample_reader_machine_cycles: {
+                    empty_address: 18,
+                    sound_ret: 26,
+                    sample: 71,
+                  },
+                  source_spans: expect.arrayContaining([
+                    expect.objectContaining({ file: "audio/engine.asm" }),
+                  ]),
+                },
+              },
+              invocation_source_span: expect.objectContaining({
+                file: "home/vblank.asm",
+              }),
+              implementation_source_span: expect.objectContaining({
+                file: "audio/engine.asm",
+              }),
+            },
+          },
+        },
+      },
       result: {
         name: "crystal_intro_preserved_carry",
         storage: "carry",
@@ -2091,6 +2526,114 @@ describe("runtime title presentation source CFG", () => {
         required: true,
       },
     });
+    const introDecompressions = (crystalIntroScenePhase?.operations ?? []).filter(
+      (operation) => operation.op === "decompress_lz3_resource",
+    );
+    expect(introDecompressions).toHaveLength(37);
+    expect(
+      introDecompressions.map((operation) =>
+        Number(operation.decompress_frame_boundaries_crossed),
+      ),
+    ).toEqual([
+      1, 6, 1, 2, 0, 3, 2, 1, 6, 1, 2, 0, 4, 7, 2, 2, 1, 6, 2, 0, 6,
+      2, 2, 1, 4, 1, 1, 1, 7, 1, 1, 3, 5, 1, 1, 1, 1,
+    ]);
+    expect(
+      introDecompressions.reduce(
+        (total, operation) =>
+          total + Number(operation.decompress_frame_boundaries_crossed),
+        0,
+      ),
+    ).toBe(88);
+    expect(introDecompressions[0]?.timing_oracle).toEqual({
+      runner: "tools/asm-oracle/intro_trace.py --timing",
+      rom_sha1: "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133",
+      start_intro_frame: 7,
+      end_intro_frame: 8,
+      elapsed_t_cycles_between_hooks: 70696,
+      start_frame_phase_t_cycles: 2480,
+    });
+    const introDecompressionRequests = (crystalIntroScenePhase?.operations ?? []).filter(
+      (operation) => operation.decompress_request_timing_oracle !== undefined,
+    );
+    expect(introDecompressionRequests).toHaveLength(37);
+    expect(
+      introDecompressionRequests.reduce(
+        (total, operation) =>
+          total + Number(operation.decompress_request_frame_boundaries_crossed),
+        0,
+      ),
+    ).toBe(583);
+    const intro2bppRequests = (crystalIntroScenePhase?.operations ?? []).filter(
+      (operation) => operation.request_2bpp_timing_oracle !== undefined,
+    );
+    expect(intro2bppRequests).toHaveLength(39);
+    expect(
+      intro2bppRequests.reduce(
+        (total, operation) =>
+          total + Number(operation.request_2bpp_frame_boundaries_crossed),
+        0,
+      ),
+    ).toBe(497);
+    expect(introDecompressionRequests[19]).toEqual(
+      expect.objectContaining({
+        op: "request_2bpp_transfer",
+        decompress_request_frame_boundaries_crossed: 9,
+        request_2bpp_frame_boundaries_crossed: 9,
+        request_2bpp_timing_oracle: {
+          runner: "tools/asm-oracle/intro_trace.py --timing",
+          rom_sha1: "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133",
+          start_intro_frame: 1212,
+          end_intro_frame: 1221,
+          elapsed_t_cycles_between_hooks: 568908,
+          start_frame_phase_t_cycles: 64016,
+        },
+        decompress_request_timing_oracle: {
+          runner: "tools/asm-oracle/intro_trace.py --timing",
+          rom_sha1: "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133",
+          start_intro_frame: 1212,
+          end_intro_frame: 1221,
+          elapsed_t_cycles_between_hooks: 629616,
+        },
+      }),
+    );
+    const spriteSchedulerCrossings = crystalIntro?.loop.scheduler
+      ?.rom_frame_crossings as Array<{
+      dispatcher_entry: number;
+      dispatch_tick: number;
+      elapsed_t_cycles_between_hooks: number;
+    }>;
+    expect(spriteSchedulerCrossings).toHaveLength(23);
+    expect(
+      spriteSchedulerCrossings.map(({ dispatcher_entry, dispatch_tick }) => [
+        dispatcher_entry,
+        dispatch_tick,
+      ]),
+    ).toEqual([
+      [7, 1],
+      [13, 1],
+      [15, 1],
+      [15, 33],
+      [15, 45],
+      [15, 57],
+      [15, 69],
+      [15, 73],
+      [15, 77],
+      [15, 81],
+      [15, 85],
+      [15, 89],
+      [15, 93],
+      [15, 97],
+      [15, 101],
+      [15, 105],
+      [15, 109],
+      [15, 113],
+      [15, 117],
+      [15, 121],
+      [15, 125],
+      [15, 129],
+      [19, 1],
+    ]);
     expect({
       reason: "missing_subprogram_contract",
       block: ".done@CrystalIntro",
@@ -2324,6 +2867,7 @@ describe("runtime title presentation source CFG", () => {
             resource_symbol: "IntroUnownAAttrmap",
             target: "wDecompressScratch",
             output_byte_count: 1024,
+            decompress_machine_cycles: 12757,
           }),
           expect.objectContaining({
             op: "request_2bpp_transfer",
@@ -2346,6 +2890,7 @@ describe("runtime title presentation source CFG", () => {
             resource_symbol: "IntroUnownsGFX",
             target: "wDecompressScratch",
             output_byte_count: 2048,
+            decompress_machine_cycles: 67368,
           }),
           expect.objectContaining({
             op: "request_2bpp_transfer",
@@ -2360,6 +2905,7 @@ describe("runtime title presentation source CFG", () => {
             resource_symbol: "IntroPulseGFX",
             target: "wDecompressScratch",
             output_byte_count: 256,
+            decompress_machine_cycles: 5027,
           }),
           expect.objectContaining({
             op: "request_2bpp_transfer",
@@ -2388,6 +2934,7 @@ describe("runtime title presentation source CFG", () => {
             resource_symbol: "IntroUnownATilemap",
             target: "wDecompressScratch",
             output_byte_count: 1024,
+            decompress_machine_cycles: 13716,
           }),
           expect.objectContaining({
             op: "request_2bpp_transfer",
@@ -3587,12 +4134,173 @@ describe("runtime title presentation source CFG", () => {
     });
   });
 
+  it("fails closed when the CrystalIntro LCD interrupt timing path changes", () => {
+    const lcdPath = "home/lcd.asm";
+    const mutatedLcd = replaceExact(
+      canonicalRead(lcdPath),
+      "\tldh a, [hLCDCPointer]\n\tand a\n\tjr z, .done",
+      "\tldh a, [hLCDCPointer]\n\tinc a\n\tand a\n\tjr z, .done",
+    );
+    expect(() =>
+      analyzeRuntimeTitlePresentationEmission({
+        disassemblyRoot,
+        audioAssetIds: new Set(),
+        runtimeSpawnIdentifiers: new Set([0]),
+        readSource: (relativePath) =>
+          relativePath === lcdPath ? mutatedLcd : canonicalRead(relativePath),
+      }),
+    ).toThrow(/CrystalIntro LCD STAT interrupt handler certificate/);
+  });
+
+  it("fails closed when the CrystalIntro inactive timer interrupt path changes", () => {
+    const mobilePath = "home/mobile.asm";
+    const mutatedMobile = replaceExact(
+      canonicalRead(mobilePath),
+      "MobileTimer::\n\tpush af",
+      "MobileTimer::\n\tnop\n\tpush af",
+    );
+    expect(() =>
+      analyzeRuntimeTitlePresentationEmission({
+        disassemblyRoot,
+        audioAssetIds: new Set(),
+        runtimeSpawnIdentifiers: new Set([0]),
+        readSource: (relativePath) =>
+          relativePath === mobilePath ? mutatedMobile : canonicalRead(relativePath),
+      }),
+    ).toThrow(/CrystalIntro inactive MobileTimer interrupt prefix certificate/);
+  });
+
+  it("fails closed when the inactive CrystalIntro GameTimer path changes", () => {
+    const gameTimePath = "home/game_time.asm";
+    const mutatedGameTime = replaceExact(
+      canonicalRead(gameTimePath),
+      "\tld hl, wGameTimerPaused\n\tbit GAME_TIMER_COUNTING_F, [hl]\n\tret z",
+      "\tld hl, wGameTimerPaused\n\tbit GAME_TIMER_COUNTING_F, [hl]\n\tnop\n\tret z",
+    );
+    expect(() =>
+      analyzeRuntimeTitlePresentationEmission({
+        disassemblyRoot,
+        audioAssetIds: new Set(),
+        runtimeSpawnIdentifiers: new Set([0]),
+        readSource: (relativePath) =>
+          relativePath === gameTimePath
+            ? mutatedGameTime
+            : canonicalRead(relativePath),
+      }),
+    ).toThrow(/CrystalIntro inactive GameTimer guard certificate/);
+  });
+
+  it("fails closed when the CrystalIntro VBlank sound timing guard changes", () => {
+    const audioPath = "audio/engine.asm";
+    const mutatedAudio = replaceExact(
+      canonicalRead(audioPath),
+      "_UpdateSound::\n; called once per frame\n\t; no use updating audio if it's not playing\n\tld a, [wMusicPlaying]\n\tand a\n\tret z",
+      "_UpdateSound::\n; called once per frame\n\t; no use updating audio if it's not playing\n\tld a, [wMusicPlaying]\n\tinc a\n\tand a\n\tret z",
+    );
+    expect(() =>
+      analyzeRuntimeTitlePresentationEmission({
+        disassemblyRoot,
+        audioAssetIds: new Set(),
+        runtimeSpawnIdentifiers: new Set([0]),
+        readSource: (relativePath) =>
+          relativePath === audioPath ? mutatedAudio : canonicalRead(relativePath),
+      }),
+    ).toThrow(/CrystalIntro state-dependent VBlank sound update guard certificate/);
+  });
+
+  it("fails closed when the CrystalIntro inactive sound-channel timing path changes", () => {
+    const audioPath = "audio/engine.asm";
+    const mutatedAudio = replaceExact(
+      canonicalRead(audioPath),
+      "\tld hl, CHANNEL_FLAGS1\n\tadd hl, bc\n\tbit SOUND_CHANNEL_ON, [hl]\n\tjp z, .nextchannel",
+      "\tld hl, CHANNEL_FLAGS1\n\tadd hl, bc\n\tbit SOUND_CHANNEL_ON, [hl]\n\tnop\n\tjp z, .nextchannel",
+    );
+    expect(() =>
+      analyzeRuntimeTitlePresentationEmission({
+        disassemblyRoot,
+        audioAssetIds: new Set(),
+        runtimeSpawnIdentifiers: new Set([0]),
+        readSource: (relativePath) =>
+          relativePath === audioPath ? mutatedAudio : canonicalRead(relativePath),
+      }),
+    ).toThrow(/CrystalIntro inactive sound-channel loop prefix certificate/);
+  });
+
+  it("fails closed when an inactive CrystalIntro sound-helper path changes", () => {
+    const audioPath = "audio/engine.asm";
+    const mutatedAudio = replaceExact(
+      canonicalRead(audioPath),
+      "ApplyPitchSlide:\n\t; quit if pitch slide inactive\n\tld hl, CHANNEL_FLAGS2\n\tadd hl, bc\n\tbit SOUND_PITCH_SLIDE, [hl]\n\tret z",
+      "ApplyPitchSlide:\n\t; quit if pitch slide inactive\n\tld hl, CHANNEL_FLAGS2\n\tadd hl, bc\n\tbit SOUND_PITCH_SLIDE, [hl]\n\tnop\n\tret z",
+    );
+    expect(() =>
+      analyzeRuntimeTitlePresentationEmission({
+        disassemblyRoot,
+        audioAssetIds: new Set(),
+        runtimeSpawnIdentifiers: new Set([0]),
+        readSource: (relativePath) =>
+          relativePath === audioPath ? mutatedAudio : canonicalRead(relativePath),
+      }),
+    ).toThrow(/CrystalIntro inactive pitch-slide path certificate/);
+  });
+
+  it("fails closed when an intro-observed UpdateChannels path changes", () => {
+    const audioPath = "audio/engine.asm";
+    const mutatedAudio = replaceExact(
+      canonicalRead(audioPath),
+      ".Channel2:\n.Channel6:\n\tld hl, CHANNEL_NOTE_FLAGS\n\tadd hl, bc",
+      ".Channel2:\n.Channel6:\n\tld hl, CHANNEL_NOTE_FLAGS\n\tnop\n\tadd hl, bc",
+    );
+    expect(() =>
+      analyzeRuntimeTitlePresentationEmission({
+        disassemblyRoot,
+        audioAssetIds: new Set(),
+        runtimeSpawnIdentifiers: new Set([0]),
+        readSource: (relativePath) =>
+          relativePath === audioPath ? mutatedAudio : canonicalRead(relativePath),
+      }),
+    ).toThrow(/CrystalIntro pulse-2\/6 update routing certificate/);
+  });
+
+  it("fails closed when the variable note-duration multiply changes", () => {
+    const audioPath = "audio/engine.asm";
+    const mutatedAudio = replaceExact(
+      canonicalRead(audioPath),
+      ".Multiply:\n; multiplies a and de\n; adds the result to l\n; stores the result in hl\n\tld h, 0",
+      ".Multiply:\n; multiplies a and de\n; adds the result to l\n; stores the result in hl\n\tld h, 1",
+    );
+    expect(() =>
+      analyzeRuntimeTitlePresentationEmission({
+        disassemblyRoot,
+        audioAssetIds: new Set(),
+        runtimeSpawnIdentifiers: new Set([0]),
+        readSource: (relativePath) =>
+          relativePath === audioPath ? mutatedAudio : canonicalRead(relativePath),
+      }),
+    ).toThrow(/CrystalIntro note-duration multiply setup certificate/);
+  });
+
   it("builds a closed source program through the common overworld loop", () => {
     const program = buildRuntimeTitlePresentationProgram({
       disassemblyRoot,
       audioAssetIds: runtimePresentationAudioIds,
       runtimeSpawnIdentifiers: new Set([0]),
     });
+    const textById = new Map(
+      program.text.map((entry) => [entry.id, entry.commands]),
+    );
+    expect(textById.get("OakText2")?.map((command) => command.command)).toEqual([
+      "text",
+      "line",
+      "cont",
+      "cont",
+      "text_end",
+    ]);
+    expect(textById.get("OakText3")?.map((command) => command.command)).toEqual([
+      "text_promptbutton",
+      "text_end",
+    ]);
+    expect(textById.get("OakText7")?.at(-1)?.command).toBe("done");
     expect(program.blocks[".loop@FinishContinueFunction"]?.operations).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ op: "prepare_overworld_session" }),
@@ -3602,6 +4310,36 @@ describe("runtime title presentation source CFG", () => {
     );
     expect(program.resources.length).toBeGreaterThan(0);
     expect(program.audio).toHaveLength(runtimePresentationAudioIds.size);
+    const creditsData = program.subprograms.find(
+      (subprogram) => subprogram.id === "credits_source_data",
+    );
+    expect(creditsData).toMatchObject({
+      source_entry: "Credits",
+      required_consumer: {
+        id: "runtime_title_screen.credits_source_data",
+        required: true,
+      },
+      audio: [
+        expect.objectContaining({ id: "MUSIC_CREDITS", kind: "music" }),
+        expect.objectContaining({ id: "MUSIC_POST_CREDITS", kind: "music" }),
+      ],
+    });
+    expect(creditsData?.phases[0]?.operations[0]).toEqual(
+      expect.objectContaining({
+        op: "credits_source_data",
+        skip_position_threshold: 13,
+        end_music_fade: { target: "MUSIC_POST_CREDITS", rate: 32 },
+        exit_clear: { frames: 4, cgb_palette_fill_byte: 255 },
+        menu_state: {
+          register: "hInMenu",
+          value: 1,
+          restored_on_return: false,
+        },
+        script_source: expect.stringContaining("db CREDITS_THEEND"),
+        constants_source: expect.stringContaining("const CREDITS_THEEND"),
+        strings_source: expect.stringContaining("CreditsStringsPointers:"),
+      }),
+    );
     expect(
       program.subprograms
         .find((subprogram) => subprogram.id === "start_title_screen")

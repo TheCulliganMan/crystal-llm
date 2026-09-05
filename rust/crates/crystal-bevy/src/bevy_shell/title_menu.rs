@@ -2,14 +2,20 @@ fn visible_title_menu_options<'a>(
     runtime_shell: &BevyRuntimeShell,
     title: &'a TitleMenu,
 ) -> &'a [RuntimeTitleMainMenuItem] {
-    let variant = if title_continue_save_path(runtime_shell, title).is_none() {
+    &title.main_menu.variants[visible_title_menu_variant_index(runtime_shell, title)]
+}
+
+fn visible_title_menu_variant_index(
+    runtime_shell: &BevyRuntimeShell,
+    title: &TitleMenu,
+) -> usize {
+    if title_continue_save_path(runtime_shell, title).is_none() {
         title.main_menu.new_game_variant
     } else if visible_title_mystery_gift_unlocked(runtime_shell, title) {
         title.main_menu.mystery_variant
     } else {
         title.main_menu.continue_variant
-    };
-    &title.main_menu.variants[variant]
+    }
 }
 
 fn visible_title_mystery_gift_unlocked(
@@ -29,18 +35,40 @@ fn visible_title_mystery_gift_unlocked(
 
 impl VisibleIntroScreen {
     fn from_parameters(parameters: RuntimeIntroPresentationParameters) -> Self {
+        let frame_clock = RuntimeIntroFrameClock::new(
+            parameters.interrupt_timing.frame_t_cycles,
+            parameters.interrupt_timing.intro_entry_phase_t_cycles,
+        )
+        .expect("validated CrystalIntro frame-clock parameters");
         Self {
+            callable_memory: BTreeMap::new(),
+            symbolic_memory: BTreeMap::new(),
+            saved_register_slots: BTreeMap::new(),
+            cleanup_cursor: None,
+            scene_setup_cursor: None,
+            scene_setup_audio: Vec::new(),
+            scene_setup_sprite_instances: Vec::new(),
+            cleanup_exit_reason: None,
+            tilemap_cleared: false,
             scene_count: parameters.scene_labels.len(),
+            scene_labels: parameters.scene_labels,
             scene_operation_offsets: parameters.scene_operation_offsets,
             completion_wait_frames: parameters.completion_wait_frames,
+            sprite_scheduler_frame_crossings: parameters.sprite_scheduler_frame_crossings,
+            interrupt_timing: parameters.interrupt_timing,
+            frame_clock,
+            cpu_work_machine_cycles: 0,
             jumptable_index: 0,
             scene_dispatch_tick: 0,
             scene_frame_counter: 0,
             next_scene_frame_counter: None,
+            scene_block_frames: 0,
             scene_delay_frames: 0,
             scene_timer: 0,
             scroll_x: 0,
             scroll_y: 0,
+            window_x: 7,
+            window_y: 144,
             ly_overrides: vec![0; 144],
             lcdc_pointer: 0,
             global_anim_x_offset: 0,
@@ -49,9 +77,27 @@ impl VisibleIntroScreen {
             background_binding: None,
             attrmap_palette_overrides: Vec::new(),
             tile_override: None,
+            tilemap_xor_mask: 0,
             palette_effect: VisibleIntroPaletteEffect::None,
             finished: false,
         }
+    }
+
+    fn from_program(
+        parameters: RuntimeIntroPresentationParameters,
+        program: &RuntimePresentationProgram,
+    ) -> Result<Self> {
+        let mut intro = Self::from_parameters(parameters);
+        execute_visible_intro_entry_init(&mut intro, program)?;
+        let entry_boundaries = intro.frame_clock.advance_machine_cycles(
+            u64::from(intro.interrupt_timing.entry_to_first_input_machine_cycles)
+                + u64::from(intro.interrupt_timing.lcd_callback_zero_machine_cycles),
+        )?;
+        anyhow::ensure!(
+            entry_boundaries == 0,
+            "CrystalIntro entry crossed an unsupported frame boundary before first input"
+        );
+        Ok(intro)
     }
 
     #[cfg(test)]
@@ -63,24 +109,449 @@ impl VisibleIntroScreen {
                 2, 0, 2, 0, 2, 0, 2, 0, 6, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 3, 0, 0,
                 0, 0, 0, 0, 0,
             ],
+            sprite_scheduler_frame_crossings: Vec::new(),
+            interrupt_timing: RuntimeIntroInterruptTiming {
+                frame_t_cycles: 70_224,
+                intro_entry_phase_t_cycles: 2_980,
+                entry_to_first_input_machine_cycles: 59,
+                joy_text_delay_pressed_repeat_reset_machine_cycles: 101,
+                joy_text_delay_repeat_suppressed_machine_cycles: 107,
+                joy_text_delay_repeat_restart_machine_cycles: 110,
+                joy_text_delay_common_instruction_machine_cycles: vec![
+                    6, 4, 4, 4, 4, 4, 2, 2, 3, 1, 3, 1, 1, 1, 1, 3, 1, 1, 3, 1, 1, 3, 3, 3,
+                    3, 3, 4, 3, 1, 3, 2, 3, 3, 3, 1,
+                ],
+                joy_text_delay_pressed_repeat_reset_tail_machine_cycles: vec![2, 2, 4, 4],
+                joy_text_delay_repeat_suppressed_tail_machine_cycles: vec![
+                    3, 4, 1, 2, 1, 3, 4,
+                ],
+                joy_text_delay_repeat_restart_tail_machine_cycles: vec![3, 4, 1, 3, 2, 4, 4],
+                after_input_before_scene_dispatch_machine_cycles: 21,
+                scene_dispatch_to_sprite_scheduler_machine_cycles: 48,
+                sprite_scheduler_to_frame_wait_machine_cycles: 49,
+                hardware_entry_machine_cycles: 5,
+                vector_jump_machine_cycles: 4,
+                lcd_interrupts_per_visible_frame: 144,
+                lcd_scanline_t_cycles: 456,
+                lcd_hblank_request_t_cycles: 250,
+                vblank_request_t_cycles: 65_664,
+                lcd_callback_zero_machine_cycles: 27,
+                lcd_callback_nonzero_machine_cycles: 49,
+                timer_request_period_t_cycles: 262_144,
+                first_timer_request_after_intro_entry_t_cycles: 258_428,
+                inactive_timer_machine_cycles: 48,
+                inactive_game_timer_machine_cycles: 47,
+                vblank_wrapper_epilogue_machine_cycles: 16,
+                sound_update_is_state_dependent: true,
+                inactive_channels_sound_update_machine_cycles: 341,
+                inactive_pitch_slide_machine_cycles: 13,
+                inactive_track_vibrato_machine_cycles: 37,
+                inactive_noise_machine_cycles: 13,
+                inactive_danger_machine_cycles: 11,
+                inactive_music_fade_machine_cycles: 10,
+                active_music_channel_extra_machine_cycles: 118,
+                active_sfx_channel_extra_machine_cycles: 109,
+                shadowed_music_channel_extra_machine_cycles: 98,
+                note_over_extra_before_parse_machine_cycles: 12,
+                track_vibrato: crystal_assets::RuntimeIntroTrackVibratoTiming {
+                    base_machine_cycles: 37,
+                    duty_loop_extra_machine_cycles: 25,
+                    pitch_offset_extra_machine_cycles: 31,
+                    delay_count_nonzero_extra_machine_cycles: 16,
+                    zero_extent_extra_machine_cycles: 20,
+                    rate_count_nonzero_extra_machine_cycles: 37,
+                    toggle_up_no_borrow_extra_machine_cycles: 83,
+                    toggle_up_borrow_extra_machine_cycles: 87,
+                    toggle_down_no_carry_extra_machine_cycles: 84,
+                    toggle_down_carry_extra_machine_cycles: 85,
+                },
+                update_channels: crystal_assets::RuntimeIntroUpdateChannelsTiming {
+                    pulse1_unchanged_machine_cycles: 71,
+                    pulse1_noise_sampling_machine_cycles: 88,
+                    pulse2_unchanged_machine_cycles: 49,
+                    pulse2_vibrato_override_machine_cycles: 67,
+                    wave_unchanged_machine_cycles: 45,
+                    wave_noise_sampling_machine_cycles: 201,
+                    noise_unchanged_machine_cycles: 40,
+                    noise_noise_sampling_machine_cycles: 65,
+                },
+                parse_music: crystal_assets::RuntimeIntroParseMusicTiming {
+                    normal_note_base_machine_cycles: 201,
+                    music_noise_note_base_machine_cycles: 220,
+                    octave_command_machine_cycles: 145,
+                    set_note_duration: crystal_assets::RuntimeIntroSetNoteDurationTiming {
+                        fixed_machine_cycles: 64,
+                        multiply_per_bit_machine_cycles: 13,
+                        multiply_fixed_machine_cycles: 5,
+                        multiply_set_bit_extra_machine_cycles: 1,
+                        minimum_multiply_iterations: 1,
+                    },
+                    get_frequency: crystal_assets::RuntimeIntroGetFrequencyTiming {
+                        fixed_machine_cycles: 60,
+                        per_right_shift_machine_cycles: 12,
+                        target_octave: 7,
+                    },
+                },
+                noise: crystal_assets::RuntimeIntroNoiseTiming {
+                    inactive_machine_cycles: 13,
+                    sfx_prefix_machine_cycles: 19,
+                    music_ch8_off_prefix_machine_cycles: 27,
+                    music_ch8_non_noise_prefix_machine_cycles: 31,
+                    music_blocked_by_noise_ch8_machine_cycles: 34,
+                    nonzero_delay_machine_cycles: 16,
+                    zero_delay_machine_cycles: 8,
+                    empty_address_machine_cycles: 18,
+                    sound_ret_machine_cycles: 26,
+                    sample_machine_cycles: 71,
+                },
+            },
         })
     }
 
     fn scene_name(&self) -> String {
-        if self.jumptable_index < self.scene_count {
-            format!("IntroScene{}", self.jumptable_index + 1)
-        } else {
-            "complete".to_string()
-        }
+        self.scene_labels
+            .get(self.jumptable_index)
+            .cloned()
+            .unwrap_or_else(|| "complete".to_string())
     }
 }
 
+fn execute_visible_intro_entry_init(
+    intro: &mut VisibleIntroScreen,
+    program: &RuntimePresentationProgram,
+) -> Result<()> {
+    let phase = program
+        .subprograms
+        .iter()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .and_then(|subprogram| {
+            subprogram
+                .phases
+                .iter()
+                .find(|phase| phase.id == "entry_init")
+        })
+        .context("runtime presentation crystal_intro entry_init phase is missing")?;
+    anyhow::ensure!(
+        phase.operations.len() == 8,
+        "runtime presentation crystal_intro entry_init phase is not exact"
+    );
+    let expected_operations = [
+        ("save_memory_byte", "rWBK"),
+        ("write_memory_byte", "rWBK"),
+        ("save_memory_byte", "hInMenu"),
+        ("save_memory_byte", "hVBlank"),
+        ("write_memory_byte", "hVBlank"),
+        ("write_memory_byte", "hInMenu"),
+        ("write_memory_byte", "hMapAnims"),
+        ("write_memory_byte", "wJumptableIndex"),
+    ];
+    for (operation_index, operation) in phase.operations.iter().enumerate() {
+        let (expected_op, expected_target) = expected_operations[operation_index];
+        let actual_target = operation
+            .fields
+            .get(if operation.op == "save_memory_byte" {
+                "source"
+            } else {
+                "target"
+            })
+            .and_then(serde_json::Value::as_str);
+        anyhow::ensure!(
+            operation.op == expected_op && actual_target == Some(expected_target),
+            "CrystalIntro entry_init operation {operation_index} is not the exact {expected_op} {expected_target}"
+        );
+        match operation.op.as_str() {
+            "save_memory_byte" => {
+                let source = operation
+                    .fields
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .context("CrystalIntro save_memory_byte has no source")?;
+                let storage = operation
+                    .fields
+                    .get("storage")
+                    .and_then(serde_json::Value::as_object)
+                    .context("CrystalIntro save_memory_byte has no storage contract")?;
+                anyhow::ensure!(
+                    storage.get("kind").and_then(serde_json::Value::as_str) == Some("cpu_stack")
+                        && storage
+                            .get("register_pair")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("af")
+                        && operation
+                            .fields
+                            .get("restore_required")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true),
+                    "CrystalIntro save for {source} has an unsupported stack contract"
+                );
+                let slot = storage
+                    .get("stack_slot")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|slot| usize::try_from(slot).ok())
+                    .context("CrystalIntro save_memory_byte has no exact stack slot")?;
+                anyhow::ensure!(
+                    intro
+                        .saved_register_slots
+                        .insert(slot, source.to_string())
+                        .is_none(),
+                    "CrystalIntro saves two registers in stack slot {slot}"
+                );
+            }
+            "write_memory_byte" => {
+                let target = operation
+                    .fields
+                    .get("target")
+                    .and_then(serde_json::Value::as_str)
+                    .context("CrystalIntro write_memory_byte has no target")?;
+                match operation.fields.get("value") {
+                    Some(serde_json::Value::Number(value)) => {
+                        let value = value
+                            .as_u64()
+                            .and_then(|value| u16::try_from(value).ok())
+                            .context("CrystalIntro byte write has no exact unsigned value")?;
+                        anyhow::ensure!(
+                            value <= u16::from(u8::MAX),
+                            "CrystalIntro byte write for {target} exceeds one byte"
+                        );
+                        intro.callable_memory.insert(target.to_string(), value);
+                        if target == "wJumptableIndex" {
+                            intro.jumptable_index = usize::from(value);
+                        }
+                    }
+                    Some(serde_json::Value::String(value)) => {
+                        intro
+                            .symbolic_memory
+                            .insert(target.to_string(), value.to_string());
+                    }
+                    _ => anyhow::bail!("CrystalIntro byte write for {target} has no exact value"),
+                }
+            }
+            op => anyhow::bail!("unsupported CrystalIntro entry_init operation {op}"),
+        }
+    }
+    let expected_saves = [(0, "rWBK"), (1, "hInMenu"), (2, "hVBlank")]
+        .into_iter()
+        .map(|(slot, source)| (slot, source.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    anyhow::ensure!(
+        intro.saved_register_slots == expected_saves
+            && intro.symbolic_memory.get("rWBK").map(String::as_str)
+                == Some("BANK(wGBCPalettes)")
+            && intro.callable_memory.get("hVBlank") == Some(&0)
+            && intro.callable_memory.get("hInMenu") == Some(&1)
+            && intro.callable_memory.get("hMapAnims") == Some(&0)
+            && intro.callable_memory.get("wJumptableIndex") == Some(&0),
+        "runtime presentation CrystalIntro entry_init contract is not exact"
+    );
+    Ok(())
+}
+
+fn visible_intro_cleanup_phase<'a>(
+    program: &'a RuntimePresentationProgram,
+) -> Result<&'a crystal_assets::RuntimePresentationPhase> {
+    let phase = program
+        .subprograms
+        .iter()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .and_then(|subprogram| {
+            subprogram
+                .phases
+                .iter()
+                .find(|phase| phase.id == "cleanup")
+        })
+        .context("runtime presentation crystal_intro cleanup phase is missing")?;
+    validate_visible_intro_cleanup_phase(phase)?;
+    Ok(phase)
+}
+
+fn validate_visible_intro_cleanup_phase(
+    phase: &crystal_assets::RuntimePresentationPhase,
+) -> Result<()> {
+    let expected_operations = [
+        ("write_memory_byte", Some("rBGP")),
+        ("write_memory_byte", Some("rOBP0")),
+        ("write_memory_byte", Some("rOBP1")),
+        ("fill_memory", Some("wBGPals2")),
+        ("palette_transfer_request", None),
+        ("write_memory_byte", Some("hBGMapMode")),
+        ("wait_frames", None),
+        ("fill_memory", Some("wShadowOAM")),
+        ("fill_memory", Some("wTilemap")),
+        ("write_memory_byte", Some("hBGMapMode")),
+        ("wait_frames", None),
+        ("write_memory_byte", Some("hSCX")),
+        ("write_memory_byte", Some("hSCY")),
+        ("write_memory_byte", Some("hWX")),
+        ("write_memory_byte", Some("hWY")),
+        ("restore_memory_byte", Some("hVBlank")),
+        ("restore_memory_byte", Some("hInMenu")),
+        ("restore_memory_byte", Some("rWBK")),
+        ("return", None),
+    ];
+    anyhow::ensure!(
+        phase.operations.len() == expected_operations.len(),
+        "runtime presentation crystal_intro cleanup phase is not exact"
+    );
+    for (operation_index, operation) in phase.operations.iter().enumerate() {
+        let (expected_op, expected_target) = expected_operations[operation_index];
+        anyhow::ensure!(
+            operation.op == expected_op
+                && expected_target.is_none_or(|target| {
+                    operation
+                        .fields
+                        .get("target")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(target)
+                }),
+            "CrystalIntro cleanup operation {operation_index} is not source-exact"
+        );
+        if operation.op == "wait_frames" {
+            anyhow::ensure!(
+                operation
+                    .fields
+                    .get("frames")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(4),
+                "CrystalIntro cleanup wait {operation_index} is not exactly four frames"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn apply_visible_intro_cleanup_operation(
+    intro: &mut VisibleIntroScreen,
+    operation: &crystal_assets::RuntimePresentationOperation,
+) -> Result<()> {
+    match operation.op.as_str() {
+        "fill_memory" => {
+            let target = operation
+                .fields
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .context("CrystalIntro cleanup fill_memory has no target")?;
+            match target {
+                "wShadowOAM" => clear_visible_intro_sprites(intro),
+                "wTilemap" => {
+                    intro.tilemap_cleared = true;
+                    intro.attrmap_palette_overrides.clear();
+                    intro.tile_override = None;
+                }
+                "wBGPals2" => {
+                    intro.palette_effect = VisibleIntroPaletteEffect::ClearBg {
+                        color: [u8::MAX; 3],
+                    };
+                }
+                other => anyhow::bail!(
+                    "unsupported CrystalIntro cleanup fill_memory target {other}"
+                ),
+            }
+        }
+        "palette_transfer_request" => {
+            intro.palette_effect = VisibleIntroPaletteEffect::ClearBg {
+                color: [u8::MAX; 3],
+            };
+        }
+        "write_memory_byte" => {
+            let target = operation
+                .fields
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .context("CrystalIntro cleanup write_memory_byte has no target")?;
+            let value = operation
+                .fields
+                .get("value")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u8::try_from(value).ok())
+                .context("CrystalIntro cleanup byte write has no exact value")?;
+            intro
+                .callable_memory
+                .insert(target.to_string(), u16::from(value));
+            match target {
+                "hSCX" => intro.scroll_x = value,
+                "hSCY" => intro.scroll_y = value,
+                "hWX" => intro.window_x = value,
+                "hWY" => intro.window_y = value,
+                "rBGP" | "rOBP0" | "rOBP1" | "hBGMapMode" => {}
+                other => anyhow::bail!(
+                    "unsupported CrystalIntro cleanup byte-write target {other}"
+                ),
+            }
+        }
+        "wait_frames" | "return" => {}
+        "restore_memory_byte" => {
+            let target = operation
+                .fields
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .context("CrystalIntro restore_memory_byte has no target")?;
+            let storage = operation
+                .fields
+                .get("storage")
+                .and_then(serde_json::Value::as_object)
+                .context("CrystalIntro restore_memory_byte has no storage contract")?;
+            anyhow::ensure!(
+                storage.get("kind").and_then(serde_json::Value::as_str) == Some("cpu_stack")
+                    && storage
+                        .get("register_pair")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("af"),
+                "CrystalIntro restore for {target} has an unsupported stack contract"
+            );
+            let slot = storage
+                .get("stack_slot")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|slot| usize::try_from(slot).ok())
+                .context("CrystalIntro restore_memory_byte has no exact stack slot")?;
+            let saved = intro.saved_register_slots.remove(&slot).with_context(|| {
+                format!("CrystalIntro restores uninitialized stack slot {slot}")
+            })?;
+            anyhow::ensure!(
+                saved == target,
+                "CrystalIntro restores {target} from slot {slot}, which saved {saved}"
+            );
+            intro.callable_memory.remove(target);
+            intro.symbolic_memory.remove(target);
+        }
+        op => anyhow::bail!("unsupported CrystalIntro cleanup operation {op}"),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn execute_visible_intro_cleanup(
+    intro: &mut VisibleIntroScreen,
+    program: &RuntimePresentationProgram,
+) -> Result<()> {
+    let phase = visible_intro_cleanup_phase(program)?;
+    for operation in &phase.operations {
+        apply_visible_intro_cleanup_operation(intro, operation)?;
+    }
+    anyhow::ensure!(
+        intro.saved_register_slots.is_empty(),
+        "CrystalIntro cleanup did not restore every saved register"
+    );
+    Ok(())
+}
+
 fn tick_visible_intro_screen(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    runtime_shell.intro_display_screen = runtime_shell.intro_screen.clone();
     let Some(intro) = runtime_shell.intro_screen.as_ref() else {
         return Ok(());
     };
+    if intro.cleanup_cursor.is_some() {
+        return advance_visible_intro_cleanup(runtime_shell);
+    }
     if intro.finished || intro.jumptable_index >= intro.scene_count {
         return finish_visible_intro_screen(runtime_shell, "complete");
+    }
+    if intro.scene_block_frames > 0 {
+        let intro = runtime_shell
+            .intro_screen
+            .as_mut()
+            .context("intro screen disappeared during its source frame wait")?;
+        intro.scene_block_frames = intro.scene_block_frames.saturating_sub(1);
+        return Ok(());
     }
     if intro.scene_delay_frames > 0 {
         let delay_finished = {
@@ -110,19 +581,40 @@ fn tick_visible_intro_screen(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
     }
 
     let scene_finished = step_visible_intro_scene(runtime_shell)?;
+    drain_visible_intro_setup_audio(runtime_shell)?;
     let delay = if scene_finished {
         let intro = runtime_shell
             .intro_screen
             .as_ref()
             .context("intro screen disappeared before its source completion wait")?;
-        intro
-            .completion_wait_frames
-            .get(intro.jumptable_index)
-            .copied()
-            .context("intro scene has no source-derived completion wait")?
+        if intro.scene_setup_cursor.is_some() {
+            0
+        } else {
+            intro
+                .completion_wait_frames
+                .get(intro.jumptable_index)
+                .copied()
+                .context("intro scene has no source-derived completion wait")?
+        }
     } else {
         0
     };
+    if scene_finished && delay == 0 {
+        let intro = runtime_shell
+            .intro_screen
+            .as_mut()
+            .context("intro screen disappeared before its source scene advance")?;
+        visible_intro_next_scene(intro);
+        apply_visible_intro_sprite_pipeline_for_shell(runtime_shell)?;
+        if runtime_shell
+            .intro_screen
+            .as_ref()
+            .is_some_and(|intro| intro.finished)
+        {
+            return finish_visible_intro_screen(runtime_shell, "complete");
+        }
+        return Ok(());
+    }
     if delay == 0 {
         apply_visible_intro_sprite_pipeline_for_shell(runtime_shell)?;
     }
@@ -134,11 +626,7 @@ fn tick_visible_intro_screen(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
         .checked_add(1)
         .context("visible intro scene exceeded the source dispatcher tick domain")?;
     if scene_finished {
-        if delay > 0 {
-            intro.scene_delay_frames = delay;
-        } else {
-            visible_intro_next_scene(intro);
-        }
+        intro.scene_delay_frames = delay;
     } else if let Some(next) = intro.next_scene_frame_counter.take() {
         intro.scene_frame_counter = next;
     } else {
@@ -156,10 +644,12 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
             .intro_screen
             .as_ref()
             .context("visible intro has no state")?;
-        visible_intro_audio_operations(
-            intro,
-            &runtime_shell.runtime.data().runtime_title_screen.program,
-        )?
+        let program = &runtime_shell.runtime.data().runtime_title_screen.program;
+        if visible_intro_scene_is_linear_setup(intro, program)? {
+            Vec::new()
+        } else {
+            visible_intro_audio_operations(intro, program)?
+        }
     };
     for (audio, kind) in audio_operations {
         match kind.as_str() {
@@ -182,154 +672,128 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
         return Ok(false);
     };
     apply_visible_intro_background_binding(intro, intro_program)?;
+    if visible_intro_scene_is_linear_setup(intro, intro_program)? {
+        let complete = tick_visible_intro_setup_scene(intro, intro_program)?;
+        let instances = std::mem::take(&mut intro.scene_setup_sprite_instances);
+        if !instances.is_empty() {
+            spawn_visible_intro_sprite_program_instances(
+                intro,
+                sprite_bundle,
+                intro_program,
+                &instances,
+            )?;
+        }
+        return Ok(complete);
+    }
     match intro.jumptable_index {
-        0 => {
-            clear_visible_intro_sprites(intro);
-            intro.scroll_x = visible_intro_source_byte_write(intro, intro_program, "hSCX")?;
-            intro.scroll_y = visible_intro_source_byte_write(intro, intro_program, "hSCY")?;
-            intro.scene_frame_counter = 0;
-            intro.scene_timer = 0;
-            intro.palette_effect = VisibleIntroPaletteEffect::None;
-            Ok(true)
-        }
-        1 => {
-            let frame = intro.scene_frame_counter;
-            if frame >= 0x80 {
-                return Ok(true);
-            }
-            spawn_visible_intro_sprite_program_group_if_scheduled(
-                intro,
-                sprite_bundle,
-                intro_program,
-            )?;
-            intro.scene_timer = frame;
-            intro.palette_effect =
-                visible_intro_unown_fade_effect(intro, intro_program, 0, frame)?;
-            Ok(false)
-        }
-        2 => {
-            clear_visible_intro_sprites(intro);
-            intro.scroll_x = visible_intro_source_byte_write(intro, intro_program, "hSCX")?;
-            intro.scroll_y = visible_intro_source_byte_write(intro, intro_program, "hSCY")?;
-            visible_intro_reset_ly_overrides(intro, intro_program)?;
-            intro.lcdc_pointer =
-                visible_intro_source_byte_write(intro, intro_program, "hLCDCPointer")?;
-            intro.scene_frame_counter = 0;
-            intro.palette_effect = VisibleIntroPaletteEffect::None;
-            Ok(true)
-        }
+        1 | 5 => step_visible_intro_unown_fade_scene(
+            intro,
+            sprite_bundle,
+            intro_program,
+        ),
         3 => {
-            visible_intro_perspective_scroll(intro, intro_program, intro.scene_frame_counter)?;
-            Ok(intro.scene_frame_counter
-                == visible_intro_perspective_completion_frame(intro, intro_program)?)
-        }
-        4 => {
-            clear_visible_intro_sprites(intro);
-            intro.scroll_x = visible_intro_source_byte_write(intro, intro_program, "hSCX")?;
-            intro.scroll_y = visible_intro_source_byte_write(intro, intro_program, "hSCY")?;
-            intro.lcdc_pointer =
-                visible_intro_source_byte_write(intro, intro_program, "hLCDCPointer")?;
-            intro.scene_frame_counter = 0;
-            intro.palette_effect = VisibleIntroPaletteEffect::None;
-            Ok(true)
-        }
-        5 => {
-            let frame = intro.scene_frame_counter;
-            if frame >= 0x80 {
-                return Ok(true);
-            }
-            spawn_visible_intro_sprite_program_group_if_scheduled(
-                intro,
-                sprite_bundle,
-                intro_program,
-            )?;
-            intro.scene_timer = frame;
-            intro.palette_effect = visible_intro_unown_fade_effect(
-                intro,
-                intro_program,
-                if frame >= 0x40 { 1 } else { 0 },
-                frame,
-            )?;
-            Ok(false)
-        }
-        6 => {
-            clear_visible_intro_sprites(intro);
-            spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program)?;
-            intro.scroll_x = visible_intro_source_byte_write(intro, intro_program, "hSCX")?;
-            intro.scroll_y = visible_intro_source_byte_write(intro, intro_program, "hSCY")?;
-            intro.global_anim_x_offset =
-                visible_intro_source_byte_write(intro, intro_program, "wGlobalAnimXOffset")?;
-            visible_intro_reset_ly_overrides(intro, intro_program)?;
-            intro.lcdc_pointer =
-                visible_intro_source_byte_write(intro, intro_program, "hLCDCPointer")?;
-            intro.scene_frame_counter = 0;
-            intro.scene_timer = 0;
-            intro.palette_effect = VisibleIntroPaletteEffect::None;
-            Ok(true)
+            let (run, frame, _, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            anyhow::ensure!(
+                run.effects
+                    .iter()
+                    .filter(|operation| operation.op == "perspective_scroll")
+                    .count()
+                    == 1,
+                "IntroScene4 did not execute its one source perspective-scroll effect"
+            );
+            visible_intro_perspective_scroll(intro, intro_program, frame)?;
+            Ok(scene_finished)
         }
         7 => {
-            let frame = intro.scene_frame_counter;
-            let rule = visible_intro_perspective_motion_rule(intro, intro_program)?;
-            if frame < rule.motion_start_frame {
+            let (run, _, _, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            let perspective_scrolls = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "perspective_scroll")
+                .count();
+            anyhow::ensure!(
+                perspective_scrolls <= 1,
+                "IntroScene8 executed more than one source perspective-scroll effect"
+            );
+            if perspective_scrolls == 1 {
                 visible_intro_perspective_scroll(
                     intro,
                     intro_program,
-                    frame.wrapping_add(1),
+                    intro.scene_frame_counter,
                 )?;
-                return Ok(false);
             }
-            if intro.global_anim_x_offset == rule.finish_offset {
+            let deinitializations = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "deinitialize_all_sprites")
+                .count();
+            anyhow::ensure!(
+                deinitializations <= 1,
+                "IntroScene8 executed more than one source sprite deinitialization"
+            );
+            if deinitializations == 1 {
                 clear_visible_intro_sprites(intro);
-                return Ok(true);
             }
-            intro.global_anim_x_offset = intro
-                .global_anim_x_offset
-                .wrapping_sub(rule.motion_delta);
-            Ok(false)
-        }
-        8 => {
-            clear_visible_intro_sprites(intro);
-            intro.attrmap_palette_overrides =
-                visible_intro_attrmap_fills(intro, intro_program)?;
-            intro.scene_timer = 0;
-            intro.global_anim_x_offset =
-                visible_intro_source_byte_write(intro, intro_program, "wGlobalAnimXOffset")?;
-            intro.lcdc_pointer =
-                visible_intro_source_byte_write(intro, intro_program, "hLCDCPointer")?;
-            intro.palette_effect = VisibleIntroPaletteEffect::None;
-            Ok(true)
+            Ok(scene_finished)
         }
         9 => {
-            let frame = intro.scene_frame_counter;
-            if let Some(tile_override) =
-                visible_intro_indexed_tile_override(intro, intro_program, frame)?
-            {
-                intro.tile_override = Some(tile_override);
+            let (run, frame, _, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            let requests = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "indexed_2bpp_request")
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                requests.len() <= 1,
+                "IntroScene10 executed more than one indexed tile request"
+            );
+            if let Some(request) = requests.first() {
+                intro.tile_override = Some(visible_intro_indexed_tile_override_from_operation(
+                    request, frame,
+                )?);
             }
-            spawn_visible_intro_sprite_program_group_if_scheduled(
-                intro,
-                sprite_bundle,
-                intro_program,
-            )?;
-            Ok(frame == 0xc0)
-        }
-        10 => {
-            clear_visible_intro_sprites(intro);
-            intro.scroll_x = visible_intro_source_byte_write(intro, intro_program, "hSCX")?;
-            intro.scroll_y = visible_intro_source_byte_write(intro, intro_program, "hSCY")?;
-            intro.lcdc_pointer =
-                visible_intro_source_byte_write(intro, intro_program, "hLCDCPointer")?;
-            intro.palette_effect = VisibleIntroPaletteEffect::None;
-            Ok(true)
+            let instances = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "sprite_activate")
+                .map(|operation| {
+                    operation
+                        .fields
+                        .get("instance")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|instance| !instance.is_empty())
+                        .context("IntroScene10 sprite activation has no instance id")
+                        .map(str::to_string)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if !instances.is_empty() {
+                spawn_visible_intro_sprite_program_instances(
+                    intro,
+                    sprite_bundle,
+                    intro_program,
+                    &instances,
+                )?;
+            }
+            Ok(scene_finished)
         }
         11 => {
-            let frame = intro.scene_frame_counter;
-            if let Some(audio) = visible_intro_scheduled_audio(
-                intro,
-                intro_program,
-                "wIntroSceneFrameCounter",
-                frame,
-            )? {
+            let (run, frame, palette_selector, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            let schedules = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "scheduled_audio")
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                schedules.len() <= 1,
+                "IntroScene12 executed more than one scheduled audio effect"
+            );
+            if let Some(schedule) = schedules.first() {
+                let audio = visible_intro_scheduled_audio_from_operation(schedule, frame)?
+                    .context("IntroScene12 emitted a scheduled audio effect without a match")?;
                 queue_visible_sound_effect(
                     runtime_shell.shell.runtime().audio(),
                     &mut runtime_shell.pending_audio,
@@ -337,205 +801,603 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
                     &audio,
                 )?;
             }
-            if frame >= 0xc0 {
+            if scene_finished {
                 return Ok(true);
             }
-            let (timer, palette_idx) = if frame >= 0x80 {
-                (
-                    (frame & 0x0f).wrapping_mul(4),
-                    ((frame & 0x70) | 0x40).rotate_left(4),
-                )
-            } else {
-                ((frame & 0x1f).wrapping_mul(2), (frame & 0xe0) >> 5)
-            };
-            intro.scene_timer = timer;
-            intro.palette_effect =
-                visible_intro_unown_fade_effect(intro, intro_program, palette_idx, timer)?;
+            anyhow::ensure!(
+                run.effects
+                    .iter()
+                    .filter(|operation| operation.op == "palette_fade_lookup")
+                    .count()
+                    == 1,
+                "IntroScene12 returned without exactly one source palette lookup"
+            );
+            let palette_selector =
+                palette_selector.context("IntroScene12 palette lookup has no exact selector")?;
+            intro.palette_effect = visible_intro_unown_fade_effect(
+                intro,
+                intro_program,
+                palette_selector,
+                intro.scene_timer,
+            )?;
             Ok(false)
-        }
-        12 => {
-            clear_visible_intro_sprites(intro);
-            spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program)?;
-            intro.scroll_x = visible_intro_source_byte_write(intro, intro_program, "hSCX")?;
-            intro.scroll_y = visible_intro_source_byte_write(intro, intro_program, "hSCY")?;
-            intro.global_anim_x_offset =
-                visible_intro_source_byte_write(intro, intro_program, "wGlobalAnimXOffset")?;
-            intro.palette_effect = VisibleIntroPaletteEffect::None;
-            Ok(true)
         }
         13 => {
-            let frame = intro.scene_frame_counter;
-            let rule = visible_intro_suicune_run_rule(intro, intro_program)?;
-            intro.scroll_x = intro.scroll_x.wrapping_sub(rule.scroll_delta);
-            if frame >= rule.end_frame {
-                return Ok(true);
-            }
-            if frame >= rule.jump_frame {
-                intro.scene_timer = rule.jump_timer;
-                if intro.global_anim_x_offset < rule.disappear_below {
-                    clear_visible_intro_sprites(intro);
-                } else {
-                    intro.global_anim_x_offset = intro
-                        .global_anim_x_offset
-                        .wrapping_sub(rule.jump_offset_delta);
-                }
-            } else if frame >= rule.run_frame {
-                intro.global_anim_x_offset = intro
-                    .global_anim_x_offset
-                    .wrapping_sub(rule.run_offset_delta);
-            }
-            Ok(false)
-        }
-        14 => {
-            clear_visible_intro_sprites(intro);
-            let activated_range =
-                spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program)?;
+            let (run, _, _, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            let deinitializations = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "deinitialize_all_sprites")
+                .count();
             anyhow::ensure!(
-                activated_range.len() == 2,
-                "IntroScene15 must activate exactly two source sprites"
+                deinitializations <= 1,
+                "IntroScene14 executed more than one source sprite deinitialization"
             );
-            intro.scroll_x = visible_intro_source_byte_write(intro, intro_program, "hSCX")?;
-            intro.scroll_y = visible_intro_source_byte_write(intro, intro_program, "hSCY")?;
-            intro.palette_effect = VisibleIntroPaletteEffect::None;
-            Ok(true)
+            if deinitializations == 1 {
+                clear_visible_intro_sprites(intro);
+            }
+            Ok(scene_finished)
         }
         15 => {
-            let frame = intro.scene_frame_counter;
-            let (finished, scroll_y) = visible_intro_linear_scroll_step(
-                intro,
-                intro_program,
-                "hSCY",
-                frame,
-                intro.scroll_y,
-            )?;
-            if finished {
-                return Ok(true);
+            let (run, _, _, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            let tilemap_effects = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "conditional_tilemap_xor")
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                tilemap_effects.len() <= 1,
+                "IntroScene16 executed more than one conditional tilemap XOR"
+            );
+            if let Some(operation) = tilemap_effects.first() {
+                apply_visible_intro_conditional_tilemap_xor(intro, operation)?;
             }
-            intro.scroll_y = scroll_y;
-            Ok(false)
-        }
-        16 => {
-            clear_visible_intro_sprites(intro);
-            intro.scroll_x = visible_intro_source_byte_write(intro, intro_program, "hSCX")?;
-            intro.scroll_y = visible_intro_source_byte_write(intro, intro_program, "hSCY")?;
-            intro.palette_effect = VisibleIntroPaletteEffect::None;
-            Ok(true)
+            Ok(scene_finished)
         }
         17 => {
-            let (finished, scroll_x) = visible_intro_linear_scroll_step(
-                intro,
-                intro_program,
-                "hSCX",
-                intro.scene_frame_counter,
-                intro.scroll_x,
-            )?;
-            if finished {
-                return Ok(true);
-            }
-            intro.scroll_x = scroll_x;
-            Ok(false)
-        }
-        18 => {
-            clear_visible_intro_sprites(intro);
-            spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program)?;
-            intro.scroll_x = visible_intro_source_byte_write(intro, intro_program, "hSCX")?;
-            intro.scroll_y = visible_intro_source_byte_write(intro, intro_program, "hSCY")?;
-            intro.palette_effect = VisibleIntroPaletteEffect::None;
-            Ok(true)
+            let (_, _, _, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            Ok(scene_finished)
         }
         19 => {
-            let frame = intro.scene_frame_counter;
-            let rule = visible_intro_unown_reveal_rule(intro, intro_program)?;
-            if frame >= rule.end_frame {
-                return Ok(true);
+            let (run, _, palette_selector, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            let palette_copies = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "copy_indexed_palette")
+                .count();
+            anyhow::ensure!(
+                palette_copies <= 1,
+                "IntroScene20 executed more than one indexed palette copy"
+            );
+            if palette_copies == 1 {
+                let palette_selector = palette_selector
+                    .context("IntroScene20 indexed palette copy has no exact selector")?;
+                intro.palette_effect = visible_intro_indexed_palette_effect(
+                    intro,
+                    intro_program,
+                    palette_selector,
+                    intro.scene_timer,
+                )?;
             }
-            if frame < rule.scroll_end_frame {
-                intro.scroll_y = intro.scroll_y.wrapping_add(rule.scroll_delta);
-            } else if (rule.reveal_start_frame..rule.reveal_end_frame).contains(&frame) {
-                let phase = frame.wrapping_sub(rule.phase_subtract);
-                if (phase & rule.cadence_mask) == rule.cadence_operand {
-                    let timer = (phase & rule.timer_mask) >> rule.timer_shift;
-                    intro.scene_timer = timer;
-                    intro.palette_effect = visible_intro_indexed_palette_effect(
-                        intro,
-                        intro_program,
-                        rule.palette_argument,
-                        timer,
-                    )?;
-                }
-            }
-            Ok(false)
-        }
-        20 => {
-            intro.scene_frame_counter = 0;
-            intro.scene_timer = 0;
-            Ok(true)
+            Ok(scene_finished)
         }
         21 => {
-            if intro.scene_frame_counter >= 8 {
+            let (run, _, _, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            let deinitializations = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "deinitialize_all_sprites")
+                .count();
+            anyhow::ensure!(
+                deinitializations <= 1,
+                "IntroScene22 executed more than one source sprite deinitialization"
+            );
+            if deinitializations == 1 {
                 clear_visible_intro_sprites(intro);
-                return Ok(true);
             }
-            Ok(false)
+            Ok(scene_finished)
         }
-        22 => Ok(true),
         23 => {
-            let frame = intro.scene_frame_counter;
-            if frame >= 0x20 {
-                intro.next_scene_frame_counter = Some(0x40);
-                return Ok(true);
+            let (run, frame, _, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            let broadcasts = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "broadcast_indexed_palette")
+                .count();
+            anyhow::ensure!(
+                broadcasts <= 1,
+                "IntroScene24 executed more than one indexed palette broadcast"
+            );
+            if broadcasts == 1 {
+                intro.palette_effect = visible_intro_broadcast_palette_effect(
+                    intro,
+                    intro_program,
+                    frame,
+                )?
+                .context("IntroScene24 emitted a palette broadcast outside its cadence")?;
             }
-            if let Some(effect) =
-                visible_intro_broadcast_palette_effect(intro, intro_program, frame)?
-            {
-                intro.palette_effect = effect;
-            }
-            Ok(false)
+            Ok(scene_finished)
         }
         24 => {
-            let current = intro.scene_frame_counter;
-            let next = current.wrapping_sub(1);
-            intro.next_scene_frame_counter = Some(next);
-            Ok(next == 0)
-        }
-        25 => {
-            clear_visible_intro_sprites(intro);
-            intro.scroll_x = visible_intro_source_byte_write(intro, intro_program, "hSCX")?;
-            intro.scroll_y = visible_intro_source_byte_write(intro, intro_program, "hSCY")?;
-            intro.palette_effect = VisibleIntroPaletteEffect::None;
-            Ok(true)
+            let (_, _, _, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            Ok(scene_finished)
         }
         26 => {
-            let frame = intro.scene_frame_counter;
-            if frame >= 0x80 {
-                intro.scene_frame_counter = 0x80;
-                intro.next_scene_frame_counter = Some(0x80);
-                return Ok(true);
+            let (run, _, palette_selector, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            let fades = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "fade_unown_word_palettes")
+                .count();
+            anyhow::ensure!(
+                fades <= 1,
+                "IntroScene27 executed more than one Unown-word palette fade"
+            );
+            if fades == 1 {
+                let palette_selector = palette_selector
+                    .context("IntroScene27 word fade has no exact palette selector")?;
+                intro.palette_effect = visible_intro_crystal_word_fade_effect(
+                    intro,
+                    intro_program,
+                    palette_selector,
+                    intro.scene_timer,
+                )?;
             }
-            intro.scene_timer = frame & 0x0f;
-            intro.palette_effect = visible_intro_crystal_word_fade_effect(
-                intro,
-                intro_program,
-                (frame & 0x70) >> 4,
-                frame & 0x0f,
-            )?;
-            Ok(false)
+            Ok(scene_finished)
         }
         27 => {
-            let current = intro.scene_frame_counter;
-            if current == 0 {
-                return Ok(true);
-            }
-            if let Some(color) =
-                visible_intro_bg_palette_clear_color(intro, intro_program, current)?
-            {
+            let (run, predecrement_value, _, scene_finished) =
+                execute_visible_intro_scene_dispatch(intro, intro_program)?;
+            let clears = run
+                .effects
+                .iter()
+                .filter(|operation| {
+                    operation.op == "fill_memory"
+                        && operation
+                            .fields
+                            .get("target")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("wBGPals2")
+                })
+                .count();
+            anyhow::ensure!(
+                clears <= 1,
+                "IntroScene28 executed more than one background palette clear"
+            );
+            if clears == 1 {
+                let color = visible_intro_bg_palette_clear_color(
+                    intro,
+                    intro_program,
+                    predecrement_value,
+                )?
+                .context("IntroScene28 emitted a palette clear outside its source branch")?;
                 intro.palette_effect = VisibleIntroPaletteEffect::ClearBg { color };
             }
-            intro.next_scene_frame_counter = Some(current.wrapping_sub(1));
-            Ok(false)
+            let waits = run
+                .effects
+                .iter()
+                .filter(|operation| operation.op == "wait_frames")
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                waits.len() <= 1,
+                "IntroScene28 executed more than one blocking frame wait"
+            );
+            if let Some(wait) = waits.first() {
+                intro.scene_block_frames = wait
+                    .fields
+                    .get("frames")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u8::try_from(value).ok())
+                    .filter(|frames| *frames > 0)
+                    .context("IntroScene28 blocking wait has no positive byte duration")?;
+            }
+            Ok(scene_finished)
         }
-        _ => Ok(true),
+        index => anyhow::bail!("visible intro scene index {index} has no executable handler"),
     }
+}
+
+fn step_visible_intro_unown_fade_scene(
+    intro: &mut VisibleIntroScreen,
+    sprite_bundle: &SpriteAnimRuntimeBundle,
+    program: &RuntimePresentationProgram,
+) -> Result<bool> {
+    let scene = intro.scene_name();
+    let (run, frame, palette_selector, scene_finished) =
+        execute_visible_intro_scene_dispatch(intro, program)?;
+    if scene_finished {
+        return Ok(true);
+    }
+    if run
+        .effects
+        .iter()
+        .any(|operation| operation.op == "sprite_init_group")
+    {
+        spawn_visible_intro_sprite_program_group(intro, sprite_bundle, program)?;
+    }
+    anyhow::ensure!(
+        run.effects
+            .iter()
+            .filter(|operation| operation.op == "palette_fade_lookup")
+            .count()
+            == 1,
+        "{scene} returned without exactly one source palette lookup"
+    );
+    let palette_selector =
+        palette_selector.with_context(|| format!("{scene} palette lookup has no exact selector"))?;
+    intro.palette_effect =
+        visible_intro_unown_fade_effect(intro, program, palette_selector, frame)?;
+    Ok(false)
+}
+
+fn tick_visible_intro_setup_scene(
+    intro: &mut VisibleIntroScreen,
+    program: &RuntimePresentationProgram,
+) -> Result<bool> {
+    if intro.scene_setup_cursor.is_none() {
+        let start = *intro
+            .scene_operation_offsets
+            .get(intro.jumptable_index)
+            .context("visible intro setup scene has no exported operation offset")?;
+        let phase = program
+            .subprograms
+            .iter()
+            .find(|subprogram| subprogram.id == "crystal_intro")
+            .and_then(|subprogram| {
+                subprogram
+                    .phases
+                    .iter()
+                    .find(|phase| phase.id == "scene_dispatch")
+            })
+            .context("runtime title presentation has no CrystalIntro scene dispatch")?;
+        let next_scene_start = intro
+            .scene_operation_offsets
+            .get(intro.jumptable_index + 1)
+            .copied()
+            .unwrap_or(phase.operations.len());
+        let end = phase
+            .operations
+            .get(start..next_scene_start)
+            .and_then(|operations| {
+                operations
+                    .iter()
+                    .position(|operation| operation.op == "return")
+            })
+            .map(|relative| start + relative)
+            .context("visible intro setup scene has no source return")?;
+        intro.scene_setup_cursor = Some(
+            RuntimePresentationTimedPhaseCursor::new(
+                program,
+                "crystal_intro",
+                "scene_dispatch",
+                start,
+                end,
+            )?
+            .with_2bpp_transfer_mode(RuntimePresentation2bppTransferMode::Default)
+            .with_frame_t_cycles(intro.interrupt_timing.frame_t_cycles)?,
+        );
+    }
+    let tick = intro
+        .scene_setup_cursor
+        .as_mut()
+        .context("visible intro setup cursor disappeared")?
+        .tick(program)?;
+    intro.cpu_work_machine_cycles = intro
+        .cpu_work_machine_cycles
+        .checked_add(tick.cpu_work_machine_cycles)
+        .context("visible intro CPU work cycle count overflowed")?;
+    for operation in &tick.effects {
+        apply_visible_intro_setup_operation(intro, operation)?;
+    }
+    Ok(tick.complete)
+}
+
+fn visible_intro_scene_is_linear_setup(
+    intro: &VisibleIntroScreen,
+    program: &RuntimePresentationProgram,
+) -> Result<bool> {
+    let operations = visible_intro_scene_operations(intro, program)?;
+    let return_index = operations
+        .iter()
+        .position(|operation| operation.op == "return")
+        .context("visible intro scene operation range has no return")?;
+    let body = &operations[..=return_index];
+    let supported = body.iter().all(|operation| {
+        matches!(
+            operation.op.as_str(),
+            "fill_memory"
+                | "write_memory_byte"
+                | "palette_transfer_request"
+                | "wait_frames"
+                | "decompress_lz3_resource"
+                | "request_2bpp_transfer"
+                | "save_memory_byte"
+                | "copy_memory"
+                | "copy_strided_memory"
+                | "restore_memory_byte"
+                | "sprite_activate"
+                | "write_memory_bytes"
+                | "tilemap_xor"
+                | "play_audio"
+                | "increment_memory_byte"
+                | "return"
+        )
+    });
+    if !supported {
+        return Ok(false);
+    }
+    Ok(body.iter().any(|operation| {
+        operation.op == "increment_memory_byte"
+            && operation
+                .fields
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                == Some("wJumptableIndex")
+    }))
+}
+
+fn apply_visible_intro_setup_operation(
+    intro: &mut VisibleIntroScreen,
+    operation: &crystal_assets::RuntimePresentationOperation,
+) -> Result<()> {
+    let target = || {
+        operation
+            .fields
+            .get("target")
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| format!("visible intro {} has no target", operation.op))
+    };
+    let byte = || {
+        operation
+            .fields
+            .get("value")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .with_context(|| format!("visible intro {} has no exact byte value", operation.op))
+    };
+    match operation.op.as_str() {
+        "fill_memory" => match target()? {
+            "wShadowOAM" => clear_visible_intro_sprites(intro),
+            "wSpriteAnimData" => {
+                anyhow::ensure!(
+                    byte()? == 0,
+                    "visible intro sprite-animation data is not cleared with zero"
+                );
+                clear_visible_intro_sprites(intro);
+                intro.global_anim_x_offset = 0;
+            }
+            "wLYOverrides" => intro.ly_overrides.fill(byte()?),
+            "wBGPals2" => {
+                let color = match byte()? {
+                    0 => [0; 3],
+                    u8::MAX => [248; 3],
+                    value => anyhow::bail!(
+                        "visible intro palette fill byte {value:#04x} is not an exact RGB555 clear"
+                    ),
+                };
+                intro.palette_effect = VisibleIntroPaletteEffect::ClearBg { color };
+            }
+            "wTilemap" => {}
+            "wAttrmap" => {
+                let start = operation
+                    .fields
+                    .get("target_offset")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .context("visible intro attrmap fill has no exact target offset")?;
+                let count = operation
+                    .fields
+                    .get("byte_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .filter(|value| *value > 0)
+                    .context("visible intro attrmap fill has no positive exact byte count")?;
+                let end = start
+                    .checked_add(count)
+                    .context("visible intro attrmap fill range overflows")?;
+                anyhow::ensure!(
+                    start
+                        == intro
+                            .attrmap_palette_overrides
+                            .last()
+                            .map_or(0, |fill| fill.end),
+                    "visible intro attrmap fills are not contiguous"
+                );
+                intro.attrmap_palette_overrides.push(VisibleIntroAttrmapFill {
+                    start,
+                    end,
+                    value: byte()?,
+                });
+            }
+            target => anyhow::bail!("unsupported visible intro setup fill target {target}"),
+        },
+        "write_memory_byte" => match target()? {
+            "hSCX" => intro.scroll_x = byte()?,
+            "hSCY" => intro.scroll_y = byte()?,
+            "hWX" => intro.window_x = byte()?,
+            "hWY" => intro.window_y = byte()?,
+            "hLCDCPointer" => intro.lcdc_pointer = byte()?,
+            "wGlobalAnimXOffset" => intro.global_anim_x_offset = byte()?,
+            "wIntroSceneFrameCounter" => intro.scene_frame_counter = byte()?,
+            "wIntroSceneTimer" => intro.scene_timer = byte()?,
+            "hCGBPalUpdate" | "hBGMapMode" | "hBGMapAddress" | "rVBK" | "rWBK"
+            | "rBGP" | "rOBP0" | "rOBP1" => {}
+            target => anyhow::bail!("unsupported visible intro setup byte target {target}"),
+        },
+        "increment_memory_byte" => {
+            anyhow::ensure!(
+                target()? == "wJumptableIndex"
+                    && operation.fields.get("delta").and_then(serde_json::Value::as_u64)
+                        == Some(1),
+                "visible intro setup has an unsupported scene increment"
+            );
+        }
+        "palette_transfer_request"
+        | "wait_frames"
+        | "decompress_lz3_resource"
+        | "request_2bpp_transfer"
+        | "save_memory_byte"
+        | "copy_strided_memory"
+        | "restore_memory_byte"
+        | "write_memory_bytes"
+        | "tilemap_xor"
+        | "return" => {}
+        "sprite_activate" => {
+            let instance = operation
+                .fields
+                .get("instance")
+                .and_then(serde_json::Value::as_str)
+                .filter(|instance| !instance.is_empty())
+                .context("visible intro setup sprite activation has no instance id")?;
+            intro.scene_setup_sprite_instances.push(instance.to_string());
+        }
+        "play_audio" => {
+            let audio = operation
+                .fields
+                .get("audio")
+                .and_then(serde_json::Value::as_str)
+                .filter(|audio| !audio.is_empty())
+                .context("visible intro setup play_audio has no audio id")?;
+            intro.scene_setup_audio.push(audio.to_string());
+        }
+        "copy_memory" => {
+            if target()? == "wBGPals2" {
+                intro.palette_effect = VisibleIntroPaletteEffect::None;
+            }
+        }
+        op => anyhow::bail!("unsupported visible intro setup operation {op}"),
+    }
+    Ok(())
+}
+
+fn drain_visible_intro_setup_audio(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let pending = runtime_shell
+        .intro_screen
+        .as_mut()
+        .map(|intro| std::mem::take(&mut intro.scene_setup_audio))
+        .unwrap_or_default();
+    for audio in pending {
+        let kind = visible_intro_audio_kind(
+            runtime_shell.runtime.title_presentation_program(),
+            &audio,
+        )?
+        .to_string();
+        match kind.as_str() {
+            "music" => queue_visible_intro_music(runtime_shell, &audio)?,
+            "sound_effect" => queue_visible_sound_effect(
+                runtime_shell.shell.runtime().audio(),
+                &mut runtime_shell.pending_audio,
+                &mut runtime_shell.last_audio_events,
+                &audio,
+            )?,
+            kind => anyhow::bail!("visible intro setup audio has unsupported kind {kind}"),
+        }
+    }
+    Ok(())
+}
+
+fn execute_visible_intro_scene_dispatch(
+    intro: &mut VisibleIntroScreen,
+    program: &RuntimePresentationProgram,
+) -> Result<(RuntimePresentationPhaseRun, u8, Option<u8>, bool)> {
+    let entry_frame = intro.scene_frame_counter;
+    let label = intro
+        .scene_labels
+        .get(intro.jumptable_index)
+        .context("visible intro dispatcher index has no source scene label")?
+        .clone();
+    let mut machine =
+        RuntimePresentationPhaseMachine::new(program, "crystal_intro", "scene_dispatch")?;
+    machine.memory.insert(
+        "wIntroSceneFrameCounter".to_string(),
+        u16::from(intro.scene_frame_counter),
+    );
+    machine.memory.insert(
+        "wIntroSceneTimer".to_string(),
+        u16::from(intro.scene_timer),
+    );
+    machine.memory.insert(
+        "wGlobalAnimXOffset".to_string(),
+        u16::from(intro.global_anim_x_offset),
+    );
+    machine
+        .memory
+        .insert("hSCX".to_string(), u16::from(intro.scroll_x));
+    machine
+        .memory
+        .insert("hSCY".to_string(), u16::from(intro.scroll_y));
+    machine.memory.insert("hCGB".to_string(), 1);
+    machine.memory.insert(
+        "wJumptableIndex".to_string(),
+        u16::try_from(intro.jumptable_index).context("visible intro scene index exceeds u16")?,
+    );
+    let run = machine.run_from_label(program, &label, 0)?;
+    let frame = machine
+        .values
+        .get("intro_scene_frame")
+        .copied()
+        .and_then(|value| u8::try_from(value).ok())
+        .unwrap_or(entry_frame);
+    let palette_selector = machine
+        .values
+        .get("accumulator")
+        .copied()
+        .map(u8::try_from)
+        .transpose()
+        .context("visible intro palette selector exceeds one byte")?;
+    let resulting_frame_counter = machine
+        .memory
+        .get("wIntroSceneFrameCounter")
+        .copied()
+        .and_then(|value| u8::try_from(value).ok())
+        .context("visible intro scene did not preserve an exact frame counter byte")?;
+    intro.scene_frame_counter = resulting_frame_counter;
+    if let Some(timer) = machine.memory.get("wIntroSceneTimer").copied() {
+        intro.scene_timer =
+            u8::try_from(timer).context("visible intro scene timer exceeds one byte")?;
+    }
+    if let Some(offset) = machine.memory.get("wGlobalAnimXOffset").copied() {
+        intro.global_anim_x_offset =
+            u8::try_from(offset).context("visible intro global animation offset exceeds one byte")?;
+    }
+    if let Some(scroll_x) = machine.memory.get("hSCX").copied() {
+        intro.scroll_x =
+            u8::try_from(scroll_x).context("visible intro horizontal scroll exceeds one byte")?;
+    }
+    if let Some(scroll_y) = machine.memory.get("hSCY").copied() {
+        intro.scroll_y =
+            u8::try_from(scroll_y).context("visible intro vertical scroll exceeds one byte")?;
+    }
+    let resulting_scene = machine
+        .memory
+        .get("wJumptableIndex")
+        .copied()
+        .and_then(|value| usize::try_from(value).ok())
+        .context("visible intro scene did not preserve an exact dispatcher index")?;
+    let exiting = resulting_scene & 0x80 != 0;
+    let resulting_scene_index = resulting_scene & 0x7f;
+    anyhow::ensure!(
+        resulting_scene_index == intro.jumptable_index
+            || (!exiting
+                && resulting_scene_index == intro.jumptable_index.saturating_add(1)),
+        "visible intro scene {label} changed dispatcher index from {} to {resulting_scene}",
+        intro.jumptable_index
+    );
+    intro.next_scene_frame_counter = Some(resulting_frame_counter);
+    Ok((
+        run,
+        frame,
+        palette_selector,
+        exiting || resulting_scene_index != intro.jumptable_index,
+    ))
 }
 
 fn clear_visible_intro_sprites(intro: &mut VisibleIntroScreen) {
@@ -670,6 +1532,13 @@ fn apply_visible_intro_background_binding(
         intro.attrmap_palette_overrides.clear();
         intro.tile_override = None;
     }
+    if intro
+        .background_binding
+        .as_ref()
+        .is_some_and(|current| current.tilemap_resource != binding.tilemap_resource)
+    {
+        intro.tilemap_xor_mask = 0;
+    }
     intro.background_binding = Some(binding);
     Ok(())
 }
@@ -788,7 +1657,8 @@ fn spawn_visible_intro_sprite_program_group(
                 instance_ids.push(
                     instance
                         .as_str()
-                        .context("crystal_intro sprite_init_group instance is not a string")?,
+                        .context("crystal_intro sprite_init_group instance is not a string")?
+                        .to_string(),
                 );
             }
         } else {
@@ -797,10 +1667,25 @@ fn spawn_visible_intro_sprite_program_group(
                     .fields
                     .get("instance")
                     .and_then(serde_json::Value::as_str)
-                    .context("crystal_intro sprite_activate has no exact instance")?,
+                    .context("crystal_intro sprite_activate has no exact instance")?
+                    .to_string(),
             );
         }
     }
+    spawn_visible_intro_sprite_program_instances(intro, bundle, program, &instance_ids)
+}
+
+fn spawn_visible_intro_sprite_program_instances(
+    intro: &mut VisibleIntroScreen,
+    bundle: &SpriteAnimRuntimeBundle,
+    program: &RuntimePresentationProgram,
+    instance_ids: &[String],
+) -> Result<std::ops::Range<usize>> {
+    let subprogram = program
+        .subprograms
+        .iter()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .context("runtime title presentation has no crystal_intro subprogram")?;
     let mut matching = Vec::with_capacity(instance_ids.len());
     for instance_id in instance_ids {
         let programs = subprogram
@@ -810,7 +1695,7 @@ fn spawn_visible_intro_sprite_program_group(
                 sprite_program
                     .get("instance")
                     .and_then(serde_json::Value::as_str)
-                    == Some(instance_id)
+                    == Some(instance_id.as_str())
             })
             .collect::<Vec<_>>();
         anyhow::ensure!(
@@ -831,7 +1716,7 @@ fn spawn_visible_intro_sprite_program_group(
             .collect::<std::collections::BTreeSet<_>>()
             .len()
             == matching.len(),
-        "crystal_intro activation at dispatcher entry {dispatcher_entry} tick {dispatch_tick} repeats a sprite instance"
+        "crystal_intro executed activation operations repeat a sprite instance"
     );
 
     let start = intro.sprites.len();
@@ -977,11 +1862,50 @@ fn apply_visible_intro_sprite_pipeline(
     bundle: &SpriteAnimRuntimeBundle,
     program: &RuntimePresentationProgram,
 ) -> Result<()> {
+    let dispatcher_entry = intro.jumptable_index;
+    let dispatch_tick = intro
+        .scene_dispatch_tick
+        .checked_add(1)
+        .context("visible intro sprite scheduler exceeded its dispatch-tick domain")?;
+    apply_visible_intro_sprite_pipeline_at(
+        intro,
+        bundle,
+        program,
+        dispatcher_entry,
+        dispatch_tick,
+    )
+}
+
+fn apply_visible_intro_sprite_pipeline_at(
+    intro: &mut VisibleIntroScreen,
+    bundle: &SpriteAnimRuntimeBundle,
+    program: &RuntimePresentationProgram,
+    dispatcher_entry: usize,
+    dispatch_tick: u16,
+) -> Result<()> {
     if intro.jumptable_index == 20 {
         intro.scene_timer = 0;
     }
     apply_visible_intro_sprite_anim_functions(intro, bundle, program)?;
     update_visible_intro_sprite_animations(intro, bundle)?;
+    let crossings = intro
+        .sprite_scheduler_frame_crossings
+        .iter()
+        .filter(|crossing| {
+            crossing.dispatcher_entry == dispatcher_entry
+                && crossing.dispatch_tick == dispatch_tick
+        })
+        .count();
+    anyhow::ensure!(
+        crossings <= 1,
+        "visible intro sprite scheduler has duplicate ROM frame crossings at entry {dispatcher_entry} tick {dispatch_tick}"
+    );
+    if crossings == 1 {
+        intro.scene_block_frames = intro
+            .scene_block_frames
+            .checked_add(1)
+            .context("visible intro sprite scheduler frame wait overflowed")?;
+    }
     intro.sprite_count = intro.sprites.len().min(u8::MAX as usize) as u8;
     Ok(())
 }
@@ -1578,6 +2502,13 @@ fn visible_intro_scheduled_audio(
         schedules.next().is_none(),
         "visible intro scene has duplicate scheduled_audio operations for {clock}"
     );
+    visible_intro_scheduled_audio_from_operation(schedule, frame)
+}
+
+fn visible_intro_scheduled_audio_from_operation(
+    schedule: &crystal_assets::RuntimePresentationOperation,
+    frame: u8,
+) -> Result<Option<String>> {
     anyhow::ensure!(
         schedule
             .fields
@@ -1634,11 +2565,6 @@ fn visible_intro_audio_operations(
     intro: &VisibleIntroScreen,
     program: &RuntimePresentationProgram,
 ) -> Result<Vec<(String, String)>> {
-    let subprogram = program
-        .subprograms
-        .iter()
-        .find(|subprogram| subprogram.id == "crystal_intro")
-        .context("runtime title presentation has no crystal_intro subprogram")?;
     let dispatch_tick = u64::from(intro.scene_dispatch_tick) + 1;
     visible_intro_scene_operations(intro, program)?
         .iter()
@@ -1662,15 +2588,30 @@ fn visible_intro_audio_operations(
                 .and_then(serde_json::Value::as_str)
                 .filter(|audio| !audio.is_empty())
                 .context("visible intro play_audio operation has no audio id")?;
-            let catalog = subprogram
-                .audio
-                .iter()
-                .find(|candidate| candidate.id == audio)
-                .or_else(|| program.audio.iter().find(|candidate| candidate.id == audio))
-                .with_context(|| format!("visible intro play_audio references missing audio {audio}"))?;
-            Ok((audio.to_string(), catalog.kind.clone()))
+            Ok((
+                audio.to_string(),
+                visible_intro_audio_kind(program, audio)?.to_string(),
+            ))
         })
         .collect()
+}
+
+fn visible_intro_audio_kind<'a>(
+    program: &'a RuntimePresentationProgram,
+    audio: &str,
+) -> Result<&'a str> {
+    let subprogram = program
+        .subprograms
+        .iter()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .context("runtime title presentation has no crystal_intro subprogram")?;
+    subprogram
+        .audio
+        .iter()
+        .find(|candidate| candidate.id == audio)
+        .or_else(|| program.audio.iter().find(|candidate| candidate.id == audio))
+        .map(|catalog| catalog.kind.as_str())
+        .with_context(|| format!("visible intro play_audio references missing audio {audio}"))
 }
 
 fn visible_intro_unown_fade_effect(
@@ -1866,10 +2807,15 @@ fn visible_intro_crystal_word_fade_effect(
             .with_context(|| format!("visible intro word fade has no source hue {field}[{timer}]"))?;
         Ok([value * 8; 3])
     };
-    Ok(VisibleIntroPaletteEffect::CrystalWordFade {
-        fade_level,
-        colors: [hue("fast_hues")?, hue("slow_hues")?],
-    })
+    let mut palette_colors = match &intro.palette_effect {
+        VisibleIntroPaletteEffect::CrystalWordFade { palette_colors } => *palette_colors,
+        _ => [None; 8],
+    };
+    let slot = palette_colors
+        .get_mut(usize::from(fade_level))
+        .context("visible intro word fade palette index is outside the hardware bank")?;
+    *slot = Some([hue("fast_hues")?, hue("slow_hues")?]);
+    Ok(VisibleIntroPaletteEffect::CrystalWordFade { palette_colors })
 }
 
 fn visible_intro_broadcast_palette_effect(
@@ -2396,6 +3342,27 @@ fn visible_intro_indexed_tile_override(
         .fields
         .get("condition")
         .context("visible intro indexed tile request has no condition")?;
+    let cutoff = condition
+        .get("operand")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .context("visible intro indexed tile request cutoff is invalid")?;
+    if frame >= cutoff {
+        return Ok(None);
+    }
+    Ok(Some(visible_intro_indexed_tile_override_from_operation(
+        request, frame,
+    )?))
+}
+
+fn visible_intro_indexed_tile_override_from_operation(
+    request: &crystal_assets::RuntimePresentationOperation,
+    frame: u8,
+) -> Result<VisibleIntroTileOverride> {
+    let condition = request
+        .fields
+        .get("condition")
+        .context("visible intro indexed tile request has no condition")?;
     anyhow::ensure!(
         condition.get("source").and_then(serde_json::Value::as_str)
             == Some("wIntroSceneFrameCounter")
@@ -2410,9 +3377,10 @@ fn visible_intro_indexed_tile_override(
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| u8::try_from(value).ok())
         .context("visible intro indexed tile request cutoff is invalid")?;
-    if frame >= cutoff {
-        return Ok(None);
-    }
+    anyhow::ensure!(
+        frame < cutoff,
+        "visible intro indexed tile request effect did not satisfy its source condition"
+    );
     let selector = request
         .fields
         .get("selector")
@@ -2471,7 +3439,7 @@ fn visible_intro_indexed_tile_override(
         target_byte_offset % bytes_per_tile == 0,
         "visible intro indexed tile target is not tile-aligned"
     );
-    Ok(Some(VisibleIntroTileOverride {
+    Ok(VisibleIntroTileOverride {
         tile_id_start: u8::try_from(target_byte_offset / bytes_per_tile)
             .context("visible intro indexed target tile exceeds one byte")?,
         tile_count: request
@@ -2489,7 +3457,60 @@ fn visible_intro_indexed_tile_override(
             .filter(|value| *value <= 1)
             .context("visible intro indexed tile VRAM bank is invalid")?,
         resource: resource.to_string(),
-    }))
+    })
+}
+
+fn apply_visible_intro_conditional_tilemap_xor(
+    intro: &mut VisibleIntroScreen,
+    operation: &crystal_assets::RuntimePresentationOperation,
+) -> Result<()> {
+    anyhow::ensure!(
+        operation.fields.get("clock").and_then(serde_json::Value::as_str)
+            == Some("wIntroSceneFrameCounter"),
+        "visible intro conditional tilemap XOR has an unsupported clock"
+    );
+    let mask = operation
+        .fields
+        .get("clock_mask")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .context("visible intro conditional tilemap XOR mask is invalid")?;
+    let swap = operation
+        .fields
+        .get("swap_phase")
+        .context("visible intro conditional tilemap XOR has no swap phase")?;
+    anyhow::ensure!(
+        swap.get("target").and_then(serde_json::Value::as_str) == Some("wTilemap")
+            && swap
+                .get("byte_count")
+                .and_then(serde_json::Value::as_u64)
+                == Some(20 * 18)
+            && swap
+                .get("predicate")
+                .and_then(|predicate| predicate.get("nonzero"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            && swap
+                .get("predicate")
+                .and_then(|predicate| predicate.get("unsigned_less_than"))
+                .and_then(serde_json::Value::as_u64)
+                == Some(0x80),
+        "visible intro conditional tilemap XOR has unsupported target semantics"
+    );
+    let swap_frame = swap
+        .get("equals")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .context("visible intro conditional tilemap XOR swap cadence is invalid")?;
+    if intro.scene_frame_counter & mask == swap_frame {
+        let xor = swap
+            .get("xor")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .context("visible intro conditional tilemap XOR value is invalid")?;
+        intro.tilemap_xor_mask ^= xor;
+    }
+    Ok(())
 }
 
 fn visible_intro_reset_ly_overrides(
@@ -3078,7 +4099,11 @@ fn visible_intro_next_scene(intro: &mut VisibleIntroScreen) {
     intro.scene_dispatch_tick = 0;
     intro.scene_frame_counter = intro.next_scene_frame_counter.take().unwrap_or(0);
     intro.scene_timer = 0;
+    intro.scene_block_frames = 0;
     intro.scene_delay_frames = 0;
+    intro.scene_setup_cursor = None;
+    intro.scene_setup_audio.clear();
+    intro.scene_setup_sprite_instances.clear();
     if intro.jumptable_index >= intro.scene_count {
         intro.finished = true;
     }
@@ -3161,18 +4186,23 @@ fn skip_visible_intro_screen(
     runtime_shell: &mut BevyRuntimeShell,
     input: GameButton,
 ) -> Result<()> {
+    if runtime_shell
+        .intro_screen
+        .as_ref()
+        .is_some_and(|intro| intro.cleanup_cursor.is_some())
+    {
+        return Ok(());
+    }
     record_visible_runtime_action(runtime_shell, format!("intro:skip:{input:?}"))?;
     finish_visible_intro_screen(runtime_shell, "skip")
 }
 
 fn reset_visible_title_program(title: &mut TitleMenu) {
-    title.phase = VisibleTitlePhase::Entrance;
-    title.frame = 0;
-    title.main_menu_frame = 0;
-    title.scx = title.entrance_start_scx;
-    title.title_timer = 0;
     title.joypad_mask = 0;
-    title.clock_reset_trigger = false;
+    title.title_teardown = None;
+    title.main_menu_entry_interpreter = None;
+    title.main_menu_phase_interpreter = None;
+    title.main_menu_waiting_for_input = false;
     title.presentation_machine.interpreter.operation_index = 0;
     title.presentation_machine.interpreter.current_label = None;
     title
@@ -3190,6 +4220,10 @@ fn reset_visible_title_program(title: &mut TitleMenu) {
     title
         .presentation_machine
         .memory
+        .insert("wSuicuneFrame".to_string(), 0);
+    title
+        .presentation_machine
+        .memory
         .insert("hClockResetTrigger".to_string(), 0);
     title
         .presentation_machine
@@ -3200,28 +4234,135 @@ fn reset_visible_title_program(title: &mut TitleMenu) {
         u16::from(title.crystal_initial_y),
     );
     title.presentation_machine.values.clear();
+    title
+        .presentation_machine
+        .values
+        .insert("title_suicune_frame".to_string(), 0);
 }
 
 fn finish_visible_intro_screen(
     runtime_shell: &mut BevyRuntimeShell,
     reason: &'static str,
 ) -> Result<()> {
-    let Some(intro) = runtime_shell.intro_screen.take() else {
+    if runtime_shell.intro_screen.is_none() {
         return Ok(());
+    }
+    if runtime_shell
+        .intro_screen
+        .as_ref()
+        .is_some_and(|intro| intro.cleanup_cursor.is_some())
+    {
+        return Ok(());
+    }
+    // The button path reaches .ShutOffMusic before falling through .done.
+    // Natural scene completion branches directly to .done instead.
+    if reason != "complete" {
+        runtime_shell.pending_audio.clear();
+        execute_visible_intro_button_cancel(runtime_shell, reason)?;
+    }
+    let cleanup_end_operation_index = visible_intro_cleanup_phase(
+        runtime_shell.runtime.title_presentation_program(),
+    )?
+    .operations
+    .len()
+    .checked_sub(1)
+    .context("CrystalIntro cleanup phase is empty")?;
+    let cleanup_cursor = RuntimePresentationTimedPhaseCursor::new(
+        runtime_shell.runtime.title_presentation_program(),
+        "crystal_intro",
+        "cleanup",
+        0,
+        cleanup_end_operation_index,
+    )?;
+    let intro = runtime_shell
+        .intro_screen
+        .as_mut()
+        .context("CrystalIntro cleanup lost the intro state")?;
+    intro.cleanup_cursor = Some(cleanup_cursor);
+    intro.cleanup_exit_reason = Some(reason);
+    advance_visible_intro_cleanup(runtime_shell)
+}
+
+#[cfg(test)]
+fn finish_and_drain_visible_intro_for_test(
+    runtime_shell: &mut BevyRuntimeShell,
+    reason: &'static str,
+) -> Result<()> {
+    finish_visible_intro_screen(runtime_shell, reason)?;
+    for _ in 0..8 {
+        tick_visible_intro_screen(runtime_shell)?;
+    }
+    anyhow::ensure!(
+        runtime_shell.intro_screen.is_none(),
+        "CrystalIntro test cleanup did not return after eight frames"
+    );
+    Ok(())
+}
+
+fn advance_visible_intro_cleanup(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let tick = {
+        let BevyRuntimeShell {
+            runtime,
+            intro_screen,
+            ..
+        } = runtime_shell;
+        intro_screen
+            .as_mut()
+            .context("CrystalIntro cleanup lost the intro state")?
+            .cleanup_cursor
+            .as_mut()
+            .context("CrystalIntro cleanup has no timed cursor")?
+            .tick(runtime.title_presentation_program())?
     };
-    // The intro and title are separate audiovisual surfaces.  Do not carry a
-    // terminal field fade or any queued intro cue across this boundary: doing
-    // so leaves a black first title frame and allows the opening track to
-    // overlap the title entrance on a busy macOS audio callback.
+    {
+        let intro = runtime_shell
+            .intro_screen
+            .as_mut()
+            .context("CrystalIntro cleanup lost the intro state")?;
+        intro.cpu_work_machine_cycles = intro
+            .cpu_work_machine_cycles
+            .checked_add(tick.cpu_work_machine_cycles)
+            .context("CrystalIntro cleanup CPU work cycle count overflowed")?;
+    }
+    for operation in &tick.effects {
+        apply_visible_intro_cleanup_operation(
+            runtime_shell
+                .intro_screen
+                .as_mut()
+                .context("CrystalIntro cleanup lost the intro state")?,
+            operation,
+        )?;
+    }
+    if !tick.complete {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        runtime_shell
+            .intro_screen
+            .as_ref()
+            .is_some_and(|intro| intro.saved_register_slots.is_empty()),
+        "CrystalIntro cleanup did not restore every saved register"
+    );
+    complete_visible_intro_cleanup(runtime_shell)
+}
+
+fn complete_visible_intro_cleanup(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let reason = runtime_shell
+        .intro_screen
+        .as_ref()
+        .and_then(|intro| intro.cleanup_exit_reason)
+        .context("CrystalIntro cleanup has no exit reason")?;
+    let intro = runtime_shell
+        .intro_screen
+        .take()
+        .context("CrystalIntro cleanup lost the intro state")?;
+    runtime_shell.intro_display_screen = None;
+    // CrystalIntro always clears its display state, but only its button-cancel
+    // branch executes PlayMusic(MUSIC_NONE).  Natural completion deliberately
+    // carries MUSIC_CRYSTAL_OPENING into the silent title-entrance animation.
     runtime_shell.screen_fade = None;
     runtime_shell.visible_blackout_phase = None;
     runtime_shell.visible_walk_warp_phase = None;
-    runtime_shell.pending_audio.clear();
-    stop_visible_silent_music(
-        runtime_shell,
-        "MUSIC_NONE",
-        format!("intro:{reason}:music:none"),
-    )?;
     if let Some(title) = runtime_shell.title_menu.as_mut() {
         reset_visible_title_program(title);
         queue_visible_sound_effect(
@@ -3238,6 +4379,44 @@ fn finish_visible_intro_screen(
     set_shell_action_status(runtime_shell, "TITLE INTRO");
     trim_event_log(&mut runtime_shell.last_audio_events);
     Ok(())
+}
+
+fn execute_visible_intro_button_cancel(
+    runtime_shell: &mut BevyRuntimeShell,
+    reason: &'static str,
+) -> Result<()> {
+    let phase = runtime_shell
+        .runtime
+        .title_presentation_program()
+        .subprograms
+        .iter()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .and_then(|subprogram| {
+            subprogram
+                .phases
+                .iter()
+                .find(|phase| phase.id == "button_cancel")
+        })
+        .context("runtime presentation crystal_intro button_cancel phase is missing")?;
+    anyhow::ensure!(
+        phase.operations.len() == 1 && phase.operations[0].op == "stop_audio",
+        "runtime presentation crystal_intro button_cancel phase is not exact"
+    );
+    let audio = phase.operations[0]
+        .fields
+        .get("audio")
+        .and_then(serde_json::Value::as_str)
+        .context("runtime presentation crystal_intro button_cancel has no audio id")?
+        .to_string();
+    anyhow::ensure!(
+        audio == "MUSIC_NONE",
+        "runtime presentation crystal_intro button_cancel stops {audio}"
+    );
+    stop_visible_silent_music(
+        runtime_shell,
+        &audio,
+        format!("intro:{reason}:music:none"),
+    )
 }
 
 fn tick_visible_title_screen(
@@ -3265,6 +4444,26 @@ fn tick_visible_title_screen_state(runtime_shell: &mut BevyRuntimeShell) {
     if runtime_shell.pending_delete_save.is_some() || runtime_shell.pending_clock_reset.is_some() {
         return;
     }
+    if runtime_shell
+        .title_menu
+        .as_ref()
+        .is_some_and(|title| title.title_teardown.is_some())
+    {
+        if let Err(error) = advance_visible_title_teardown(runtime_shell) {
+            record_visible_runtime_system_error(runtime_shell, error);
+        }
+        return;
+    }
+    if runtime_shell
+        .title_menu
+        .as_ref()
+        .is_some_and(|title| title.main_menu_entry_interpreter.is_some())
+    {
+        if let Err(error) = advance_visible_main_menu_entry(runtime_shell) {
+            record_visible_runtime_system_error(runtime_shell, error);
+        }
+        return;
+    }
     let music_fade_active = runtime_shell.music_fade.is_some();
     let execution = (|| -> Result<(Vec<crystal_assets::RuntimePresentationOperation>, Option<u16>)> {
         let BevyRuntimeShell {
@@ -3275,13 +4474,11 @@ fn tick_visible_title_screen_state(runtime_shell: &mut BevyRuntimeShell) {
         let Some(title) = title_menu.as_mut() else {
             return Ok((Vec::new(), None));
         };
-        title.frame = title.frame.saturating_add(1);
-        if matches!(title.phase, VisibleTitlePhase::MainMenu) {
-            title.main_menu_frame = title.main_menu_frame.saturating_add(1);
+        if matches!(title.source_phase(), VisibleTitlePhase::MainMenu) {
             title.joypad_mask = 0;
             return Ok((Vec::new(), None));
         }
-        if matches!(title.phase, VisibleTitlePhase::FadeOut) {
+        if matches!(title.source_phase(), VisibleTitlePhase::FadeOut) {
             title.presentation_machine.memory.insert(
                 title.timeout_fade_register.clone(),
                 if music_fade_active {
@@ -3308,38 +4505,45 @@ fn tick_visible_title_screen_state(runtime_shell: &mut BevyRuntimeShell) {
             &scene_label,
             joypad_mask,
         )?;
+        let mut effects = run.effects;
+        effects.extend(
+            title
+                .presentation_machine
+                .run_from_operation_index(
+                    runtime.title_presentation_program(),
+                    title.suicune_iterator_operation_index,
+                    0,
+                )?
+                .effects,
+        );
         let scene = title
             .presentation_machine
             .memory
             .get("wJumptableIndex")
             .copied()
             .context("runtime title program has no wJumptableIndex after scene execution")?;
-        title.scx = title
-            .presentation_machine
-            .memory
-            .get("hSCX")
-            .copied()
-            .context("runtime title program has no hSCX after scene execution")? as u8;
-        title.title_timer = title
+        u8::try_from(
+            title
+                .presentation_machine
+                .memory
+                .get("hSCX")
+                .copied()
+                .context("runtime title program has no hSCX after scene execution")?,
+        )
+        .context("runtime title hSCX exceeds one byte")?;
+        title
             .presentation_machine
             .memory
             .get("wTitleScreenTimer")
-            .copied()
             .context("runtime title program has no wTitleScreenTimer after scene execution")?;
-        title.clock_reset_trigger = title
+        title
             .presentation_machine
             .memory
             .get("hClockResetTrigger")
-            .copied()
-            .context("runtime title program has no hClockResetTrigger")?
-            == 0x34;
-        title.phase = match scene & 0x7f {
-            0 => VisibleTitlePhase::Entrance,
-            1 => VisibleTitlePhase::Timer,
-            2 => VisibleTitlePhase::PressStart,
-            3 => VisibleTitlePhase::FadeOut,
-            value => anyhow::bail!("runtime title program produced invalid scene {value}"),
-        };
+            .context("runtime title program has no hClockResetTrigger")?;
+        if let VisibleTitlePhase::Unknown(value) = title.source_phase() {
+            anyhow::bail!("runtime title program produced invalid scene {value}");
+        }
         let selected_option = if scene & 0x80 != 0 {
             Some(
                 title
@@ -3352,7 +4556,7 @@ fn tick_visible_title_screen_state(runtime_shell: &mut BevyRuntimeShell) {
         } else {
             None
         };
-        Ok((run.effects, selected_option))
+        Ok((effects, selected_option))
     })();
     let (effects, selected_option) = match execution {
         Ok(execution) => execution,
@@ -3377,51 +4581,139 @@ fn tick_visible_title_screen_state(runtime_shell: &mut BevyRuntimeShell) {
             return;
         }
     }
+    if let Some(selected_option) = selected_option
+        && let Err(error) = begin_visible_title_teardown(runtime_shell, selected_option)
+    {
+        record_visible_runtime_system_error(runtime_shell, error);
+    }
+}
+
+fn begin_visible_title_teardown(
+    runtime_shell: &mut BevyRuntimeShell,
+    selected_option: u16,
+) -> Result<()> {
+    anyhow::ensure!(
+        matches!(selected_option, 0 | 1 | 2 | 4),
+        "runtime title program selected invalid option {selected_option}"
+    );
+    let title = runtime_shell
+        .title_menu
+        .as_mut()
+        .context("title teardown has no title state")?;
+    title.title_teardown = Some(RuntimePresentationTimedPhaseCursor::new(
+        runtime_shell.runtime.title_presentation_program(),
+        "start_title_screen",
+        "title_screen",
+        title.teardown_start_operation_index,
+        title.teardown_dispatch_operation_index,
+    )?);
+    advance_visible_title_teardown(runtime_shell)
+}
+
+fn advance_visible_title_teardown(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let tick = {
+        let BevyRuntimeShell {
+            runtime,
+            title_menu,
+            ..
+        } = runtime_shell;
+        title_menu
+            .as_mut()
+            .context("title teardown has no title state")?
+            .title_teardown
+            .as_mut()
+            .context("title teardown cursor is not active")?
+            .tick(runtime.title_presentation_program())?
+    };
+    for operation in tick.effects {
+        match operation.op.as_str() {
+            "write_memory_byte" => {
+                if let (Some(target), Some(value)) = (
+                    operation
+                        .fields
+                        .get("target")
+                        .and_then(serde_json::Value::as_str),
+                    operation
+                        .fields
+                        .get("value")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u16::try_from(value).ok()),
+                ) {
+                    runtime_shell
+                        .title_menu
+                        .as_mut()
+                        .context("title teardown lost title state")?
+                        .presentation_machine
+                        .memory
+                        .insert(target.to_string(), value);
+                }
+            }
+            "fill_memory"
+            | "palette_transfer_request"
+            | "wait_frames"
+            | "restore_memory_byte"
+            | "clear_memory_bit"
+            | "apply_palette_layout"
+            | "update_time_palettes"
+            | "clamp_memory_byte"
+            | "dispatch_table" => {}
+            op => anyhow::bail!("unsupported title teardown operation {op}"),
+        }
+    }
+    if !tick.complete {
+        return Ok(());
+    }
+    let selected_option = runtime_shell
+        .title_menu
+        .as_ref()
+        .and_then(|title| {
+            title
+                .presentation_machine
+                .memory
+                .get("wTitleScreenSelectedOption")
+        })
+        .copied()
+        .context("title teardown completed without a selected option")?;
+    runtime_shell
+        .title_menu
+        .as_mut()
+        .context("title teardown lost title state")?
+        .title_teardown = None;
+    dispatch_visible_title_option(runtime_shell, selected_option)
+}
+
+fn dispatch_visible_title_option(
+    runtime_shell: &mut BevyRuntimeShell,
+    selected_option: u16,
+) -> Result<()> {
     match selected_option {
-        Some(0) => {
-            if let Err(error) = open_visible_title_main_menu(runtime_shell) {
-                record_visible_runtime_system_error(runtime_shell, error);
-            }
-        }
-        Some(1) => {
-            if let Err(error) = open_visible_delete_save_screen(runtime_shell) {
-                record_visible_runtime_system_error(runtime_shell, error);
-            }
-        }
-        Some(2) => {
+        0 => activate_visible_title_main_menu(runtime_shell),
+        1 => open_visible_delete_save_screen(runtime_shell),
+        2 => {
             let intro_parameters = match RuntimeIntroPresentationParameters::from_program(
                 runtime_shell.runtime.title_presentation_program(),
             ) {
                 Ok(parameters) => parameters,
-                Err(error) => {
-                    record_visible_runtime_system_error(runtime_shell, error);
-                    return;
-                }
+                Err(error) => return Err(error),
             };
-            let mut intro = VisibleIntroScreen::from_parameters(intro_parameters);
-            if let Err(error) = apply_visible_intro_background_binding(
+            let mut intro = VisibleIntroScreen::from_program(
+                intro_parameters,
+                runtime_shell.runtime.title_presentation_program(),
+            )?;
+            apply_visible_intro_background_binding(
                 &mut intro,
                 &runtime_shell.runtime.data().runtime_title_screen.program,
-            ) {
-                record_visible_runtime_system_error(runtime_shell, error);
-                return;
-            }
+            )?;
+            runtime_shell.intro_display_screen = Some(intro.clone());
             runtime_shell.intro_screen = Some(intro);
             if let Some(title) = runtime_shell.title_menu.as_mut() {
                 reset_visible_title_program(title);
             }
             set_shell_action_status(runtime_shell, "CRYSTAL INTRO");
+            Ok(())
         }
-        Some(4) => {
-            if let Err(error) = open_visible_clock_reset_screen(runtime_shell) {
-                record_visible_runtime_system_error(runtime_shell, error);
-            }
-        }
-        Some(value) => record_visible_runtime_system_error(
-            runtime_shell,
-            anyhow::anyhow!("runtime title program selected invalid option {value}"),
-        ),
-        None => {}
+        4 => open_visible_clock_reset_screen(runtime_shell),
+        value => anyhow::bail!("runtime title program selected invalid option {value}"),
     }
 }
 
@@ -3465,25 +4757,45 @@ fn begin_visible_title_audio_fade(
     begin_visible_music_fade(runtime_shell, audio, u16::from(rate))
 }
 
+fn visible_title_main_menu_active(title: &TitleMenu) -> bool {
+    title
+        .presentation_machine
+        .memory
+        .get("wJumptableIndex")
+        .is_some_and(|scene| scene & 0x80 != 0)
+        && title
+            .presentation_machine
+            .memory
+            .get("wTitleScreenSelectedOption")
+            == Some(&0)
+        && title.title_teardown.is_none()
+        && title.main_menu_entry_interpreter.is_none()
+        && title.main_menu_phase_interpreter.is_some()
+}
+
 fn visible_title_main_menu_ready(title: &TitleMenu) -> bool {
-    matches!(title.phase, VisibleTitlePhase::MainMenu)
+    visible_title_main_menu_active(title) && title.main_menu_waiting_for_input
 }
 
 fn visible_title_accepts_start(title: &TitleMenu) -> bool {
-    matches!(
-        title.phase,
-        VisibleTitlePhase::PressStart | VisibleTitlePhase::MainMenu
-    )
+    title
+        .presentation_machine
+        .memory
+        .get("wJumptableIndex")
+        .is_some_and(|scene| scene & 0x7f == 2)
 }
 
 fn open_visible_title_main_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let Some(title) = runtime_shell.title_menu.as_ref() else {
         return handle_visible_no_active_title_menu(runtime_shell, "start");
     };
+    if visible_title_main_menu_ready(title) {
+        return Ok(());
+    }
     if !visible_title_accepts_start(title) {
-        let phase = title.phase;
-        let scx = title.scx;
-        let title_timer = title.title_timer;
+        let phase = title.source_phase();
+        let scx = title.source_scx();
+        let title_timer = title.source_title_timer();
         record_visible_runtime_action(runtime_shell, "title:start:ignored")?;
         runtime_shell.last_audio_events.push(format!(
             "title Start ignored phase={:?} scx={} timer={}",
@@ -3492,35 +4804,329 @@ fn open_visible_title_main_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    let menu_len = visible_title_menu_options(runtime_shell, title).len();
+    let title = runtime_shell
+        .title_menu
+        .as_mut()
+        .context("title menu disappeared before source Start sampling")?;
+    title.joypad_mask = 0x08;
+    runtime_shell.last_error = None;
+    tick_visible_title_screen_state(runtime_shell);
+    if let Some(title) = runtime_shell.title_menu.as_mut() {
+        title.joypad_mask = 0;
+    }
+    if let Some(error) = runtime_shell.last_error.clone() {
+        anyhow::bail!(error);
+    }
+    for _ in 0..64 {
+        let pending = runtime_shell.title_menu.as_ref().is_some_and(|title| {
+            title.title_teardown.is_some() || title.main_menu_entry_interpreter.is_some()
+        });
+        if !pending {
+            break;
+        }
+        tick_visible_title_screen_state(runtime_shell);
+    }
+    anyhow::ensure!(
+        runtime_shell
+            .title_menu
+            .as_ref()
+            .is_some_and(visible_title_main_menu_ready),
+        "source title program did not select the main-menu option after Start"
+    );
+    Ok(())
+}
+
+fn activate_visible_title_main_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let Some(title) = runtime_shell.title_menu.as_ref() else {
+        return handle_visible_no_active_title_menu(runtime_shell, "start");
+    };
+    anyhow::ensure!(
+        title.presentation_machine.memory.get("wTitleScreenSelectedOption") == Some(&0),
+        "source title program did not select the main-menu option"
+    );
+    anyhow::ensure!(
+        title
+            .presentation_machine
+            .memory
+            .get("wJumptableIndex")
+            .is_some_and(|scene| scene & 0x80 != 0),
+        "source title program did not finish its main-menu selection"
+    );
     let Some(title) = runtime_shell.title_menu.as_mut() else {
         return handle_visible_no_active_title_menu(runtime_shell, "start");
     };
     title
         .presentation_machine
         .memory
-        .insert("wTitleScreenSelectedOption".to_string(), 0);
-    let scene = title
-        .presentation_machine
-        .memory
-        .entry("wJumptableIndex".to_string())
-        .or_insert(0);
-    *scene |= 0x80;
-    title.phase = VisibleTitlePhase::MainMenu;
-    title.main_menu_frame = 0;
-    title.clock_reset_trigger = false;
-    title.cursor.option_index = title
-        .main_menu
-        .default_option
-        .saturating_sub(1)
-        .min(menu_len.saturating_sub(1));
-    record_visible_runtime_action(runtime_shell, "title:start:main_menu")?;
-    runtime_shell
-        .last_audio_events
-        .push("title opened main menu".to_string());
-    set_shell_action_status(runtime_shell, "TITLE MENU");
-    trim_event_log(&mut runtime_shell.last_audio_events);
-    Ok(())
+        .insert("hClockResetTrigger".to_string(), 0);
+    title.main_menu_entry_interpreter = Some(RuntimePresentationInterpreter::new(
+        runtime_shell.runtime.title_presentation_program(),
+        "main_menu",
+    )?);
+    advance_visible_main_menu_entry(runtime_shell)
+}
+
+fn advance_visible_main_menu_entry(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    for _ in 0..16 {
+        let step = {
+            let BevyRuntimeShell {
+                runtime,
+                title_menu,
+                ..
+            } = runtime_shell;
+            let title = title_menu
+                .as_mut()
+                .context("main-menu entry has no title state")?;
+            let interpreter = title
+                .main_menu_entry_interpreter
+                .as_mut()
+                .context("main-menu entry interpreter is not active")?;
+            interpreter.step(runtime.title_presentation_program())?
+        };
+        match step {
+            RuntimePresentationStep::Operation(operation) => match operation.op.as_str() {
+                "stop_audio" => {
+                    let audio = operation
+                        .fields
+                        .get("audio")
+                        .and_then(serde_json::Value::as_str)
+                        .context("main-menu stop_audio has no audio id")?;
+                    anyhow::ensure!(audio == "MUSIC_NONE", "main-menu entry stops {audio}");
+                    stop_visible_silent_music(
+                        runtime_shell,
+                        audio,
+                        "audio:music:main_menu:stop",
+                    )?;
+                }
+                "wait_frames" => {
+                    anyhow::ensure!(
+                        operation.fields.get("frames").and_then(serde_json::Value::as_u64)
+                            == Some(1),
+                        "main-menu entry has a non-source wait"
+                    );
+                    return Ok(());
+                }
+                "write_memory_byte" => {
+                    anyhow::ensure!(
+                        operation.fields.get("target").and_then(serde_json::Value::as_str)
+                            == Some("wMapMusic")
+                            && operation.fields.get("value").and_then(serde_json::Value::as_str)
+                                == Some("MUSIC_MAIN_MENU"),
+                        "main-menu entry has an unexpected memory write"
+                    );
+                }
+                "play_audio" => {
+                    let audio = operation
+                        .fields
+                        .get("audio")
+                        .and_then(serde_json::Value::as_str)
+                        .context("main-menu play_audio has no audio id")?;
+                    anyhow::ensure!(
+                        audio == "MUSIC_MAIN_MENU",
+                        "main-menu entry plays unexpected audio {audio}"
+                    );
+                    queue_visible_intro_music(runtime_shell, audio)?;
+                }
+                "call_subprogram" => {
+                    anyhow::ensure!(
+                        operation.fields.get("program").and_then(serde_json::Value::as_str)
+                            == Some("main_menu"),
+                        "main-menu entry calls an unexpected subprogram"
+                    );
+                    let phase_interpreter = RuntimePresentationSubprogramInterpreter::new(
+                        runtime_shell.runtime.title_presentation_program(),
+                        "main_menu",
+                        "main_menu",
+                    )?;
+                    let title = runtime_shell
+                        .title_menu
+                        .as_mut()
+                        .context("main-menu entry lost title state")?;
+                    title.main_menu_entry_interpreter = None;
+                    title.main_menu_phase_interpreter = Some(phase_interpreter);
+                    title.main_menu_waiting_for_input = false;
+                    advance_visible_main_menu_phase_to_input(runtime_shell)?;
+                    record_visible_runtime_action(runtime_shell, "title:start:main_menu")?;
+                    runtime_shell
+                        .last_audio_events
+                        .push("title opened main menu".to_string());
+                    set_shell_action_status(runtime_shell, "TITLE MENU");
+                    trim_event_log(&mut runtime_shell.last_audio_events);
+                    return Ok(());
+                }
+                op => anyhow::bail!("unsupported main-menu entry operation {op}"),
+            },
+            RuntimePresentationStep::Jump { from, to } => {
+                anyhow::bail!("main-menu entry jumped from {from} to {to} before MainMenu")
+            }
+            RuntimePresentationStep::BlockComplete { block } => {
+                anyhow::bail!("main-menu entry block {block} ended before MainMenu")
+            }
+        }
+    }
+    anyhow::bail!("main-menu entry exceeded its operation limit")
+}
+
+fn advance_visible_main_menu_phase_to_input(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    for _ in 0..32 {
+        let operation = {
+            let BevyRuntimeShell {
+                runtime,
+                title_menu,
+                ..
+            } = runtime_shell;
+            title_menu
+                .as_mut()
+                .context("main-menu phase has no title state")?
+                .main_menu_phase_interpreter
+                .as_mut()
+                .context("main-menu phase interpreter is not active")?
+                .step(runtime.title_presentation_program())?
+                .context("exported MainMenu ended before its input loop")?
+        };
+        match operation.op.as_str() {
+            "write_memory_byte" => {
+                anyhow::ensure!(
+                    operation.fields.get("target").and_then(serde_json::Value::as_str)
+                        == Some("wDisableTextAcceleration")
+                        && operation.fields.get("value").and_then(serde_json::Value::as_u64)
+                            == Some(0),
+                    "MainMenu has an unexpected initial memory write"
+                );
+                runtime_shell
+                    .title_menu
+                    .as_mut()
+                    .context("main-menu phase lost title state")?
+                    .presentation_machine
+                    .memory
+                    .insert("wDisableTextAcceleration".to_string(), 0);
+            }
+            "prepare_main_menu_display" => {
+                anyhow::ensure!(
+                    operation.fields.get("map_animations").and_then(serde_json::Value::as_u64)
+                        == Some(0)
+                        && operation.fields.get("clear_tilemap").and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                        && operation.fields.get("clear_window_data").and_then(serde_json::Value::as_bool)
+                            == Some(true),
+                    "MainMenu display preparation disagrees with the source"
+                );
+            }
+            "apply_palette_layout" => {
+                let layout = operation
+                    .fields
+                    .get("layout")
+                    .context("MainMenu palette operation has no layout")?;
+                anyhow::ensure!(
+                    layout.get("symbol").and_then(serde_json::Value::as_str)
+                        == Some("SCGB_DIPLOMA")
+                        && layout.get("value").and_then(serde_json::Value::as_u64) == Some(8),
+                    "MainMenu palette layout disagrees with the source"
+                );
+            }
+            "set_default_palettes" => {
+                anyhow::ensure!(
+                    operation.fields.get("routine").and_then(serde_json::Value::as_str)
+                        == Some("SetDefaultBGPAndOBP"),
+                    "MainMenu default-palette routine disagrees with the source"
+                );
+            }
+            "clear_memory_bit" => {
+                anyhow::ensure!(
+                    operation.fields.get("target").and_then(serde_json::Value::as_str)
+                        == Some("wGameTimerPaused")
+                        && operation.fields.get("bit").and_then(serde_json::Value::as_str)
+                            == Some("GAME_TIMER_COUNTING_F"),
+                    "MainMenu timer-bit operation disagrees with the source"
+                );
+                runtime_shell.shell.set_game_timer_counting(true)?;
+            }
+            "select_main_menu_variant" => {
+                anyhow::ensure!(
+                    operation.fields.get("result").and_then(serde_json::Value::as_str)
+                        == Some("wWhichIndexSet"),
+                    "MainMenu variant selection writes an unexpected result"
+                );
+                let variant = {
+                    let title = runtime_shell
+                        .title_menu
+                        .as_ref()
+                        .context("main-menu variant selection lost title state")?;
+                    visible_title_menu_variant_index(runtime_shell, title)
+                };
+                runtime_shell
+                    .title_menu
+                    .as_mut()
+                    .context("main-menu variant selection lost title state")?
+                    .presentation_machine
+                    .memory
+                    .insert("wWhichIndexSet".to_string(), variant as u16);
+            }
+            "render_main_menu_time_and_day" => {
+                let condition = operation
+                    .fields
+                    .get("only_when")
+                    .context("MainMenu time renderer has no source condition")?;
+                anyhow::ensure!(
+                    condition.get("source").and_then(serde_json::Value::as_str)
+                        == Some("wSaveFileExists")
+                        && condition.get("predicate").and_then(serde_json::Value::as_str)
+                            == Some("nonzero"),
+                    "MainMenu time renderer has an unexpected condition"
+                );
+            }
+            "load_menu" => {
+                let default_option = operation
+                    .fields
+                    .get("default_option")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .filter(|value| *value > 0)
+                    .context("MainMenu load_menu has no exact default option")?;
+                let len = runtime_shell
+                    .title_menu
+                    .as_ref()
+                    .map(|title| visible_title_menu_options(runtime_shell, title).len())
+                    .context("MainMenu load_menu lost title state")?;
+                let title = runtime_shell
+                    .title_menu
+                    .as_mut()
+                    .context("MainMenu load_menu lost title state")?;
+                title.cursor.option_index = default_option.saturating_sub(1).min(len - 1);
+            }
+            "menu_input_loop" => {
+                anyhow::ensure!(
+                    operation.fields.get("sampler").and_then(serde_json::Value::as_str)
+                        == Some("GetScrollingMenuJoypad")
+                        && operation.fields.get("result").and_then(serde_json::Value::as_str)
+                            == Some("wMenuJoypad")
+                        && operation.fields.get("accept").and_then(serde_json::Value::as_str)
+                            == Some("PAD_A")
+                        && operation.fields.get("cancel").and_then(serde_json::Value::as_str)
+                            == Some("PAD_B")
+                        && operation.fields.get("wrap_vertical").and_then(serde_json::Value::as_bool)
+                            == Some(true),
+                    "MainMenu input loop disagrees with the source"
+                );
+                anyhow::ensure!(
+                    operation
+                        .fields
+                        .get("refresh_before_each_poll")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("MainMenu_PrintCurrentTimeAndDay"),
+                    "MainMenu input loop has an unexpected refresh routine"
+                );
+                runtime_shell
+                    .title_menu
+                    .as_mut()
+                    .context("main-menu input loop lost title state")?
+                    .main_menu_waiting_for_input = true;
+                return Ok(());
+            }
+            op => anyhow::bail!("unsupported pre-input MainMenu operation {op}"),
+        }
+    }
+    anyhow::bail!("MainMenu exceeded its pre-input operation limit")
 }
 
 fn open_visible_gender_selection(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -3545,30 +5151,328 @@ fn open_visible_gender_selection(runtime_shell: &mut BevyRuntimeShell) -> Result
     Ok(())
 }
 
-const VISIBLE_TIME_SET_WAKE_TEXT: [&str; 4] = [
-    "...... ...... ...... ...... ...... ......",
-    "...... ...... ...... ...... ...... ......",
-    "Zzz... Hm? Wha... ?\nYou woke me up!",
-    "Will you check the\nclock for me?",
-];
 const VISIBLE_TIME_SET_TEXT_SPEED_FRAMES: u8 = 2;
+
+fn visible_initialize_clock_operation(
+    program: &RuntimePresentationProgram,
+) -> Result<&crystal_assets::RuntimePresentationOperation> {
+    let operations = visible_oak_speech_operations(program)?
+        .iter()
+        .filter(|operation| operation.op == "initialize_clock")
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        operations.len() == 1,
+        "OakSpeech resolves to {} initialize_clock operations",
+        operations.len()
+    );
+    Ok(operations[0])
+}
+
+fn visible_time_set_range(
+    operation: &crystal_assets::RuntimePresentationOperation,
+    field: &str,
+) -> Result<(u8, u8)> {
+    let values = operation
+        .fields
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .with_context(|| format!("initialize_clock has no {field}"))?;
+    anyhow::ensure!(values.len() == 2, "initialize_clock {field} is not a pair");
+    let minimum = values[0]
+        .as_u64()
+        .and_then(|value| u8::try_from(value).ok())
+        .with_context(|| format!("initialize_clock {field} minimum is invalid"))?;
+    let maximum = values[1]
+        .as_u64()
+        .and_then(|value| u8::try_from(value).ok())
+        .with_context(|| format!("initialize_clock {field} maximum is invalid"))?;
+    anyhow::ensure!(minimum <= maximum, "initialize_clock {field} is reversed");
+    Ok((minimum, maximum))
+}
+
+fn visible_time_set_single_text(
+    program: &RuntimePresentationProgram,
+    id: &str,
+) -> Result<String> {
+    let pages = visible_presentation_text_pages(program, id, "PLAYER")?;
+    anyhow::ensure!(
+        pages.len() == 1,
+        "initialize_clock text {id} resolves to {} pages instead of one",
+        pages.len()
+    );
+    Ok(pages[0].clone())
+}
 
 fn open_visible_time_set_screen(
     runtime_shell: &mut BevyRuntimeShell,
     next: VisibleTimeSetNext,
 ) -> Result<()> {
     reset_visible_navigation_state(runtime_shell);
-    runtime_shell.pending_time_set = Some(VisibleTimeSetScreen {
-        phase: VisibleTimeSetPhase::WakeDialogue,
+    let program = runtime_shell.runtime.title_presentation_program();
+    let operation = visible_initialize_clock_operation(program)?;
+    let default_hour = operation
+        .fields
+        .get("default_hour")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .context("initialize_clock has no byte-sized default_hour")?;
+    let default_minute = operation
+        .fields
+        .get("default_minute")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .context("initialize_clock has no byte-sized default_minute")?;
+    let (hour_min, hour_max) = visible_time_set_range(operation, "hour_range")?;
+    let (minute_min, minute_max) = visible_time_set_range(operation, "minute_range")?;
+    anyhow::ensure!(
+        (hour_min..=hour_max).contains(&default_hour),
+        "initialize_clock default hour is outside its source range"
+    );
+    anyhow::ensure!(
+        (minute_min..=minute_max).contains(&default_minute),
+        "initialize_clock default minute is outside its source range"
+    );
+    let input_delay_frames = operation
+        .fields
+        .get("selection_delay_frames")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .context("initialize_clock has no positive selection delay")?;
+    let held_repeat = operation
+        .fields
+        .get("held_direction_repeat")
+        .and_then(serde_json::Value::as_object)
+        .context("initialize_clock has no held-direction repeat definition")?;
+    let repeat_byte = |name: &str| -> Result<u8> {
+        held_repeat
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .with_context(|| format!("initialize_clock held repeat {name} is invalid"))
+    };
+    let h_in_menu = repeat_byte("h_in_menu")?;
+    let press_counter = repeat_byte("press_counter")?;
+    let restart_counter = repeat_byte("restart_counter")?;
+    let redraw_wait_frames = repeat_byte("redraw_wait_frames")?;
+    let idle_wait_frames = repeat_byte("idle_wait_frames")?;
+    let direction_first_repeat_frames = repeat_byte("first_repeat_frames")?;
+    let direction_later_repeat_frames = repeat_byte("later_repeat_frames")?;
+    anyhow::ensure!(
+        h_in_menu == 1
+            && press_counter == 15
+            && restart_counter == 5
+            && redraw_wait_frames == 4
+            && idle_wait_frames == 1,
+        "initialize_clock held repeat primitives differ from JoyTextDelay/SetHour"
+    );
+    let idle_counter_delta = idle_wait_frames
+        .checked_add(1)
+        .context("initialize_clock held repeat idle decrement overflows")?;
+    let repeat_duration = |counter: u8| -> Result<u8> {
+        let after_redraw = counter.saturating_sub(redraw_wait_frames);
+        let idle_frames = after_redraw.div_ceil(idle_counter_delta);
+        redraw_wait_frames
+            .checked_add(idle_frames)
+            .context("initialize_clock held repeat duration overflows")
+    };
+    anyhow::ensure!(
+        direction_first_repeat_frames == repeat_duration(press_counter)?
+            && direction_later_repeat_frames == repeat_duration(restart_counter)?,
+        "initialize_clock held repeat frame totals do not match the source counters and waits"
+    );
+    let startup_delay_frames = operation
+        .fields
+        .get("startup_delay_frames")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .context("initialize_clock has no positive startup delay")?;
+    let startup = operation
+        .fields
+        .get("startup_sequence")
+        .and_then(serde_json::Value::as_array)
+        .context("initialize_clock has no startup sequence")?;
+    anyhow::ensure!(
+        startup.len() == 15,
+        "initialize_clock startup sequence has {} operations instead of fifteen",
+        startup.len()
+    );
+    let startup_op = |index: usize, expected: &str| -> Result<&serde_json::Map<String, serde_json::Value>> {
+        let entry = startup[index]
+            .as_object()
+            .with_context(|| format!("initialize_clock startup operation {index} is not an object"))?;
+        anyhow::ensure!(
+            entry.get("op").and_then(serde_json::Value::as_str) == Some(expected),
+            "initialize_clock startup operation {index} is not {expected}"
+        );
+        Ok(entry)
+    };
+    anyhow::ensure!(
+        startup_op(0, "save_menu_state")?.get("register").and_then(serde_json::Value::as_str) == Some("hInMenu")
+            && startup_op(1, "set_menu_state")?.get("register").and_then(serde_json::Value::as_str) == Some("hInMenu")
+            && startup[1].get("value").and_then(serde_json::Value::as_u64) == Some(1)
+            && startup_op(2, "disable_sprite_updates")?.get("register").and_then(serde_json::Value::as_str) == Some("wSpriteUpdatesEnabled"),
+        "initialize_clock startup state writes differ from InitClock"
+    );
+    let music_fade = startup_op(3, "fade_music")?;
+    let music_fade_audio = music_fade
+        .get("audio")
+        .and_then(serde_json::Value::as_str)
+        .context("initialize_clock music fade has no audio target")?
+        .to_string();
+    let music_fade_rate = music_fade
+        .get("rate")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .context("initialize_clock music fade has no word-sized rate")?;
+    anyhow::ensure!(
+        startup_op(4, "wait")?.get("frames").and_then(serde_json::Value::as_u64)
+            == Some(u64::from(startup_delay_frames)),
+        "initialize_clock startup wait disagrees with startup_delay_frames"
+    );
+    let fade_out = startup_op(5, "rotate_palettes_left")?;
+    let startup_palette_steps = fade_out
+        .get("steps")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .context("initialize_clock fade-out has no positive step count")?;
+    let startup_palette_step_frames = fade_out
+        .get("frames_per_step")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .context("initialize_clock fade-out has no positive step delay")?;
+    startup_op(6, "clear_tilemap")?;
+    startup_op(7, "clear_sprites")?;
+    anyhow::ensure!(
+        startup_op(8, "load_sgb_layout")?.get("layout").and_then(serde_json::Value::as_str) == Some("SCGB_DIPLOMA")
+            && startup_op(9, "disable_bg_map_updates")?.get("register").and_then(serde_json::Value::as_str) == Some("hBGMapMode"),
+        "initialize_clock startup layout/BG-map setup differs from InitClock"
+    );
+    startup_op(10, "load_standard_font")?;
+    let tile_load = startup_op(11, "load_1bpp_tiles")?;
+    let tile_entries = tile_load
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .context("initialize_clock has no 1bpp tile entries")?;
+    anyhow::ensure!(
+        serde_json::Value::Array(tile_entries.clone()) == serde_json::json!([
+            {"gfx": "TimeSetBackgroundGFX", "tile": 0, "count": 1},
+            {"gfx": "TimeSetUpArrowGFX", "tile": 1, "count": 1},
+            {"gfx": "TimeSetDownArrowGFX", "tile": 2, "count": 1}
+        ]),
+        "initialize_clock 1bpp tile transfers differ from InitClock"
+    );
+    let tile_frames = tile_load
+        .get("frames_per_entry")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .context("initialize_clock 1bpp transfers have no positive delay")?;
+    startup_op(12, "clear_screen")?;
+    let bg_map_frames = startup_op(13, "wait_bg_map")?
+        .get("frames")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .context("initialize_clock WaitBGMap has no positive delay")?;
+    let fade_in = startup_op(14, "rotate_palettes_right")?;
+    anyhow::ensure!(
+        fade_in.get("steps").and_then(serde_json::Value::as_u64) == Some(u64::from(startup_palette_steps))
+            && fade_in.get("frames_per_step").and_then(serde_json::Value::as_u64) == Some(u64::from(startup_palette_step_frames)),
+        "initialize_clock palette rotations are asymmetric"
+    );
+    let startup_load_frames = u8::try_from(tile_entries.len())
+        .ok()
+        .and_then(|count| count.checked_mul(tile_frames))
+        .and_then(|frames| frames.checked_add(bg_map_frames))
+        .context("initialize_clock startup transfer delays overflow one byte")?;
+    anyhow::ensure!(
+        operation
+            .fields
+            .get("selection_directions")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|directions| {
+                directions
+                    == &[serde_json::Value::String("up".to_string()), serde_json::Value::String("down".to_string())]
+            }),
+        "initialize_clock selection directions differ from SetHour/SetMinutes"
+    );
+    let text_entries = operation
+        .fields
+        .get("text_entries")
+        .and_then(serde_json::Value::as_array)
+        .context("initialize_clock has no text entries")?;
+    anyhow::ensure!(
+        text_entries.len() == 10,
+        "initialize_clock resolves to {} text entries instead of ten",
+        text_entries.len()
+    );
+    let text_id = |index: usize| -> Result<&str> {
+        text_entries[index]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .context("initialize_clock has an invalid text entry")
+    };
+    let wake_pages = visible_presentation_text_pages(program, text_id(0)?, "PLAYER")?;
+    let gender_definition = RuntimeGenderMenuDefinition::from_program(program)?;
+    let selected_value = runtime_shell
+        .selected_player_gender
+        .map(visible_player_gender_value)
+        .unwrap_or_else(|| gender_definition.values[gender_definition.default_option - 1]);
+    let selected_index = gender_definition
+        .values
+        .iter()
+        .position(|value| *value == selected_value)
+        .context("selected gender is absent from the source gender menu")?;
+    let startup_gender = VisibleGenderSelection {
+        definition: gender_definition,
+        selected_index,
+        confirmed: true,
+        confirm_countdown: 0,
+        fade_counter: VISIBLE_GENDER_FADE_IN_FRAMES,
+    };
+    let saved_h_in_menu = runtime_shell.h_in_menu;
+    runtime_shell.h_in_menu = h_in_menu;
+    let time_set = VisibleTimeSetScreen {
+        phase: VisibleTimeSetPhase::StartupDelay,
         next,
+        saved_h_in_menu,
+        startup_gender,
+        startup_frames_remaining: startup_delay_frames,
+        startup_palette_step: 0,
+        startup_delay_frames,
+        startup_palette_steps,
+        startup_palette_step_frames,
+        startup_load_frames,
         wake_index: 0,
-        hour: 10,
-        minute: 0,
+        wake_pages,
+        hour_prompt: visible_time_set_single_text(program, text_id(1)?)?,
+        hour_confirm_lead: visible_time_set_single_text(program, text_id(2)?)?,
+        hour_confirm_tail: visible_time_set_single_text(program, text_id(3)?)?,
+        minute_prompt: visible_time_set_single_text(program, text_id(4)?)?,
+        minute_confirm_lead: visible_time_set_single_text(program, text_id(5)?)?,
+        minute_confirm_tail: visible_time_set_single_text(program, text_id(6)?)?,
+        hour: default_hour,
+        hour_min,
+        hour_max,
+        minute: default_minute,
+        minute_min,
+        minute_max,
+        selection_delay_frames: input_delay_frames,
+        direction_first_repeat_frames,
+        direction_later_repeat_frames,
+        input_delay_frames: 0,
         visible_chars: 0,
         text_timer: 0,
         yes_no_index: 0,
-        reaction_text: String::new(),
-    });
+        reaction_pages: Vec::new(),
+        reaction_index: 0,
+    };
+    begin_visible_music_fade(runtime_shell, &music_fade_audio, music_fade_rate)?;
+    runtime_shell.pending_time_set = Some(time_set);
     record_visible_runtime_action(runtime_shell, format!("time_set:open:{next:?}"))?;
     runtime_shell
         .last_audio_events
@@ -3582,6 +5486,56 @@ fn tick_visible_time_set_screen(runtime_shell: &mut BevyRuntimeShell) -> Result<
     let Some(time_set) = runtime_shell.pending_time_set.as_mut() else {
         return Ok(());
     };
+    match time_set.phase {
+        VisibleTimeSetPhase::StartupDelay => {
+            time_set.startup_frames_remaining = time_set.startup_frames_remaining.saturating_sub(1);
+            if time_set.startup_frames_remaining == 0 {
+                time_set.phase = VisibleTimeSetPhase::StartupFadeOut;
+                time_set.startup_palette_step = 1;
+                time_set.startup_frames_remaining = time_set.startup_palette_step_frames;
+            }
+            return Ok(());
+        }
+        VisibleTimeSetPhase::StartupFadeOut => {
+            time_set.startup_frames_remaining = time_set.startup_frames_remaining.saturating_sub(1);
+            if time_set.startup_frames_remaining == 0 {
+                if time_set.startup_palette_step < time_set.startup_palette_steps {
+                    time_set.startup_palette_step += 1;
+                    time_set.startup_frames_remaining = time_set.startup_palette_step_frames;
+                } else {
+                    time_set.phase = VisibleTimeSetPhase::StartupLoad;
+                    time_set.startup_frames_remaining = time_set.startup_load_frames;
+                }
+            }
+            return Ok(());
+        }
+        VisibleTimeSetPhase::StartupLoad => {
+            time_set.startup_frames_remaining = time_set.startup_frames_remaining.saturating_sub(1);
+            if time_set.startup_frames_remaining == 0 {
+                time_set.phase = VisibleTimeSetPhase::StartupFadeIn;
+                time_set.startup_palette_step = 1;
+                time_set.startup_frames_remaining = time_set.startup_palette_step_frames;
+            }
+            return Ok(());
+        }
+        VisibleTimeSetPhase::StartupFadeIn => {
+            time_set.startup_frames_remaining = time_set.startup_frames_remaining.saturating_sub(1);
+            if time_set.startup_frames_remaining == 0 {
+                if time_set.startup_palette_step < time_set.startup_palette_steps {
+                    time_set.startup_palette_step += 1;
+                    time_set.startup_frames_remaining = time_set.startup_palette_step_frames;
+                } else {
+                    time_set.phase = VisibleTimeSetPhase::WakeDialogue;
+                    time_set.startup_palette_step = 0;
+                }
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+    if time_set.input_delay_frames > 0 {
+        time_set.input_delay_frames -= 1;
+    }
     let text = visible_time_set_dialog_text(time_set);
     if text.is_empty() {
         return Ok(());
@@ -3613,19 +5567,42 @@ fn visible_time_set_dialog_complete(time_set: &VisibleTimeSetScreen) -> bool {
 
 fn visible_time_set_dialog_text(time_set: &VisibleTimeSetScreen) -> String {
     match time_set.phase {
-        VisibleTimeSetPhase::WakeDialogue => VISIBLE_TIME_SET_WAKE_TEXT[time_set
-            .wake_index
-            .min(VISIBLE_TIME_SET_WAKE_TEXT.len().saturating_sub(1))]
-        .to_string(),
+        VisibleTimeSetPhase::WakeDialogue => time_set
+            .wake_pages
+            .get(time_set.wake_index.min(time_set.wake_pages.len().saturating_sub(1)))
+            .cloned()
+            .unwrap_or_default(),
         VisibleTimeSetPhase::HourConfirm => {
-            format!("What?\n{}?", visible_time_set_hour_display(time_set))
+            format!(
+                "{}\n{}{}",
+                time_set.hour_confirm_lead,
+                visible_time_set_hour_display(time_set),
+                time_set.hour_confirm_tail
+            )
         }
         VisibleTimeSetPhase::MinuteConfirm => {
-            format!("Whoa!\n{}?", visible_time_set_minute_display(time_set))
+            format!(
+                "{}\n{}{}",
+                time_set.minute_confirm_lead,
+                visible_time_set_minute_display(time_set),
+                time_set.minute_confirm_tail
+            )
         }
-        VisibleTimeSetPhase::FinalReaction => time_set.reaction_text.clone(),
+        VisibleTimeSetPhase::FinalReaction => time_set
+            .reaction_pages
+            .get(
+                time_set
+                    .reaction_index
+                    .min(time_set.reaction_pages.len().saturating_sub(1)),
+            )
+            .cloned()
+            .unwrap_or_default(),
         VisibleTimeSetPhase::SetHour
         | VisibleTimeSetPhase::SetMinute
+        | VisibleTimeSetPhase::StartupDelay
+        | VisibleTimeSetPhase::StartupFadeOut
+        | VisibleTimeSetPhase::StartupLoad
+        | VisibleTimeSetPhase::StartupFadeIn
         | VisibleTimeSetPhase::Complete => String::new(),
     }
 }
@@ -3641,15 +5618,30 @@ fn press_visible_time_set_a_button(runtime_shell: &mut BevyRuntimeShell) -> Resu
     let Some(mut time_set) = runtime_shell.pending_time_set.take() else {
         return handle_visible_no_time_set_screen(runtime_shell, "a");
     };
+    if matches!(
+        time_set.phase,
+        VisibleTimeSetPhase::SetHour | VisibleTimeSetPhase::SetMinute
+    ) && time_set.input_delay_frames > 0
+    {
+        runtime_shell.pending_time_set = Some(time_set);
+        return Ok(());
+    }
     match time_set.phase {
+        VisibleTimeSetPhase::StartupDelay
+        | VisibleTimeSetPhase::StartupFadeOut
+        | VisibleTimeSetPhase::StartupLoad
+        | VisibleTimeSetPhase::StartupFadeIn => {
+            runtime_shell.pending_time_set = Some(time_set);
+        }
         VisibleTimeSetPhase::WakeDialogue => {
             if !visible_time_set_dialog_complete(&time_set) {
                 advance_visible_time_set_dialog(&mut time_set);
-            } else if time_set.wake_index < VISIBLE_TIME_SET_WAKE_TEXT.len().saturating_sub(1) {
+            } else if time_set.wake_index < time_set.wake_pages.len().saturating_sub(1) {
                 time_set.wake_index += 1;
                 open_visible_time_set_dialog(&mut time_set);
             } else {
                 time_set.phase = VisibleTimeSetPhase::SetHour;
+                time_set.input_delay_frames = time_set.selection_delay_frames;
                 open_visible_time_set_dialog(&mut time_set);
             }
             runtime_shell.pending_time_set = Some(time_set);
@@ -3663,8 +5655,10 @@ fn press_visible_time_set_a_button(runtime_shell: &mut BevyRuntimeShell) -> Resu
         VisibleTimeSetPhase::HourConfirm => {
             if time_set.yes_no_index == 0 {
                 time_set.phase = VisibleTimeSetPhase::SetMinute;
+                time_set.input_delay_frames = time_set.selection_delay_frames;
             } else {
                 time_set.phase = VisibleTimeSetPhase::SetHour;
+                time_set.input_delay_frames = time_set.selection_delay_frames;
             }
             open_visible_time_set_dialog(&mut time_set);
             runtime_shell.pending_time_set = Some(time_set);
@@ -3684,6 +5678,7 @@ fn press_visible_time_set_a_button(runtime_shell: &mut BevyRuntimeShell) -> Resu
                 runtime_shell.pending_time_set = Some(time_set);
             } else {
                 time_set.phase = VisibleTimeSetPhase::SetMinute;
+                time_set.input_delay_frames = time_set.selection_delay_frames;
                 open_visible_time_set_dialog(&mut time_set);
                 runtime_shell.pending_time_set = Some(time_set);
             }
@@ -3692,6 +5687,10 @@ fn press_visible_time_set_a_button(runtime_shell: &mut BevyRuntimeShell) -> Resu
         VisibleTimeSetPhase::FinalReaction => {
             if !visible_time_set_dialog_complete(&time_set) {
                 advance_visible_time_set_dialog(&mut time_set);
+                runtime_shell.pending_time_set = Some(time_set);
+            } else if time_set.reaction_index + 1 < time_set.reaction_pages.len() {
+                time_set.reaction_index += 1;
+                open_visible_time_set_dialog(&mut time_set);
                 runtime_shell.pending_time_set = Some(time_set);
             } else {
                 complete_visible_time_set_screen(runtime_shell, time_set)?;
@@ -3709,34 +5708,41 @@ fn press_visible_time_set_b_button(runtime_shell: &mut BevyRuntimeShell) -> Resu
         return handle_visible_no_time_set_screen(runtime_shell, "b");
     };
     match time_set.phase {
+        VisibleTimeSetPhase::StartupDelay
+        | VisibleTimeSetPhase::StartupFadeOut
+        | VisibleTimeSetPhase::StartupLoad
+        | VisibleTimeSetPhase::StartupFadeIn => {}
         VisibleTimeSetPhase::WakeDialogue | VisibleTimeSetPhase::FinalReaction => {
             if !visible_time_set_dialog_complete(&time_set) {
                 advance_visible_time_set_dialog(&mut time_set);
             } else if matches!(time_set.phase, VisibleTimeSetPhase::WakeDialogue) {
                 return press_visible_time_set_a_button_with_state(runtime_shell, time_set);
+            } else if time_set.reaction_index + 1 < time_set.reaction_pages.len() {
+                time_set.reaction_index += 1;
+                open_visible_time_set_dialog(&mut time_set);
             } else {
                 complete_visible_time_set_screen(runtime_shell, time_set)?;
                 return Ok(());
             }
         }
         VisibleTimeSetPhase::SetHour => {
-            time_set.phase = VisibleTimeSetPhase::WakeDialogue;
-            time_set.wake_index = VISIBLE_TIME_SET_WAKE_TEXT.len().saturating_sub(1);
-            open_visible_time_set_dialog(&mut time_set);
+            // SetHour samples only A, Up, and Down. B leaves the source loop
+            // running and does not navigate back into the completed text.
         }
         VisibleTimeSetPhase::HourConfirm => {
             time_set.yes_no_index = 1;
             time_set.phase = VisibleTimeSetPhase::SetHour;
+            time_set.input_delay_frames = time_set.selection_delay_frames;
             open_visible_time_set_dialog(&mut time_set);
             record_visible_time_set_menu_option(runtime_shell)?;
         }
         VisibleTimeSetPhase::SetMinute => {
-            time_set.phase = VisibleTimeSetPhase::SetHour;
-            open_visible_time_set_dialog(&mut time_set);
+            // SetMinutes has the same A/Up/Down-only input contract.
         }
         VisibleTimeSetPhase::MinuteConfirm => {
             time_set.yes_no_index = 1;
             time_set.phase = VisibleTimeSetPhase::SetMinute;
+            time_set.input_delay_frames = time_set.selection_delay_frames;
             open_visible_time_set_dialog(&mut time_set);
             record_visible_time_set_menu_option(runtime_shell)?;
         }
@@ -3752,6 +5758,7 @@ fn complete_visible_time_set_screen(
 ) -> Result<()> {
     time_set.phase = VisibleTimeSetPhase::Complete;
     let next = time_set.next;
+    runtime_shell.h_in_menu = time_set.saved_h_in_menu;
     record_visible_runtime_action(runtime_shell, format!("time_set:complete:{next:?}"))?;
     runtime_shell
         .last_audio_events
@@ -3774,13 +5781,18 @@ fn move_visible_time_set_direction(
     runtime_shell: &mut BevyRuntimeShell,
     direction: VisibleTimeSetDirection,
 ) -> Result<()> {
-    let Some(phase) = runtime_shell
+    let Some((phase, input_delay_frames)) = runtime_shell
         .pending_time_set
         .as_ref()
-        .map(|time_set| time_set.phase)
+        .map(|time_set| (time_set.phase, time_set.input_delay_frames))
     else {
         return handle_visible_no_time_set_screen(runtime_shell, "cursor");
     };
+    if matches!(phase, VisibleTimeSetPhase::SetHour | VisibleTimeSetPhase::SetMinute)
+        && input_delay_frames > 0
+    {
+        return Ok(());
+    }
     match phase {
         VisibleTimeSetPhase::SetHour => match direction {
             VisibleTimeSetDirection::Up => move_visible_time_set_cursor(runtime_shell, 1),
@@ -3795,16 +5807,16 @@ fn move_visible_time_set_direction(
             }
         },
         VisibleTimeSetPhase::SetMinute => match direction {
-            VisibleTimeSetDirection::Up | VisibleTimeSetDirection::Right => {
+            VisibleTimeSetDirection::Up => move_visible_time_set_cursor(runtime_shell, 1),
+            VisibleTimeSetDirection::Down => move_visible_time_set_cursor(runtime_shell, -1),
+            VisibleTimeSetDirection::Left | VisibleTimeSetDirection::Right => Ok(()),
+        },
+        VisibleTimeSetPhase::HourConfirm | VisibleTimeSetPhase::MinuteConfirm => match direction {
+            VisibleTimeSetDirection::Up | VisibleTimeSetDirection::Down => {
                 move_visible_time_set_cursor(runtime_shell, 1)
             }
-            VisibleTimeSetDirection::Down | VisibleTimeSetDirection::Left => {
-                move_visible_time_set_cursor(runtime_shell, -1)
-            }
+            VisibleTimeSetDirection::Left | VisibleTimeSetDirection::Right => Ok(()),
         },
-        VisibleTimeSetPhase::HourConfirm | VisibleTimeSetPhase::MinuteConfirm => {
-            move_visible_time_set_cursor(runtime_shell, 1)
-        }
         _ => Ok(()),
     }
 }
@@ -3816,16 +5828,32 @@ fn move_visible_time_set_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isi
     match time_set.phase {
         VisibleTimeSetPhase::SetHour => {
             if delta.is_negative() {
-                time_set.hour = (time_set.hour + 23) % 24;
+                time_set.hour = if time_set.hour == time_set.hour_min {
+                    time_set.hour_max
+                } else {
+                    time_set.hour - 1
+                };
             } else {
-                time_set.hour = (time_set.hour + 1) % 24;
+                time_set.hour = if time_set.hour == time_set.hour_max {
+                    time_set.hour_min
+                } else {
+                    time_set.hour + 1
+                };
             }
         }
         VisibleTimeSetPhase::SetMinute => {
             if delta.is_negative() {
-                time_set.minute = (time_set.minute + 59) % 60;
+                time_set.minute = if time_set.minute == time_set.minute_min {
+                    time_set.minute_max
+                } else {
+                    time_set.minute - 1
+                };
             } else {
-                time_set.minute = (time_set.minute + 1) % 60;
+                time_set.minute = if time_set.minute == time_set.minute_max {
+                    time_set.minute_min
+                } else {
+                    time_set.minute + 1
+                };
             }
         }
         VisibleTimeSetPhase::HourConfirm | VisibleTimeSetPhase::MinuteConfirm => {
@@ -3857,7 +5885,12 @@ fn commit_visible_time_set_selection(
     let update = runtime_shell
         .shell
         .set_manual_clock_time(rtc.date, rtc.hour, rtc.minute, rtc.second, target)?;
-    time_set.reaction_text = visible_time_set_reaction_text(time_set.hour, time_set.minute);
+    time_set.reaction_pages = visible_time_set_reaction_pages(
+        runtime_shell.runtime.title_presentation_program(),
+        time_set.hour,
+        time_set.minute,
+    )?;
+    time_set.reaction_index = 0;
     record_visible_runtime_action(
         runtime_shell,
         format!(
@@ -3923,23 +5956,37 @@ fn visible_time_set_minute_display(time_set: &VisibleTimeSetScreen) -> String {
     format!("{:>2} min.", time_set.minute)
 }
 
-fn visible_time_set_reaction_text(hour: u8, minute: u8) -> String {
-    let suffix = if hour < 4 {
-        "!\nNo wonder it's so\ndark!"
-    } else if hour <= 10 {
-        "!\nI overslept!"
-    } else if hour < 18 {
-        "!\nYikes! I over-\nslept!"
-    } else {
-        "!\nNo wonder it's so\ndark!"
+fn visible_time_set_reaction_pages(
+    program: &RuntimePresentationProgram,
+    hour: u8,
+    minute: u8,
+) -> Result<Vec<String>> {
+    let period = match hour % 24 {
+        4..=10 => "morn",
+        11..=17 => "day",
+        _ => "nite",
     };
-    format!(
-        "{} {:>2}:{:02}\n{}",
+    let operation = visible_initialize_clock_operation(program)?;
+    let text_id = operation
+        .fields
+        .get("response_text_by_period")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|responses| responses.get(period))
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("initialize_clock has no {period} response text"))?;
+    let mut pages = visible_presentation_text_pages(program, text_id, "PLAYER")?;
+    anyhow::ensure!(
+        !pages.is_empty(),
+        "initialize_clock response text {text_id} has no pages"
+    );
+    let clock = format!(
+        "{} {:>2}:{:02}",
         visible_time_set_time_of_day(hour),
         visible_time_set_twelve_hour(hour),
-        minute,
-        suffix
-    )
+        minute
+    );
+    pages[0] = format!("{clock}{}", pages[0]);
+    Ok(pages)
 }
 
 fn visible_time_set_yes_no_entries(time_set: &VisibleTimeSetScreen) -> Vec<String> {
@@ -3957,54 +6004,182 @@ fn visible_time_set_yes_no_entries(time_set: &VisibleTimeSetScreen) -> Vec<Strin
 }
 
 const VISIBLE_OAK_INTRO_TEXT_SPEED_FRAMES: u8 = 2;
-const VISIBLE_OAK_INTRO_SCENES: [(&str, &str, &[&str]); 4] = [
-    (
-        "oak_intro_1",
-        "OAK",
-        &[
-            "Hello! Sorry to\nkeep you waiting!",
-            "Welcome to the\nworld of #MON!",
-            "My name is OAK.",
-            "People call me the\n#MON PROF.",
-        ],
-    ),
-    (
-        "wooper_showcase",
-        "WOOPER",
-        &[
-            "This world is in-\nhabited by crea-\ntures that we call",
-            "#MON.",
-            "People and #MON\nlive together by",
-            "supporting each\nother.",
-            "Some people play\nwith #MON, some\nbattle with them.",
-        ],
-    ),
-    (
-        "oak_intro_2",
-        "OAK",
-        &[
-            "But we don't know\neverything about\n#MON yet.",
-            "There are still\nmany mysteries to\nsolve.",
-            "That's why I study\n#MON every day.",
-        ],
-    ),
-    (
-        "player_picture",
-        "PLAYER",
-        &["Now, what did you\nsay your name was?"],
-    ),
+const VISIBLE_OAK_INTRO_SCENES: [(&str, &str); 4] = [
+    ("oak_intro_1", "OAK"),
+    ("wooper_showcase", "WOOPER"),
+    ("oak_intro_2", "OAK"),
+    ("player_picture", "PLAYER"),
 ];
-const VISIBLE_OAK_FINAL_TEXT: [&str; 6] = [
-    "<PLAYER>, are you\nready?",
-    "Your very own\n#MON story is\nabout to unfold.",
-    "You'll face fun\ntimes and tough\nchallenges.",
-    "A world of dreams\nand adventures",
-    "with #MON\nawaits! Let's go!",
-    "I'll be seeing you\nlater!",
-];
-const VISIBLE_OAK_INTRO_FADE_FRAME_DELAY: u16 = 8;
-const VISIBLE_OAK_WIPE_STEP_PIXELS: u16 = 8;
-const VISIBLE_OAK_WIPE_END_X: u16 = 160;
+fn visible_oak_speech_operations(
+    program: &RuntimePresentationProgram,
+) -> Result<&[crystal_assets::RuntimePresentationOperation]> {
+    program
+        .subprograms
+        .iter()
+        .find(|subprogram| subprogram.id == "oak_speech")
+        .and_then(|subprogram| {
+            subprogram
+                .phases
+                .iter()
+                .find(|phase| phase.id == "speech")
+        })
+        .map(|phase| phase.operations.as_slice())
+        .context("runtime title presentation has no OakSpeech speech phase")
+}
+
+fn visible_oak_portrait_operation(
+    program: &RuntimePresentationProgram,
+    scene_index: usize,
+) -> Result<&crystal_assets::RuntimePresentationOperation> {
+    let portraits = visible_oak_speech_operations(program)?
+        .iter()
+        .filter(|operation| operation.op == "present_intro_portrait")
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        portraits.len() == 4,
+        "OakSpeech resolves to {} portraits instead of four",
+        portraits.len()
+    );
+    portraits
+        .get(scene_index)
+        .copied()
+        .context("OakSpeech portrait scene index is out of range")
+}
+
+fn visible_oak_text_operation(
+    program: &RuntimePresentationProgram,
+    sequence_index: usize,
+) -> Result<&crystal_assets::RuntimePresentationOperation> {
+    let sequences = visible_oak_speech_operations(program)?
+        .iter()
+        .filter(|operation| operation.op == "present_text_sequence")
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        sequences.len() == 5,
+        "OakSpeech resolves to {} text sequences instead of five",
+        sequences.len()
+    );
+    sequences
+        .get(sequence_index)
+        .copied()
+        .context("OakSpeech text sequence index is out of range")
+}
+
+fn visible_oak_text_groups(
+    program: &RuntimePresentationProgram,
+    sequence_index: usize,
+    player_name: &str,
+) -> Result<Vec<(String, Vec<String>)>> {
+    let operation = visible_oak_text_operation(program, sequence_index)?;
+    let entries = operation
+        .fields
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .context("OakSpeech text sequence has no entries")?;
+    anyhow::ensure!(!entries.is_empty(), "OakSpeech text sequence is empty");
+    let mut groups = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let id = entry
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .context("OakSpeech text sequence has an invalid entry")?;
+        let pages = visible_presentation_text_pages(program, id, player_name)?;
+        groups.push((id.to_string(), pages));
+    }
+    Ok(groups)
+}
+
+fn visible_presentation_text_pages(
+    program: &RuntimePresentationProgram,
+    id: &str,
+    player_name: &str,
+) -> Result<Vec<String>> {
+    let matches = program
+        .text
+        .iter()
+        .filter(|text| text.id == id)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        matches.len() == 1,
+        "runtime presentation text {id} resolves to {} catalog entries",
+        matches.len()
+    );
+    let text = matches[0];
+    let body = crate::core::systems::script_text::ScriptTextBody {
+        label: id.to_string(),
+        commands: text
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(command_index, command)| {
+                crate::core::systems::script_text::ScriptTextBodyCommand {
+                    command: command.command.clone(),
+                    args: command.args.clone(),
+                    command_index,
+                }
+            })
+            .collect(),
+    };
+    Ok(render_visible_script_text_pages(
+        &body,
+        &BTreeMap::new(),
+        player_name,
+        "RIVAL",
+        0,
+    )
+    .into_iter()
+    .filter(|page| !page.is_empty())
+    .collect())
+}
+
+fn visible_oak_text_has_command(
+    program: &RuntimePresentationProgram,
+    text_id: &str,
+    command: &str,
+) -> bool {
+    program.text.iter().any(|text| {
+        text.id == text_id
+            && text
+                .commands
+                .iter()
+                .any(|candidate| candidate.command == command)
+    })
+}
+
+fn visible_oak_music(program: &RuntimePresentationProgram) -> Result<String> {
+    let music = visible_oak_speech_operations(program)?
+        .iter()
+        .filter(|operation| operation.op == "play_audio")
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        music.len() == 1,
+        "OakSpeech resolves to {} music operations instead of one",
+        music.len()
+    );
+    music[0]
+        .fields
+        .get("audio")
+        .and_then(serde_json::Value::as_str)
+        .filter(|audio| !audio.is_empty())
+        .map(str::to_string)
+        .context("OakSpeech music operation has no audio id")
+}
+
+fn visible_oak_dismiss_operation(
+    program: &RuntimePresentationProgram,
+    scene_index: usize,
+) -> Result<Option<&crystal_assets::RuntimePresentationOperation>> {
+    let dismissals = visible_oak_speech_operations(program)?
+        .iter()
+        .filter(|operation| operation.op == "dismiss_intro_portrait")
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        dismissals.len() == 3,
+        "OakSpeech resolves to {} portrait dismissals instead of three",
+        dismissals.len()
+    );
+    Ok(dismissals.get(scene_index).copied())
+}
 
 fn empty_visible_oak_intro_sequence(mode: VisibleOakIntroMode) -> VisibleOakIntroSequence {
     VisibleOakIntroSequence {
@@ -4015,6 +6190,7 @@ fn empty_visible_oak_intro_sequence(mode: VisibleOakIntroMode) -> VisibleOakIntr
         current_sprite: None,
         wooper_cry_queued: false,
         scene_fade_out_steps: 0,
+        scene_fade_out_frames_per_step: 0,
         fade_active: false,
         fade_direction: VisibleOakFadeDirection::In,
         fade_total_frames: 1,
@@ -4022,7 +6198,12 @@ fn empty_visible_oak_intro_sequence(mode: VisibleOakIntroMode) -> VisibleOakIntr
         fade_alpha: 0,
         wipe_active: false,
         wipe_window_x: 0,
+        wipe_delta: 0,
+        wipe_stop_before: 0,
+        wipe_initial_wait: false,
         text_queue: Vec::new(),
+        post_cry_text_queue: Vec::new(),
+        post_cry_requires_prompt: false,
         current_text: String::new(),
         visible_chars: 0,
         text_timer: 0,
@@ -4035,20 +6216,23 @@ fn empty_visible_oak_intro_sequence(mode: VisibleOakIntroMode) -> VisibleOakIntr
 fn open_visible_oak_intro_sequence(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     reset_visible_navigation_state(runtime_shell);
     let mut oak_intro = empty_visible_oak_intro_sequence(VisibleOakIntroMode::Intro);
-    start_visible_oak_intro_scene(&mut oak_intro);
+    start_visible_oak_intro_scene(
+        &mut oak_intro,
+        runtime_shell.runtime.title_presentation_program(),
+    )?;
     runtime_shell.pending_oak_intro = Some(oak_intro);
     record_visible_runtime_action(runtime_shell, "oak_intro:open")?;
-    let oak_music = "MUSIC_ROUTE_30";
-    if runtime_shell.active_music.as_deref() != Some(oak_music) {
+    let oak_music = visible_oak_music(runtime_shell.runtime.title_presentation_program())?;
+    if runtime_shell.active_music.as_deref() != Some(oak_music.as_str()) {
         let playback = runtime_shell
             .shell
             .runtime()
             .audio()
-            .require_playback_entry(AudioKind::Music, oak_music)?;
+            .require_playback_entry(AudioKind::Music, &oak_music)?;
         enqueue_bevy_audio_command(
             &mut runtime_shell.pending_audio,
             BevyAudioCommand {
-                audio_id: oak_music.to_string(),
+                audio_id: oak_music.clone(),
                 kind: ModpackAudioKind::Music,
                 mode: playback.mode,
                 looped: matches!(
@@ -4058,12 +6242,12 @@ fn open_visible_oak_intro_sequence(runtime_shell: &mut BevyRuntimeShell) -> Resu
             },
         );
         runtime_shell.pending_music_stop = true;
-        runtime_shell.active_music = Some(oak_music.to_string());
+        runtime_shell.active_music = Some(oak_music.clone());
         runtime_shell.faded_music = None;
     }
     runtime_shell
         .last_audio_events
-        .push("queued Oak intro music MUSIC_ROUTE_30".to_string());
+        .push(format!("queued Oak intro music {oak_music}"));
     set_shell_action_status(runtime_shell, "OAK INTRO");
     trim_event_log(&mut runtime_shell.last_audio_events);
     Ok(())
@@ -4085,10 +6269,14 @@ fn open_visible_oak_final_sequence(
     // ASM returns from NamePlayer directly into OakText7 without clearing the
     // tilemap, so the selected player/trainer portrait remains on screen.
     oak_intro.current_sprite = Some("PLAYER".to_string());
-    oak_intro.text_queue = VISIBLE_OAK_FINAL_TEXT
-        .iter()
-        .map(|page| page.replace("<PLAYER>", &player))
-        .collect();
+    oak_intro.text_queue = visible_oak_text_groups(
+        runtime_shell.runtime.title_presentation_program(),
+        VISIBLE_OAK_INTRO_SCENES.len(),
+        &player,
+    )?
+    .into_iter()
+    .flat_map(|(_, pages)| pages)
+    .collect();
     advance_visible_oak_intro_text_queue(&mut oak_intro);
     runtime_shell.pending_oak_intro = Some(oak_intro);
     record_visible_runtime_action(runtime_shell, "oak_intro:final:open")?;
@@ -4097,17 +6285,95 @@ fn open_visible_oak_final_sequence(
     Ok(())
 }
 
-fn start_visible_oak_intro_scene(oak_intro: &mut VisibleOakIntroSequence) {
-    let (state, sprite, pages) = VISIBLE_OAK_INTRO_SCENES[oak_intro
+fn start_visible_oak_intro_scene(
+    oak_intro: &mut VisibleOakIntroSequence,
+    program: &RuntimePresentationProgram,
+) -> Result<()> {
+    let (state, sprite) = VISIBLE_OAK_INTRO_SCENES[oak_intro
         .scene_index
         .min(VISIBLE_OAK_INTRO_SCENES.len() - 1)];
+    let portrait = visible_oak_portrait_operation(program, oak_intro.scene_index)?;
+    let kind = portrait
+        .fields
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .context("OakSpeech portrait has no kind")?;
+    let exported_sprite = match kind {
+        "trainer" => portrait
+            .fields
+            .get("trainer_class")
+            .and_then(serde_json::Value::as_str)
+            .filter(|trainer_class| *trainer_class == "POKEMON_PROF")
+            .map(|_| "OAK"),
+        "pokemon" => portrait
+            .fields
+            .get("species")
+            .and_then(serde_json::Value::as_str),
+        "player" => Some("PLAYER"),
+        _ => None,
+    }
+    .with_context(|| format!("unsupported OakSpeech portrait kind {kind}"))?;
+    anyhow::ensure!(
+        exported_sprite == sprite,
+        "OakSpeech portrait {exported_sprite} does not match scene sprite {sprite}"
+    );
     oak_intro.scene_state = state.to_string();
     oak_intro.current_sprite = Some(sprite.to_string());
-    oak_intro.text_queue = if state == "wooper_showcase" {
-        Vec::new()
+    let text_groups = visible_oak_text_groups(program, oak_intro.scene_index, "PLAYER")?;
+    oak_intro.post_cry_text_queue.clear();
+    oak_intro.post_cry_requires_prompt = false;
+    if state == "wooper_showcase" {
+        let text_operation = visible_oak_text_operation(program, oak_intro.scene_index)?;
+        let embedded_audio = text_operation
+            .fields
+            .get("embedded_audio")
+            .and_then(serde_json::Value::as_array)
+            .context("Wooper OakSpeech text has no embedded audio")?;
+        anyhow::ensure!(
+            embedded_audio.len() == 1,
+            "Wooper OakSpeech text has {} embedded audio operations",
+            embedded_audio.len()
+        );
+        let audio = embedded_audio[0]
+            .as_object()
+            .context("Wooper OakSpeech embedded audio is invalid")?;
+        let after = audio
+            .get("after")
+            .and_then(serde_json::Value::as_str)
+            .context("Wooper OakSpeech embedded audio has no after entry")?;
+        anyhow::ensure!(
+            audio.get("cry").and_then(serde_json::Value::as_str) == Some(sprite)
+                && audio
+                    .get("wait_for_sfx")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true),
+            "Wooper OakSpeech embedded cry contract is invalid"
+        );
+        let split = text_groups
+            .iter()
+            .position(|(id, _)| id == after)
+            .context("Wooper OakSpeech embedded audio after entry is missing")?;
+        oak_intro.text_queue = text_groups[..=split]
+            .iter()
+            .flat_map(|(_, pages)| pages.iter().cloned())
+            .collect();
+        oak_intro.post_cry_text_queue = text_groups[split + 1..]
+            .iter()
+            .flat_map(|(_, pages)| pages.iter().cloned())
+            .collect();
+        oak_intro.post_cry_requires_prompt = text_groups[split + 1..]
+            .iter()
+            .any(|(id, _)| visible_oak_text_has_command(program, id, "text_promptbutton"));
+        anyhow::ensure!(
+            oak_intro.post_cry_requires_prompt,
+            "Wooper OakSpeech continuation has no text_promptbutton"
+        );
     } else {
-        pages.iter().map(|page| (*page).to_string()).collect()
-    };
+        oak_intro.text_queue = text_groups
+            .into_iter()
+            .flat_map(|(_, pages)| pages)
+            .collect();
+    }
     oak_intro.current_text.clear();
     oak_intro.visible_chars = 0;
     oak_intro.text_timer = 0;
@@ -4115,62 +6381,131 @@ fn start_visible_oak_intro_scene(oak_intro: &mut VisibleOakIntroSequence) {
     oak_intro.blink_timer = 0;
     oak_intro.finished = false;
     oak_intro.wooper_cry_queued = false;
-    oak_intro.scene_fade_out_steps = match state {
-        "player_picture" => 0,
-        _ => 3,
-    };
+    if let Some(dismissal) = visible_oak_dismiss_operation(program, oak_intro.scene_index)? {
+        anyhow::ensure!(
+            dismissal
+                .fields
+                .get("clear_tilemap")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true),
+            "OakSpeech portrait dismissal must clear the tilemap"
+        );
+        let fade = dismissal
+            .fields
+            .get("fade")
+            .context("OakSpeech portrait dismissal has no fade metadata")?;
+        oak_intro.scene_fade_out_steps = fade
+            .get("words")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .context("OakSpeech portrait dismissal has no positive word count")?;
+        oak_intro.scene_fade_out_frames_per_step = fade
+            .get("frames_per_word")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .context("OakSpeech portrait dismissal has no positive frame delay")?;
+    } else {
+        oak_intro.scene_fade_out_steps = 0;
+        oak_intro.scene_fade_out_frames_per_step = 0;
+    }
     oak_intro.fade_active = false;
     oak_intro.fade_alpha = 0;
     oak_intro.fade_elapsed = 0;
     oak_intro.fade_total_frames = 1;
     oak_intro.wipe_active = false;
     oak_intro.wipe_window_x = 0;
+    oak_intro.wipe_delta = 0;
+    oak_intro.wipe_stop_before = 0;
+    oak_intro.wipe_initial_wait = false;
+    if let Some(fade) = portrait.fields.get("fade") {
+        let steps = fade
+            .get("words")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .context("OakSpeech portrait fade has no positive word count")?;
+        let frames_per_step = fade
+            .get("frames_per_word")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .context("OakSpeech portrait fade has no positive frame delay")?;
+        oak_intro.scene_phase = VisibleOakIntroPhase::FadeIn;
+        start_visible_oak_intro_fade(
+            oak_intro,
+            VisibleOakFadeDirection::In,
+            steps,
+            frames_per_step,
+        );
+    } else if let Some(wipe) = portrait.fields.get("wipe") {
+        let window_x_start = wipe
+            .get("window_x_start")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .context("OakSpeech portrait wipe has no byte-sized window_x_start")?;
+        let delta = wipe
+            .get("delta")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i16::try_from(value).ok())
+            .filter(|value| *value != 0)
+            .context("OakSpeech portrait wipe has no nonzero delta")?;
+        let stop_before = wipe
+            .get("stop_before")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i16::try_from(value).ok())
+            .context("OakSpeech portrait wipe has no stop_before value")?;
+        oak_intro.scene_phase = VisibleOakIntroPhase::WipeIn;
+        start_visible_oak_intro_wipe(oak_intro, window_x_start, delta, stop_before);
+    } else {
+        anyhow::bail!("OakSpeech portrait has neither fade nor wipe metadata");
+    }
     match state {
-        "oak_intro_1" => {
-            oak_intro.scene_phase = VisibleOakIntroPhase::FadeIn;
-            start_visible_oak_intro_fade(oak_intro, VisibleOakFadeDirection::In, 4);
-        }
-        "wooper_showcase" => {
-            oak_intro.scene_phase = VisibleOakIntroPhase::WipeIn;
-            start_visible_oak_intro_wipe(oak_intro);
-        }
-        "oak_intro_2" | "player_picture" => {
-            oak_intro.scene_phase = VisibleOakIntroPhase::FadeIn;
-            start_visible_oak_intro_fade(oak_intro, VisibleOakFadeDirection::In, 3);
-        }
+        "wooper_showcase" => {}
+        "oak_intro_1" | "oak_intro_2" | "player_picture" => {}
         _ => {
             oak_intro.scene_phase = VisibleOakIntroPhase::Text;
             advance_visible_oak_intro_text_queue(oak_intro);
         }
     }
+    Ok(())
 }
 
 fn tick_visible_oak_intro(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let should_queue_wooper_cry =
-        runtime_shell
-            .pending_oak_intro
-            .as_ref()
-            .is_some_and(|oak_intro| {
-                oak_intro.mode == VisibleOakIntroMode::Intro
-                    && oak_intro.scene_state == "wooper_showcase"
-                    && oak_intro.scene_phase == VisibleOakIntroPhase::Cry
-                    && !oak_intro.wooper_cry_queued
-            });
-    if should_queue_wooper_cry {
-        queue_visible_pokemon_cry(runtime_shell, "WOOPER", "oak_intro")?;
+    let cry_species = runtime_shell
+        .pending_oak_intro
+        .as_ref()
+        .filter(|oak_intro| {
+            oak_intro.mode == VisibleOakIntroMode::Intro
+                && oak_intro.scene_phase == VisibleOakIntroPhase::Cry
+                && !oak_intro.wooper_cry_queued
+        })
+        .and_then(|oak_intro| oak_intro.current_sprite.clone());
+    if let Some(cry_species) = cry_species {
+        queue_visible_pokemon_cry(runtime_shell, &cry_species, "oak_intro")?;
         if let Some(oak_intro) = runtime_shell.pending_oak_intro.as_mut() {
             oak_intro.wooper_cry_queued = true;
         }
     }
+    let transient_busy = runtime_shell.pending_audio.iter().any(|command| {
+        matches!(
+            command.kind,
+            ModpackAudioKind::SoundEffect | ModpackAudioKind::Cry
+        )
+    }) || runtime_shell.active_transient_kind.is_some();
     let Some(oak_intro) = runtime_shell.pending_oak_intro.as_mut() else {
         return Ok(());
     };
     oak_intro.blink_timer = (oak_intro.blink_timer + 1) % 60;
-    drive_visible_oak_intro_phase(oak_intro);
+    drive_visible_oak_intro_phase(oak_intro, transient_busy);
     Ok(())
 }
 
-fn drive_visible_oak_intro_phase(oak_intro: &mut VisibleOakIntroSequence) {
+fn drive_visible_oak_intro_phase(
+    oak_intro: &mut VisibleOakIntroSequence,
+    transient_busy: bool,
+) {
     match oak_intro.scene_phase {
         VisibleOakIntroPhase::FadeIn => {
             update_visible_oak_intro_fade(oak_intro);
@@ -4182,7 +6517,6 @@ fn drive_visible_oak_intro_phase(oak_intro: &mut VisibleOakIntroSequence) {
         VisibleOakIntroPhase::WipeIn => {
             if advance_visible_oak_intro_wipe(oak_intro) {
                 oak_intro.scene_phase = VisibleOakIntroPhase::TextOne;
-                queue_visible_oak_intro_text(oak_intro, &VISIBLE_OAK_INTRO_SCENES[1].2[..2]);
                 advance_visible_oak_intro_text_queue(oak_intro);
             }
         }
@@ -4192,16 +6526,13 @@ fn drive_visible_oak_intro_phase(oak_intro: &mut VisibleOakIntroSequence) {
             drive_visible_oak_intro_text(oak_intro);
         }
         VisibleOakIntroPhase::Cry => {
-            if oak_intro.wooper_cry_queued {
+            if oak_intro.wooper_cry_queued && !transient_busy {
                 oak_intro.scene_phase = VisibleOakIntroPhase::TextTwo;
-                oak_intro.text_queue = VISIBLE_OAK_INTRO_SCENES[1].2[2..]
-                    .iter()
-                    .map(|page| (*page).to_string())
-                    .collect();
+                oak_intro.text_queue = std::mem::take(&mut oak_intro.post_cry_text_queue);
                 // ASM: OakText2 runs PlayMonCry/WaitSFX and then OakText3's
                 // text_promptbutton without clearing the displayed "#MON."
                 // page. Keep it visible until A or B acknowledges the prompt.
-                oak_intro.waiting_for_input = true;
+                oak_intro.waiting_for_input = oak_intro.post_cry_requires_prompt;
                 oak_intro.blink_timer = 0;
             }
         }
@@ -4282,6 +6613,7 @@ fn finish_visible_oak_intro_text_group(oak_intro: &mut VisibleOakIntroSequence) 
                     oak_intro,
                     VisibleOakFadeDirection::Out,
                     oak_intro.scene_fade_out_steps,
+                    oak_intro.scene_fade_out_frames_per_step,
                 );
             } else {
                 oak_intro.scene_phase = VisibleOakIntroPhase::Complete;
@@ -4292,22 +6624,14 @@ fn finish_visible_oak_intro_text_group(oak_intro: &mut VisibleOakIntroSequence) 
     }
 }
 
-fn queue_visible_oak_intro_text(oak_intro: &mut VisibleOakIntroSequence, pages: &[&str]) {
-    oak_intro.text_queue = pages.iter().map(|page| (*page).to_string()).collect();
-    oak_intro.current_text.clear();
-    oak_intro.visible_chars = 0;
-    oak_intro.text_timer = 0;
-    oak_intro.waiting_for_input = false;
-    oak_intro.blink_timer = 0;
-}
-
 fn start_visible_oak_intro_fade(
     oak_intro: &mut VisibleOakIntroSequence,
     direction: VisibleOakFadeDirection,
     steps: u8,
+    frames_per_step: u16,
 ) {
     oak_intro.fade_direction = direction;
-    oak_intro.fade_total_frames = u16::from(steps.max(1)) * VISIBLE_OAK_INTRO_FADE_FRAME_DELAY;
+    oak_intro.fade_total_frames = u16::from(steps.max(1)) * frames_per_step.max(1);
     oak_intro.fade_elapsed = 0;
     oak_intro.fade_active = true;
     oak_intro.fade_alpha = match direction {
@@ -4341,22 +6665,33 @@ fn update_visible_oak_intro_fade(oak_intro: &mut VisibleOakIntroSequence) {
     }
 }
 
-fn start_visible_oak_intro_wipe(oak_intro: &mut VisibleOakIntroSequence) {
+fn start_visible_oak_intro_wipe(
+    oak_intro: &mut VisibleOakIntroSequence,
+    window_x_start: u8,
+    delta: i16,
+    stop_before: i16,
+) {
     oak_intro.wipe_active = true;
-    oak_intro.wipe_window_x = 0;
+    oak_intro.wipe_window_x = u16::from(window_x_start);
+    oak_intro.wipe_delta = delta;
+    oak_intro.wipe_stop_before = stop_before;
+    oak_intro.wipe_initial_wait = true;
 }
 
 fn advance_visible_oak_intro_wipe(oak_intro: &mut VisibleOakIntroSequence) -> bool {
     if !oak_intro.wipe_active {
         return true;
     }
-    oak_intro.wipe_window_x = oak_intro
-        .wipe_window_x
-        .saturating_add(VISIBLE_OAK_WIPE_STEP_PIXELS);
-    if oak_intro.wipe_window_x > VISIBLE_OAK_WIPE_END_X {
+    if oak_intro.wipe_initial_wait {
+        oak_intro.wipe_initial_wait = false;
+        return false;
+    }
+    let next = (oak_intro.wipe_window_x as i16 + oak_intro.wipe_delta) & 0xff;
+    if next == (oak_intro.wipe_stop_before & 0xff) {
         oak_intro.wipe_active = false;
         return true;
     }
+    oak_intro.wipe_window_x = next as u16;
     false
 }
 
@@ -4424,7 +6759,10 @@ fn complete_visible_oak_intro(
         VisibleOakIntroMode::Intro => {
             oak_intro.scene_index += 1;
             if oak_intro.scene_index < VISIBLE_OAK_INTRO_SCENES.len() {
-                start_visible_oak_intro_scene(&mut oak_intro);
+                start_visible_oak_intro_scene(
+                    &mut oak_intro,
+                    runtime_shell.runtime.title_presentation_program(),
+                )?;
                 runtime_shell.pending_oak_intro = Some(oak_intro);
                 return Ok(());
             }
@@ -4607,7 +6945,7 @@ fn advance_visible_title_to_press_start(runtime_shell: &mut BevyRuntimeShell) {
         if runtime_shell
             .title_menu
             .as_ref()
-            .is_some_and(|title| matches!(title.phase, VisibleTitlePhase::PressStart))
+            .is_some_and(|title| matches!(title.source_phase(), VisibleTitlePhase::PressStart))
         {
             return;
         }
@@ -4616,6 +6954,16 @@ fn advance_visible_title_to_press_start(runtime_shell: &mut BevyRuntimeShell) {
 }
 
 fn advance_visible_title_to_main_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    for _ in 0..4_096 {
+        if runtime_shell.intro_screen.is_none() {
+            break;
+        }
+        tick_visible_intro_screen(runtime_shell)?;
+    }
+    anyhow::ensure!(
+        runtime_shell.intro_screen.is_none(),
+        "visible title helper did not reach CrystalIntro return"
+    );
     advance_visible_title_to_press_start(runtime_shell);
     open_visible_title_main_menu(runtime_shell)
 }
@@ -4669,12 +7017,16 @@ fn visible_title_menu_entries(
     runtime_shell: &BevyRuntimeShell,
     title: &TitleMenu,
 ) -> Result<Vec<String>> {
-    if !visible_title_main_menu_ready(title) {
-        return Ok(vec![match title.phase {
+    if !visible_title_main_menu_active(title) {
+        return Ok(vec![match title.source_phase() {
             VisibleTitlePhase::Entrance | VisibleTitlePhase::Timer => "TITLE SCREEN".to_string(),
             VisibleTitlePhase::PressStart => "PRESS START".to_string(),
             VisibleTitlePhase::MainMenu => unreachable!(),
             VisibleTitlePhase::FadeOut => "FADE OUT".to_string(),
+            VisibleTitlePhase::Teardown => "TITLE TRANSITION".to_string(),
+            VisibleTitlePhase::Unknown(value) => {
+                anyhow::bail!("runtime title program produced invalid scene {value}")
+            }
         }]);
     }
     let options = visible_title_menu_options(runtime_shell, title);
@@ -4706,7 +7058,7 @@ fn move_visible_title_menu_cursor_with_action(
         return handle_visible_no_active_title_menu(runtime_shell, "cursor");
     };
     if !visible_title_main_menu_ready(title) {
-        let phase = title.phase;
+        let phase = title.source_phase();
         record_visible_runtime_action(runtime_shell, format!("{action}:ignored"))?;
         runtime_shell
             .last_audio_events
@@ -4752,6 +7104,175 @@ fn selected_visible_title_menu_option(
     let options = visible_title_menu_options(runtime_shell, title);
     let selected = title.cursor.option_index.min(options.len() - 1);
     Ok(options[selected].clone())
+}
+
+fn resume_visible_main_menu_input(
+    runtime_shell: &mut BevyRuntimeShell,
+    cancelled: bool,
+) -> Result<Option<RuntimeTitleMainMenuItem>> {
+    let selected = if cancelled {
+        None
+    } else {
+        let title = runtime_shell
+            .title_menu
+            .as_ref()
+            .context("MainMenu input has no title state")?;
+        Some(selected_visible_title_menu_option(runtime_shell, title)?)
+    };
+    {
+        let title = runtime_shell
+            .title_menu
+            .as_mut()
+            .context("MainMenu input has no title state")?;
+        anyhow::ensure!(
+            title.main_menu_waiting_for_input,
+            "MainMenu is not waiting in its exported input loop"
+        );
+        title.main_menu_waiting_for_input = false;
+        title.presentation_machine.memory.insert(
+            "wMenuJoypad".to_string(),
+            if cancelled { 0x02 } else { 0x01 },
+        );
+        if let Some(selected) = &selected {
+            title.presentation_machine.memory.insert(
+                "wMenuSelection".to_string(),
+                u16::try_from(selected.selection_index)
+                    .context("MainMenu selection index exceeds source WRAM")?,
+            );
+        }
+    }
+
+    for _ in 0..16 {
+        let operation = {
+            let BevyRuntimeShell {
+                runtime,
+                title_menu,
+                ..
+            } = runtime_shell;
+            title_menu
+                .as_mut()
+                .context("MainMenu continuation lost title state")?
+                .main_menu_phase_interpreter
+                .as_mut()
+                .context("MainMenu continuation has no interpreter")?
+                .step(runtime.title_presentation_program())?
+                .context("exported MainMenu ended without returning or dispatching")?
+        };
+        match operation.op.as_str() {
+            "close_window" => {
+                anyhow::ensure!(
+                    operation.fields.get("routine").and_then(serde_json::Value::as_str)
+                        == Some("CloseWindow"),
+                    "MainMenu closes through an unexpected routine"
+                );
+            }
+            "branch_result" => {
+                anyhow::ensure!(
+                    operation.fields.get("result").and_then(serde_json::Value::as_str)
+                        == Some("main_menu_input")
+                        && operation.fields.get("equals").and_then(serde_json::Value::as_str)
+                            == Some("cancelled")
+                        && operation.fields.get("target").and_then(serde_json::Value::as_str)
+                            == Some(".quit@MainMenu"),
+                    "MainMenu input-result branch disagrees with the source"
+                );
+                if cancelled {
+                    let target = operation
+                        .fields
+                        .get("target")
+                        .and_then(serde_json::Value::as_str)
+                        .context("MainMenu cancel branch has no target")?;
+                    let BevyRuntimeShell {
+                        runtime,
+                        title_menu,
+                        ..
+                    } = runtime_shell;
+                    title_menu
+                        .as_mut()
+                        .context("MainMenu cancel branch lost title state")?
+                        .main_menu_phase_interpreter
+                        .as_mut()
+                        .context("MainMenu cancel branch lost its interpreter")?
+                        .jump_to_label(runtime.title_presentation_program(), target)?;
+                }
+            }
+            "clear_tilemap" => {
+                anyhow::ensure!(!cancelled, "MainMenu cancel path cleared the tilemap");
+            }
+            "dispatch_table" => {
+                anyhow::ensure!(!cancelled, "MainMenu cancel path reached selection dispatch");
+                anyhow::ensure!(
+                    operation.fields.get("dispatcher").and_then(serde_json::Value::as_str)
+                        == Some("MainMenu selection")
+                        && operation.fields.get("index").and_then(serde_json::Value::as_str)
+                            == Some("wMenuSelection"),
+                    "MainMenu dispatch disagrees with the source"
+                );
+                let selected = selected
+                    .clone()
+                    .context("MainMenu dispatch has no accepted selection")?;
+                let dispatched = operation
+                    .fields
+                    .get("entries")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|entries| entries.get(selected.selection_index))
+                    .and_then(serde_json::Value::as_str)
+                    .context("MainMenu dispatch selection is outside its source table")?;
+                anyhow::ensure!(
+                    dispatched == selected.dispatch_target,
+                    "MainMenu selected {} but source dispatch resolved {dispatched}",
+                    selected.dispatch_target
+                );
+                return Ok(Some(selected));
+            }
+            "return" => {
+                anyhow::ensure!(cancelled, "MainMenu accepted path returned before dispatch");
+                return Ok(None);
+            }
+            op => anyhow::bail!("unsupported post-input MainMenu operation {op}"),
+        }
+    }
+    anyhow::bail!("MainMenu exceeded its post-input operation limit")
+}
+
+fn resume_visible_main_menu_after_subprogram(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let operation = {
+        let BevyRuntimeShell {
+            runtime,
+            title_menu,
+            ..
+        } = runtime_shell;
+        title_menu
+            .as_mut()
+            .context("MainMenu return has no title state")?
+            .main_menu_phase_interpreter
+            .as_mut()
+            .context("MainMenu return has no interpreter")?
+            .step(runtime.title_presentation_program())?
+            .context("exported MainMenu ended before its loop jump")?
+    };
+    anyhow::ensure!(operation.op == "jump", "MainMenu return did not reach its source loop jump");
+    let target = operation
+        .fields
+        .get("target")
+        .and_then(serde_json::Value::as_str)
+        .context("MainMenu loop jump has no target")?;
+    anyhow::ensure!(target == ".loop@MainMenu", "MainMenu returns through {target}");
+    {
+        let BevyRuntimeShell {
+            runtime,
+            title_menu,
+            ..
+        } = runtime_shell;
+        title_menu
+            .as_mut()
+            .context("MainMenu loop jump lost title state")?
+            .main_menu_phase_interpreter
+            .as_mut()
+            .context("MainMenu loop jump lost its interpreter")?
+            .jump_to_label(runtime.title_presentation_program(), target)?;
+    }
+    advance_visible_main_menu_phase_to_input(runtime_shell)
 }
 
 fn visible_title_menu_selection_id(option: &RuntimeTitleMainMenuItem) -> Result<&'static str> {
@@ -4810,6 +7331,7 @@ fn press_visible_title_confirm_button(
 fn press_visible_title_cancel_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.visible_continue_screen.take().is_some() {
         record_visible_runtime_action(runtime_shell, "input:title:B:continue_back")?;
+        resume_visible_main_menu_after_subprogram(runtime_shell)?;
         set_shell_action_status(runtime_shell, "TITLE");
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
@@ -4819,6 +7341,10 @@ fn press_visible_title_cancel_button(runtime_shell: &mut BevyRuntimeShell) -> Re
         .as_ref()
         .is_some_and(visible_title_main_menu_ready)
     {
+        anyhow::ensure!(
+            resume_visible_main_menu_input(runtime_shell, true)?.is_none(),
+            "exported MainMenu B input did not return with cancel"
+        );
         stop_visible_silent_music(
             runtime_shell,
             "MUSIC_NONE",
@@ -4846,10 +7372,10 @@ fn open_visible_delete_save_screen(runtime_shell: &mut BevyRuntimeShell) -> Resu
     let Some(title) = runtime_shell.title_menu.as_ref() else {
         return handle_visible_no_active_title_menu(runtime_shell, "delete_save");
     };
-    if !matches!(title.phase, VisibleTitlePhase::PressStart) {
+    if !matches!(title.source_phase(), VisibleTitlePhase::PressStart) {
         record_visible_runtime_action(
             runtime_shell,
-            format!("title:delete_save:ignored:{:?}", title.phase),
+            format!("title:delete_save:ignored:{:?}", title.source_phase()),
         )?;
         return Ok(());
     }
@@ -4923,10 +7449,10 @@ fn open_visible_clock_reset_screen(runtime_shell: &mut BevyRuntimeShell) -> Resu
     let Some(title) = runtime_shell.title_menu.as_ref() else {
         return handle_visible_no_active_title_menu(runtime_shell, "clock_reset");
     };
-    if !matches!(title.phase, VisibleTitlePhase::PressStart) {
+    if !matches!(title.source_phase(), VisibleTitlePhase::PressStart) {
         record_visible_runtime_action(
             runtime_shell,
-            format!("title:clock_reset:ignored:{:?}", title.phase),
+            format!("title:clock_reset:ignored:{:?}", title.source_phase()),
         )?;
         return Ok(());
     }
@@ -4939,7 +7465,10 @@ fn open_visible_clock_reset_screen(runtime_shell: &mut BevyRuntimeShell) -> Resu
         minute: time.registers.minutes,
     });
     if let Some(title) = runtime_shell.title_menu.as_mut() {
-        title.clock_reset_trigger = false;
+        title
+            .presentation_machine
+            .memory
+            .insert("hClockResetTrigger".to_string(), 0);
     }
     record_visible_runtime_action(runtime_shell, "title:clock_reset:open")?;
     set_shell_action_status(runtime_shell, "RESET CLOCK");
@@ -5054,7 +7583,6 @@ fn confirm_visible_clock_reset_screen(runtime_shell: &mut BevyRuntimeShell) -> R
     }
 }
 
-const VISIBLE_CREDITS_SKIP_THRESHOLD: u16 = 0x0d;
 const VISIBLE_CREDITS_ALLOW_SKIP_BIT: u8 = 6;
 const VISIBLE_CREDITS_EXIT_BIT: u8 = 7;
 const VISIBLE_GENDER_FADE_IN_FRAMES: u8 = 8;
@@ -5075,6 +7603,8 @@ fn open_visible_credits_screen(
     runtime_shell: &mut BevyRuntimeShell,
     allow_skip: bool,
 ) -> Result<()> {
+    let program = load_visible_credits_program(runtime_shell)?;
+    runtime_shell.h_in_menu = program.menu_state_value;
     reset_visible_navigation_state(runtime_shell);
     runtime_shell.title_menu = None;
     runtime_shell.special_boundary = None;
@@ -5085,6 +7615,7 @@ fn open_visible_credits_screen(
     runtime_shell.pending_special_cry = None;
     runtime_shell.pending_special_sound = None;
     runtime_shell.credits_screen = Some(VisibleCreditsScreen {
+        program,
         allow_skip,
         resume_game_timer_on_exit: false,
         frame: 0,
@@ -5092,9 +7623,13 @@ fn open_visible_credits_screen(
         awaiting_exit: false,
         scene_index: 0,
         timer: 0,
+        bg_map_mode: 0,
+        bg_map_third: 0,
+        music_start_delay_frames: 0,
         script_index: 0,
         jumptable_index: visible_credits_initial_jumptable_index(allow_skip),
         lines: Vec::new(),
+        displayed_text_rows: BTreeMap::new(),
         border_frame_counter: None,
         border_frame_top: None,
         border_frame_bottom: None,
@@ -5103,7 +7638,9 @@ fn open_visible_credits_screen(
         border_mon_index: 0,
         ly_override: 0,
         show_the_end: false,
+        displayed_show_the_end: false,
         script_complete: false,
+        exit_clear_frames_remaining: None,
     });
     record_visible_runtime_action(runtime_shell, "credits:open")?;
     set_shell_action_status(runtime_shell, "CREDITS");
@@ -5114,10 +7651,14 @@ fn open_visible_credits_screen(
     Ok(())
 }
 
-fn queue_visible_credits_music(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+fn queue_visible_credits_music_stop(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let silent = "MUSIC_NONE";
-    let credits = "MUSIC_CREDITS";
     stop_visible_silent_music(runtime_shell, silent, "audio:music:credits:none")?;
+    Ok(())
+}
+
+fn queue_visible_credits_music_start(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let credits = "MUSIC_CREDITS";
     let playback = runtime_shell
         .shell
         .runtime()
@@ -5158,6 +7699,9 @@ fn run_visible_credits_jumptable_step(runtime_shell: &mut BevyRuntimeShell) -> R
             Ok(())
         }
         3 => {
+            if let Some(credits) = runtime_shell.credits_screen.as_mut() {
+                credits.bg_map_mode = 0;
+            }
             visible_credits_next(runtime_shell);
             Ok(())
         }
@@ -5167,6 +7711,9 @@ fn run_visible_credits_jumptable_step(runtime_shell: &mut BevyRuntimeShell) -> R
             Ok(())
         }
         5 | 11 => {
+            if let Some(credits) = runtime_shell.credits_screen.as_mut() {
+                credits.bg_map_mode = 0;
+            }
             request_visible_credits_gfx(runtime_shell);
             visible_credits_next(runtime_shell);
             Ok(())
@@ -5189,10 +7736,6 @@ fn run_visible_credits_jumptable_step(runtime_shell: &mut BevyRuntimeShell) -> R
 }
 
 fn step_parse_visible_credits(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let ops = load_visible_credits_script(&runtime_shell.asset_root)?;
-    let constants = load_visible_credit_constant_indices(&runtime_shell.asset_root)?;
-    let strings = load_visible_credits_strings(&runtime_shell.asset_root)?;
-    let string_tiles = load_visible_credits_string_tiles(&runtime_shell.asset_root)?;
     loop {
         let Some(credits) = runtime_shell.credits_screen.as_mut() else {
             return Ok(());
@@ -5208,7 +7751,8 @@ fn step_parse_visible_credits(runtime_shell: &mut BevyRuntimeShell) -> Result<()
         }
         credits.lines.clear();
         credits.show_the_end = false;
-        if credits.script_index >= ops.len() {
+        credits.bg_map_mode = 0;
+        if credits.script_index >= credits.program.ops.len() {
             credits.awaiting_exit = true;
             credits.script_complete = true;
             credits.jumptable_index |= 1 << VISIBLE_CREDITS_EXIT_BIT;
@@ -5218,14 +7762,16 @@ fn step_parse_visible_credits(runtime_shell: &mut BevyRuntimeShell) -> Result<()
         while runtime_shell
             .credits_screen
             .as_ref()
-            .is_some_and(|credits| credits.script_index < ops.len())
+            .is_some_and(|credits| credits.script_index < credits.program.ops.len())
         {
             let op = {
                 let credits = runtime_shell
                     .credits_screen
                     .as_mut()
                     .context("credits screen closed while parsing")?;
-                let op = ops
+                let op = credits
+                    .program
+                    .ops
                     .get(credits.script_index)
                     .cloned()
                     .context("credits script index moved outside loaded script")?;
@@ -5237,10 +7783,17 @@ fn step_parse_visible_credits(runtime_shell: &mut BevyRuntimeShell) -> Result<()
             };
             match op {
                 VisibleCreditsOp::String { token, line_index } => {
-                    let Some(string_index) = constants.get(&token).copied() else {
-                        anyhow::bail!("credits script token {token} has no parsed constant index");
+                    let credits = runtime_shell
+                        .credits_screen
+                        .as_mut()
+                        .context("credits screen closed while adding line")?;
+                    let Some(string_index) = credits.program.constant_indices.get(&token).copied()
+                    else {
+                        anyhow::bail!("credits script token {token} has no exported constant index");
                     };
-                    let text = strings
+                    let text = credits
+                        .program
+                        .strings
                         .get(string_index)
                         .with_context(|| {
                             format!(
@@ -5248,7 +7801,9 @@ fn step_parse_visible_credits(runtime_shell: &mut BevyRuntimeShell) -> Result<()
                             )
                         })?
                         .clone();
-                    let tiles = string_tiles
+                    let tiles = credits
+                        .program
+                        .string_tiles
                         .get(string_index)
                         .with_context(|| {
                             format!(
@@ -5256,10 +7811,6 @@ fn step_parse_visible_credits(runtime_shell: &mut BevyRuntimeShell) -> Result<()
                             )
                         })?
                         .clone();
-                    let credits = runtime_shell
-                        .credits_screen
-                        .as_mut()
-                        .context("credits screen closed while adding line")?;
                     credits.lines.push(VisibleCreditsLine {
                         token,
                         text,
@@ -5267,7 +7818,18 @@ fn step_parse_visible_credits(runtime_shell: &mut BevyRuntimeShell) -> Result<()
                         line_index,
                     });
                 }
-                VisibleCreditsOp::Wait(duration) | VisibleCreditsOp::Wait2(duration) => {
+                VisibleCreditsOp::Wait(duration) => {
+                    let credits = runtime_shell
+                        .credits_screen
+                        .as_mut()
+                        .context("credits screen closed while setting wait")?;
+                    credits.timer = duration;
+                    credits.bg_map_third = 0;
+                    credits.bg_map_mode = 1;
+                    visible_credits_next(runtime_shell);
+                    return Ok(());
+                }
+                VisibleCreditsOp::Wait2(duration) => {
                     let credits = runtime_shell
                         .credits_screen
                         .as_mut()
@@ -5292,7 +7854,13 @@ fn step_parse_visible_credits(runtime_shell: &mut BevyRuntimeShell) -> Result<()
                     credits.border_frame_counter = None;
                 }
                 VisibleCreditsOp::Music => {
-                    queue_visible_credits_music(runtime_shell)?;
+                    queue_visible_credits_music_stop(runtime_shell)?;
+                    let credits = runtime_shell
+                        .credits_screen
+                        .as_mut()
+                        .context("credits screen closed while delaying music")?;
+                    credits.music_start_delay_frames = 1;
+                    return Ok(());
                 }
                 VisibleCreditsOp::TheEnd => {
                     let credits = runtime_shell
@@ -5302,6 +7870,21 @@ fn step_parse_visible_credits(runtime_shell: &mut BevyRuntimeShell) -> Result<()
                     credits.show_the_end = true;
                 }
                 VisibleCreditsOp::End => {
+                    let (target_music, fade_rate) = {
+                        let credits = runtime_shell
+                            .credits_screen
+                            .as_ref()
+                            .context("credits screen closed while ending")?;
+                        (
+                            credits.program.end_music_target.clone(),
+                            credits.program.end_music_fade_rate,
+                        )
+                    };
+                    begin_visible_music_fade(
+                        runtime_shell,
+                        &target_music,
+                        u16::from(fade_rate),
+                    )?;
                     let credits = runtime_shell
                         .credits_screen
                         .as_mut()
@@ -5309,7 +7892,6 @@ fn step_parse_visible_credits(runtime_shell: &mut BevyRuntimeShell) -> Result<()
                     credits.awaiting_exit = true;
                     credits.script_complete = true;
                     credits.jumptable_index |= 1 << VISIBLE_CREDITS_EXIT_BIT;
-                    stop_visible_music(runtime_shell, "credits:postcredits:fade")?;
                     set_shell_action_status(runtime_shell, "THE END");
                     return Ok(());
                 }
@@ -5376,10 +7958,7 @@ fn visible_credits_op_byte_len(op: &VisibleCreditsOp) -> u16 {
     }
 }
 
-fn load_visible_credit_constant_indices(asset_root: &AssetRoot) -> Result<BTreeMap<String, usize>> {
-    let path = asset_root.resolve_vendor("constants/credits_constants.asm");
-    let content = crate::read_runtime_asset_to_string(&path)
-        .with_context(|| format!("read credits constants {}", path.display()))?;
+fn parse_visible_credit_constant_indices(content: &str) -> Result<BTreeMap<String, usize>> {
     let mut constants = BTreeMap::new();
     let mut current_value = 0_usize;
     for raw_line in content.lines() {
@@ -5403,20 +7982,17 @@ fn load_visible_credit_constant_indices(asset_root: &AssetRoot) -> Result<BTreeM
         current_value += 1;
     }
     if constants.is_empty() {
-        anyhow::bail!("credits constants {} produced no entries", path.display());
+        anyhow::bail!("exported credits constants produced no entries");
     }
     Ok(constants)
 }
 
-fn load_visible_credits_strings(asset_root: &AssetRoot) -> Result<Vec<String>> {
-    let path = asset_root.resolve_vendor("data/credits_strings.asm");
-    let content = crate::read_runtime_asset_to_string(&path)
-        .with_context(|| format!("read credits strings {}", path.display()))?;
+fn parse_visible_credits_strings(content: &str) -> Result<Vec<String>> {
     let lines: Vec<&str> = content.lines().collect();
     let pointer_labels = parse_visible_credits_pointer_table(&lines);
     let string_blocks = parse_visible_credits_string_blocks(&lines);
     if pointer_labels.is_empty() {
-        anyhow::bail!("credits string pointer table {} is empty", path.display());
+        anyhow::bail!("exported credits string pointer table is empty");
     }
     let mut resolved = Vec::with_capacity(pointer_labels.len());
     for label in pointer_labels {
@@ -5428,18 +8004,12 @@ fn load_visible_credits_strings(asset_root: &AssetRoot) -> Result<Vec<String>> {
     Ok(resolved)
 }
 
-fn load_visible_credits_string_tiles(asset_root: &AssetRoot) -> Result<Vec<Vec<Vec<u16>>>> {
-    let path = asset_root.resolve_vendor("data/credits_strings.asm");
-    let content = crate::read_runtime_asset_to_string(&path)
-        .with_context(|| format!("read credits string tiles {}", path.display()))?;
+fn parse_visible_credits_string_tiles(content: &str) -> Result<Vec<Vec<Vec<u16>>>> {
     let lines: Vec<&str> = content.lines().collect();
     let pointer_labels = parse_visible_credits_pointer_table(&lines);
     let string_blocks = parse_visible_credits_string_tile_blocks(&lines)?;
     if pointer_labels.is_empty() {
-        anyhow::bail!(
-            "credits string tile pointer table {} is empty",
-            path.display()
-        );
+        anyhow::bail!("exported credits string tile pointer table is empty");
     }
     let mut resolved = Vec::with_capacity(pointer_labels.len());
     for label in pointer_labels {

@@ -1211,19 +1211,11 @@ fn title_frame_for_art(
 }
 
 fn title_screen_art_key(title: &TitleMenu) -> TitleScreenArtKey {
-    let animation_frame = match title.phase {
-        // Entrance crystal placement changes continuously and SCX identifies
-        // each finite scroll step, so preserve its native frame counter.
-        VisibleTitlePhase::Entrance => title.frame,
-        // Once settled, the only moving title art is Suicune's four-frame
-        // loop. Bound the source cache to those four images instead of
-        // retaining a new 160x144 asset every eight ticks until timeout.
-        _ => ((title.frame / 8) % 4) * 8,
-    };
     TitleScreenArtKey {
-        scx: title.scx,
-        frame: animation_frame,
-        show_version_window: !matches!(title.phase, VisibleTitlePhase::Entrance),
+        scx: title.source_scx(),
+        frame: u32::from(title.source_suicune_frame() & title.suicune_selector_mask),
+        show_version_window: !matches!(title.source_phase(), VisibleTitlePhase::Entrance),
+        teardown: matches!(title.source_phase(), VisibleTitlePhase::Teardown),
     }
 }
 
@@ -1263,6 +1255,7 @@ fn intro_scene_art_key(intro: &VisibleIntroScreen) -> IntroSceneArtKey {
         .attrmap_palette_overrides
         .hash(&mut background_effect_hasher);
     intro.tile_override.hash(&mut background_effect_hasher);
+    intro.tilemap_xor_mask.hash(&mut background_effect_hasher);
     IntroSceneArtKey {
         scene_index: intro.jumptable_index,
         scene_frame_counter: intro.scene_frame_counter,
@@ -1272,6 +1265,7 @@ fn intro_scene_art_key(intro: &VisibleIntroScreen) -> IntroSceneArtKey {
         ly_overrides_hash: ly_overrides_hasher.finish(),
         lcdc_pointer: intro.lcdc_pointer,
         background_effect_hash: background_effect_hasher.finish(),
+        tilemap_cleared: intro.tilemap_cleared,
         global_anim_x_offset: intro.global_anim_x_offset,
         sprite_hash: sprite_hasher.finish(),
         palette_effect: intro.palette_effect.clone(),
@@ -1327,26 +1321,36 @@ fn load_intro_scene_frame(
     const INTRO_SURFACE_TILES: usize = 32;
     const INTRO_SURFACE_SIZE: usize = INTRO_SURFACE_TILES * SOURCE_TILE_SIZE;
     let mut data = vec![0_u8; INTRO_SURFACE_SIZE * INTRO_SURFACE_SIZE * 4];
+    let mut background_priority = vec![0_u8; INTRO_SURFACE_SIZE * INTRO_SURFACE_SIZE];
     ensure_intro_effect_palette_banks(asset_root, rendered_art)?;
-    let background = intro
-        .background_binding
-        .as_ref()
-        .context("visible intro has no source-derived background binding")?;
-    draw_intro_tilemap(
-        asset_root,
-        intro,
-        background,
-        intro.scroll_x,
-        intro.scroll_y,
-        rendered_art,
-        &mut data,
-    )?;
+    if intro.tilemap_cleared {
+        for pixel in data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[u8::MAX, u8::MAX, u8::MAX, u8::MAX]);
+        }
+    } else {
+        let background = intro
+            .background_binding
+            .as_ref()
+            .context("visible intro has no source-derived background binding")?;
+        draw_intro_tilemap(
+            asset_root,
+            intro,
+            background,
+            intro.scroll_x,
+            intro.scroll_y,
+            rendered_art,
+            &mut data,
+            &mut background_priority,
+        )?;
+    }
     apply_visible_intro_scanline_scroll(intro, &mut data)?;
+    apply_visible_intro_scanline_scroll_indices(intro, &mut background_priority)?;
     draw_visible_intro_sprites(
         sprite_anim_bundle,
         asset_root,
         intro,
         rendered_art,
+        &background_priority,
         &mut data,
     )?;
     // The intro uses a 32x32 BG map as its backing store, but the LCD exposes
@@ -1399,6 +1403,29 @@ fn apply_visible_intro_scanline_scroll(intro: &VisibleIntroScreen, target: &mut 
     Ok(())
 }
 
+fn apply_visible_intro_scanline_scroll_indices(
+    intro: &VisibleIntroScreen,
+    target: &mut [u8],
+) -> Result<()> {
+    const INTRO_BACKING_WIDTH: usize = 32 * SOURCE_TILE_SIZE;
+    if intro.lcdc_pointer == 0 {
+        return Ok(());
+    }
+    let mut row = vec![0_u8; INTRO_BACKING_WIDTH];
+    for (y, override_x) in intro.ly_overrides.iter().copied().enumerate() {
+        let delta = override_x.wrapping_sub(intro.scroll_x) as usize;
+        if delta == 0 {
+            continue;
+        }
+        let start = y * INTRO_BACKING_WIDTH;
+        row.copy_from_slice(&target[start..start + INTRO_BACKING_WIDTH]);
+        for x in 0..INTRO_BACKING_WIDTH {
+            target[start + x] = row[(x + delta) % INTRO_BACKING_WIDTH];
+        }
+    }
+    Ok(())
+}
+
 fn ensure_intro_effect_palette_banks(
     asset_root: &AssetRoot,
     rendered_art: &mut RenderedTilesetArt,
@@ -1441,6 +1468,7 @@ fn draw_intro_tilemap(
     scroll_y: u8,
     rendered_art: &mut RenderedTilesetArt,
     target: &mut [u8],
+    background_priority: &mut [u8],
 ) -> Result<()> {
     const INTRO_SURFACE_TILES: usize = 32;
     let intro_root = asset_root.runtime_assets().join("gfx/intro");
@@ -1472,7 +1500,10 @@ fn draw_intro_tilemap(
     for tile_offset in 0..tile_count {
         let tile_x = tile_offset % INTRO_SURFACE_TILES;
         let tile_y = tile_offset / INTRO_SURFACE_TILES;
-        let tile_id = tilemap[tile_offset];
+        let mut tile_id = tilemap[tile_offset];
+        if tile_id != 0 && tile_id < 0x80 {
+            tile_id ^= intro.tilemap_xor_mask;
+        }
         let attr = if tile_x < TITLE_SCREEN_WIDTH / SOURCE_TILE_SIZE
             && tile_y < TITLE_SCREEN_HEIGHT / SOURCE_TILE_SIZE
         {
@@ -1535,6 +1566,7 @@ fn draw_intro_tilemap(
             ((tile_x * SOURCE_TILE_SIZE) as i16 - i16::from(scroll_x)).rem_euclid(256) as usize,
             ((tile_y * SOURCE_TILE_SIZE) as i16 - i16::from(scroll_y)).rem_euclid(256) as usize,
             target,
+            Some(background_priority),
         )?;
     }
     Ok(())
@@ -1573,6 +1605,7 @@ fn draw_visible_intro_sprites(
     asset_root: &AssetRoot,
     intro: &VisibleIntroScreen,
     rendered_art: &mut RenderedTilesetArt,
+    background_priority: &[u8],
     target: &mut [u8],
 ) -> Result<()> {
     if rendered_art.intro_sprite_bundle_cache.is_none() {
@@ -1585,6 +1618,14 @@ fn draw_visible_intro_sprites(
         .expect("intro sprite bundle cache initialized")
         .clone();
     let intro_root = asset_root.runtime_assets().join("gfx/intro");
+    let palette_name = visible_intro_resource_stem(
+        &intro
+            .background_binding
+            .as_ref()
+            .context("visible intro sprite has no scene palette binding")?
+            .palette_resource,
+        ".pal",
+    )?;
     for sprite in &intro.sprites {
         if sprite.start_delay > 0 {
             continue;
@@ -1607,9 +1648,13 @@ fn draw_visible_intro_sprites(
             let attr = (base_attr & !0xe0) | flipped_attr;
             let offset_x = apply_visible_intro_frame_flip(piece_x, (frame_flags & 0x20) != 0);
             let offset_y = apply_visible_intro_frame_flip(piece_y, (frame_flags & 0x40) != 0);
-            let global_x = i16::from(intro.global_anim_x_offset as i8);
-            let draw_x = sprite.x + sprite.x_offset + global_x + offset_x - 8;
-            let draw_y = sprite.y + sprite.y_offset + offset_y - 16;
+            let draw_x = (sprite.x
+                + sprite.x_offset
+                + i16::from(intro.global_anim_x_offset)
+                + offset_x)
+                .rem_euclid(256)
+                - 8;
+            let draw_y = (sprite.y + sprite.y_offset + offset_y).rem_euclid(256) - 16;
             let tile_id = sprite
                 .tile_id
                 .wrapping_add((piece_tile + tile_offset).rem_euclid(256) as u8);
@@ -1617,7 +1662,7 @@ fn draw_visible_intro_sprites(
                 &intro_root,
                 intro,
                 &sprite.gfx_name,
-                visible_intro_palette_name(&sprite.gfx_name),
+                &palette_name,
                 tile_id,
                 attr,
                 sprite.gfx_tile_base,
@@ -1626,6 +1671,7 @@ fn draw_visible_intro_sprites(
                 rendered_art,
                 draw_x,
                 draw_y,
+                background_priority,
                 target,
             )?;
         }
@@ -1649,6 +1695,7 @@ fn draw_intro_sprite_tile(
     rendered_art: &mut RenderedTilesetArt,
     dest_x: i16,
     dest_y: i16,
+    background_priority: &[u8],
     target: &mut [u8],
 ) -> Result<()> {
     let image_path = intro_root.join(format!("{graphic_name}.png"));
@@ -1711,6 +1758,8 @@ fn draw_intro_sprite_tile(
         (attr & 0x40) != 0,
         dest_x,
         dest_y,
+        attr,
+        background_priority,
         target,
     );
     Ok(())
@@ -1824,28 +1873,6 @@ enum IntroTileIndexMode {
     Signed,
 }
 
-fn visible_intro_palette_name(graphic_name: &str) -> &str {
-    if graphic_name == "suicune_close" {
-        // IntroScene17 loads IntroSuicuneClosePalette, whose banks 2-4
-        // provide the light-blue and purple shading for the close-up.  The
-        // generic Suicune palette intentionally leaves those banks orange.
-        "suicune_close"
-    } else if graphic_name.starts_with("unown") || graphic_name == "pulse" {
-        "unowns"
-    } else if graphic_name.starts_with("suicune") {
-        "suicune"
-    } else if graphic_name.starts_with("grass")
-        || graphic_name == "background"
-        || graphic_name == "pichu_wooper"
-    {
-        "background"
-    } else if graphic_name == "crystal_unowns" {
-        "crystal_unowns"
-    } else {
-        graphic_name
-    }
-}
-
 fn draw_intro_tile(
     intro_root: &Path,
     intro: &VisibleIntroScreen,
@@ -1860,6 +1887,7 @@ fn draw_intro_tile(
     dest_x: usize,
     dest_y: usize,
     target: &mut [u8],
+    mut background_priority: Option<&mut [u8]>,
 ) -> Result<()> {
     let image_path = intro_root.join(format!("{graphic_name}.png"));
     let source_key = graphic_name.to_string();
@@ -1930,6 +1958,18 @@ fn draw_intro_tile(
         dest_y,
         target,
     );
+    if let Some(priority) = background_priority.as_deref_mut() {
+        blit_intro_background_priority(
+            source,
+            width as usize,
+            source_tile_index,
+            xflip,
+            yflip,
+            dest_x,
+            dest_y,
+            priority,
+        );
+    }
     Ok(())
 }
 
@@ -1992,9 +2032,11 @@ fn visible_intro_effective_palette_cached(
         VisibleIntroPaletteEffect::AppearUnown { .. } => *base_palette,
         VisibleIntroPaletteEffect::Scene24Fade { colors } if !is_obj_palette => *colors,
         VisibleIntroPaletteEffect::Scene24Fade { .. } => *base_palette,
-        VisibleIntroPaletteEffect::CrystalWordFade { fade_level, colors }
-            if palette_name == "crystal_unowns" && usize::from(*fade_level) == palette_index =>
-        {
+        VisibleIntroPaletteEffect::CrystalWordFade { palette_colors }
+            if palette_name == "crystal_unowns"
+                && palette_colors.get(palette_index).is_some_and(Option::is_some) => {
+            let colors = palette_colors[palette_index]
+                .context("intro Crystal-word palette disappeared after validation")?;
             let mut palette = *base_palette;
             palette[2] = colors[0];
             palette[3] = colors[1];
@@ -2157,6 +2199,48 @@ fn blit_intro_source_tile(
     }
 }
 
+fn blit_intro_background_priority(
+    source: &image::RgbaImage,
+    source_width: usize,
+    tile_index: usize,
+    xflip: bool,
+    yflip: bool,
+    dest_x: usize,
+    dest_y: usize,
+    target: &mut [u8],
+) {
+    const INTRO_SURFACE_SIZE: usize = 32 * SOURCE_TILE_SIZE;
+    let tiles_per_row = (source_width / SOURCE_TILE_SIZE).max(1);
+    let source_x = (tile_index % tiles_per_row) * SOURCE_TILE_SIZE;
+    let source_y = (tile_index / tiles_per_row) * SOURCE_TILE_SIZE;
+    for row in 0..SOURCE_TILE_SIZE {
+        for col in 0..SOURCE_TILE_SIZE {
+            let source_col = if xflip {
+                SOURCE_TILE_SIZE - 1 - col
+            } else {
+                col
+            };
+            let source_row = if yflip {
+                SOURCE_TILE_SIZE - 1 - row
+            } else {
+                row
+            };
+            let source_pixel = source.get_pixel(
+                (source_x + source_col) as u32,
+                (source_y + source_row) as u32,
+            );
+            let palette_index = if source_pixel[3] == 0 {
+                0
+            } else {
+                palette_index_from_gray(source_pixel[0]) as u8
+            };
+            let target_x = (dest_x + col) % INTRO_SURFACE_SIZE;
+            let target_y = (dest_y + row) % INTRO_SURFACE_SIZE;
+            target[target_y * INTRO_SURFACE_SIZE + target_x] = palette_index;
+        }
+    }
+}
+
 fn blit_intro_sprite_source_tile(
     source: &image::RgbaImage,
     source_width: usize,
@@ -2167,6 +2251,8 @@ fn blit_intro_sprite_source_tile(
     yflip: bool,
     dest_x: i16,
     dest_y: i16,
+    attr: u8,
+    background_priority: &[u8],
     target: &mut [u8],
 ) {
     const INTRO_SURFACE_SIZE: usize = 32 * SOURCE_TILE_SIZE;
@@ -2204,6 +2290,11 @@ fn blit_intro_sprite_source_tile(
             }
             let palette_index = palette_index_from_gray(source_pixel[0]);
             if transparent_zero && palette_index == 0 {
+                continue;
+            }
+            let priority = background_priority
+                [target_y as usize * INTRO_SURFACE_SIZE + target_x as usize];
+            if priority != 0 && attr & 0x80 != 0 {
                 continue;
             }
             let [red, green, blue] = palette[palette_index];
@@ -2306,6 +2397,24 @@ fn load_title_screen_frame(
     title: &TitleMenu,
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
+    if matches!(title.source_phase(), VisibleTitlePhase::Teardown) {
+        let mut image = Image::new(
+            Extent3d {
+                width: TITLE_SCREEN_WIDTH as u32,
+                height: TITLE_SCREEN_HEIGHT as u32,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            vec![255; TITLE_SCREEN_WIDTH * TITLE_SCREEN_HEIGHT * 4],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        image.sampler = ImageSampler::nearest();
+        return Ok(SpriteFrame {
+            handle: images.add(image),
+            size: Vec2::new(TITLE_SCREEN_WIDTH as f32, TITLE_SCREEN_HEIGHT as f32),
+        });
+    }
     let title_root = asset_root.runtime_assets().join("gfx/title");
     let logo = crate::open_runtime_image(title_root.join("logo.png"))
         .context("decode native title logo PNG")?
@@ -2331,7 +2440,7 @@ fn load_title_screen_frame(
         &mut data,
         &mut priority_map,
     )?;
-    if !matches!(title.phase, VisibleTitlePhase::Entrance) {
+    if !matches!(title.source_phase(), VisibleTitlePhase::Entrance) {
         draw_native_title_version_window(&logo, &palette_bank, &mut data, &mut priority_map)?;
     }
     draw_native_title_crystal_sprites(&crystal, &palette_bank, title, &priority_map, &mut data)?;
@@ -2361,17 +2470,15 @@ fn draw_native_title_background(
     target: &mut [u8],
     priority_map: &mut [u8],
 ) -> Result<()> {
-    let background_scroll = if matches!(title.phase, VisibleTitlePhase::Entrance) {
-        NativeTitleScroll::EntranceInterlaced(title.scx)
+    let background_scroll = if matches!(title.source_phase(), VisibleTitlePhase::Entrance) {
+        NativeTitleScroll::EntranceInterlaced(title.source_scx())
     } else {
         NativeTitleScroll::None
     };
-    // AnimateTitleSuicune selects from the pre-increment value in
-    // wSuicuneFrame. `title.frame` counts completed host ticks, so frame 8
-    // still displays the source frame selected by counter 0; counter 8 is
-    // observed on the ninth tick.
+    // SuicuneFrameIterator stores the exact pre-increment wSuicuneFrame value
+    // in the presentation machine before selecting its source frame.
     let suicune_frame_index = native_title_suicune_frame_index(
-        title.frame,
+        title.source_suicune_frame(),
         title.suicune_selector_mask,
         title.suicune_selector_shift_left,
         title.suicune_selector_swap_nibbles,
@@ -2433,12 +2540,11 @@ fn draw_native_title_background(
 }
 
 fn native_title_suicune_frame_index(
-    completed_ticks: u32,
+    source_counter: u8,
     mask: u8,
     shift_left: u8,
     swap_nibbles: bool,
 ) -> usize {
-    let source_counter = completed_ticks.saturating_sub(1) as u8;
     let mut selector = (source_counter & mask).wrapping_shl(u32::from(shift_left));
     if swap_nibbles {
         selector = selector.rotate_left(4);

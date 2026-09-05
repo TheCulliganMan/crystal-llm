@@ -21,6 +21,11 @@ fn skip_intro_for_test(app: &mut App) {
         skip_visible_intro_screen(&mut runtime_shell, GameButton::Start)
             .expect("skip intro for title test setup");
     }
+    for _ in 0..8 {
+        let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        tick_visible_intro_screen(&mut runtime_shell)
+            .expect("advance source intro cleanup for title test setup");
+    }
     assert!(
         app.world()
             .resource::<BevyRuntimeShell>()
@@ -28,6 +33,14 @@ fn skip_intro_for_test(app: &mut App) {
             .is_none(),
         "intro should be skipped before title-only test setup"
     );
+}
+
+fn finish_intro_for_test(runtime_shell: &mut BevyRuntimeShell, reason: &'static str) {
+    finish_visible_intro_screen(runtime_shell, reason).expect("begin intro cleanup for test");
+    for _ in 0..8 {
+        tick_visible_intro_screen(runtime_shell).expect("advance intro cleanup for test");
+    }
+    assert!(runtime_shell.intro_screen.is_none());
 }
 
 fn advance_title_to_press_start_for_test(app: &mut App) {
@@ -39,7 +52,7 @@ fn advance_title_to_press_start_for_test(app: &mut App) {
             .resource::<BevyRuntimeShell>()
             .title_menu
             .as_ref()
-            .is_some_and(|title| matches!(title.phase, VisibleTitlePhase::PressStart));
+            .is_some_and(|title| matches!(title.source_phase(), VisibleTitlePhase::PressStart));
         if ready {
             return;
         }
@@ -50,6 +63,8 @@ fn advance_title_to_press_start_for_test(app: &mut App) {
 fn open_title_main_menu_for_test(app: &mut App) {
     advance_title_to_press_start_for_test(app);
     press_key_for_runtime_hotkey_app(app, KeyCode::Enter);
+    finish_title_teardown_for_test(app);
+    app.update();
     let runtime_shell = app.world().resource::<BevyRuntimeShell>();
     assert!(
         runtime_shell
@@ -58,6 +73,12 @@ fn open_title_main_menu_for_test(app: &mut App) {
             .is_some_and(visible_title_main_menu_ready),
         "title Start should open the title main menu"
     );
+}
+
+fn finish_title_teardown_for_test(app: &mut App) {
+    for _ in 0..16 {
+        app.update();
+    }
 }
 
 #[test]
@@ -70,19 +91,164 @@ fn visible_title_launch_starts_with_crystal_intro_before_title() {
     assert_eq!(intro.scene_frame_counter, 0);
     assert_eq!(intro.scene_name(), "IntroScene1");
     assert_eq!(intro.palette_effect, VisibleIntroPaletteEffect::None);
+    assert_eq!(
+        intro.saved_register_slots,
+        [(0, "rWBK"), (1, "hInMenu"), (2, "hVBlank")]
+            .into_iter()
+            .map(|(slot, source)| (slot, source.to_string()))
+            .collect(),
+        "CrystalIntro must execute the exported caller-register saves"
+    );
+    assert_eq!(
+        intro.symbolic_memory.get("rWBK").map(String::as_str),
+        Some("BANK(wGBCPalettes)"),
+        "CrystalIntro must execute the exported WRAM-bank selection"
+    );
+    assert_eq!(intro.callable_memory.get("hVBlank"), Some(&0));
+    assert_eq!(intro.callable_memory.get("hInMenu"), Some(&1));
+    assert_eq!(intro.callable_memory.get("hMapAnims"), Some(&0));
+    assert_eq!(intro.callable_memory.get("wJumptableIndex"), Some(&0));
     assert!(
         runtime_shell
             .title_menu
             .as_ref()
-            .is_some_and(|title| matches!(title.phase, VisibleTitlePhase::Entrance)),
+            .is_some_and(|title| matches!(title.source_phase(), VisibleTitlePhase::Entrance)),
         "title state should be staged behind the intro"
     );
 }
 
 #[test]
+fn visible_intro_scene_name_uses_the_exported_dispatch_label() {
+    let intro = VisibleIntroScreen::from_parameters(RuntimeIntroPresentationParameters {
+        scene_labels: vec!["SourceOwnedScene".to_string()],
+        scene_operation_offsets: vec![0],
+        completion_wait_frames: vec![0],
+        sprite_scheduler_frame_crossings: Vec::new(),
+        interrupt_timing: RuntimeIntroInterruptTiming {
+            frame_t_cycles: 70_224,
+            intro_entry_phase_t_cycles: 2_980,
+            entry_to_first_input_machine_cycles: 59,
+            joy_text_delay_pressed_repeat_reset_machine_cycles: 101,
+            joy_text_delay_repeat_suppressed_machine_cycles: 107,
+            joy_text_delay_repeat_restart_machine_cycles: 110,
+            joy_text_delay_common_instruction_machine_cycles: vec![
+                6, 4, 4, 4, 4, 4, 2, 2, 3, 1, 3, 1, 1, 1, 1, 3, 1, 1, 3, 1, 1, 3, 3, 3,
+                3, 3, 4, 3, 1, 3, 2, 3, 3, 3, 1,
+            ],
+            joy_text_delay_pressed_repeat_reset_tail_machine_cycles: vec![2, 2, 4, 4],
+            joy_text_delay_repeat_suppressed_tail_machine_cycles: vec![3, 4, 1, 2, 1, 3, 4],
+            joy_text_delay_repeat_restart_tail_machine_cycles: vec![3, 4, 1, 3, 2, 4, 4],
+            after_input_before_scene_dispatch_machine_cycles: 21,
+            scene_dispatch_to_sprite_scheduler_machine_cycles: 48,
+            sprite_scheduler_to_frame_wait_machine_cycles: 49,
+            hardware_entry_machine_cycles: 5,
+            vector_jump_machine_cycles: 4,
+            lcd_interrupts_per_visible_frame: 144,
+            lcd_scanline_t_cycles: 456,
+            lcd_hblank_request_t_cycles: 250,
+            vblank_request_t_cycles: 65_664,
+            lcd_callback_zero_machine_cycles: 27,
+            lcd_callback_nonzero_machine_cycles: 49,
+            timer_request_period_t_cycles: 262_144,
+            first_timer_request_after_intro_entry_t_cycles: 258_428,
+            inactive_timer_machine_cycles: 48,
+            inactive_game_timer_machine_cycles: 47,
+            vblank_wrapper_epilogue_machine_cycles: 16,
+            sound_update_is_state_dependent: true,
+            inactive_channels_sound_update_machine_cycles: 341,
+            inactive_pitch_slide_machine_cycles: 13,
+            inactive_track_vibrato_machine_cycles: 37,
+            inactive_noise_machine_cycles: 13,
+            inactive_danger_machine_cycles: 11,
+            inactive_music_fade_machine_cycles: 10,
+            active_music_channel_extra_machine_cycles: 118,
+            active_sfx_channel_extra_machine_cycles: 109,
+            shadowed_music_channel_extra_machine_cycles: 98,
+            note_over_extra_before_parse_machine_cycles: 12,
+            track_vibrato: crystal_assets::RuntimeIntroTrackVibratoTiming {
+                base_machine_cycles: 37,
+                duty_loop_extra_machine_cycles: 25,
+                pitch_offset_extra_machine_cycles: 31,
+                delay_count_nonzero_extra_machine_cycles: 16,
+                zero_extent_extra_machine_cycles: 20,
+                rate_count_nonzero_extra_machine_cycles: 37,
+                toggle_up_no_borrow_extra_machine_cycles: 83,
+                toggle_up_borrow_extra_machine_cycles: 87,
+                toggle_down_no_carry_extra_machine_cycles: 84,
+                toggle_down_carry_extra_machine_cycles: 85,
+            },
+            update_channels: crystal_assets::RuntimeIntroUpdateChannelsTiming {
+                pulse1_unchanged_machine_cycles: 71,
+                pulse1_noise_sampling_machine_cycles: 88,
+                pulse2_unchanged_machine_cycles: 49,
+                pulse2_vibrato_override_machine_cycles: 67,
+                wave_unchanged_machine_cycles: 45,
+                wave_noise_sampling_machine_cycles: 201,
+                noise_unchanged_machine_cycles: 40,
+                noise_noise_sampling_machine_cycles: 65,
+            },
+            parse_music: crystal_assets::RuntimeIntroParseMusicTiming {
+                normal_note_base_machine_cycles: 201,
+                music_noise_note_base_machine_cycles: 220,
+                octave_command_machine_cycles: 145,
+                set_note_duration: crystal_assets::RuntimeIntroSetNoteDurationTiming {
+                    fixed_machine_cycles: 64,
+                    multiply_per_bit_machine_cycles: 13,
+                    multiply_fixed_machine_cycles: 5,
+                    multiply_set_bit_extra_machine_cycles: 1,
+                    minimum_multiply_iterations: 1,
+                },
+                get_frequency: crystal_assets::RuntimeIntroGetFrequencyTiming {
+                    fixed_machine_cycles: 60,
+                    per_right_shift_machine_cycles: 12,
+                    target_octave: 7,
+                },
+            },
+            noise: crystal_assets::RuntimeIntroNoiseTiming {
+                inactive_machine_cycles: 13,
+                sfx_prefix_machine_cycles: 19,
+                music_ch8_off_prefix_machine_cycles: 27,
+                music_ch8_non_noise_prefix_machine_cycles: 31,
+                music_blocked_by_noise_ch8_machine_cycles: 34,
+                nonzero_delay_machine_cycles: 16,
+                zero_delay_machine_cycles: 8,
+                empty_address_machine_cycles: 18,
+                sound_ret_machine_cycles: 26,
+                sample_machine_cycles: 71,
+            },
+        },
+    });
+
+    assert_eq!(intro.scene_name(), "SourceOwnedScene");
+}
+
+#[test]
+fn visible_intro_cleanup_executes_exported_register_restores() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let mut intro = runtime_shell.intro_screen.clone().expect("intro screen");
+    intro.scroll_x = 91;
+    intro.scroll_y = 73;
+    intro.window_x = 0;
+    intro.window_y = 0;
+
+    execute_visible_intro_cleanup(
+        &mut intro,
+        runtime_shell.runtime.title_presentation_program(),
+    )
+    .expect("execute exported CrystalIntro cleanup");
+
+    assert_eq!((intro.scroll_x, intro.scroll_y), (0, 0));
+    assert_eq!((intro.window_x, intro.window_y), (7, 144));
+    assert!(intro.saved_register_slots.is_empty());
+    assert!(!intro.callable_memory.contains_key("hVBlank"));
+    assert!(!intro.callable_memory.contains_key("hInMenu"));
+    assert!(!intro.symbolic_memory.contains_key("rWBK"));
+}
+
+#[test]
 fn visible_title_timeout_fades_then_restarts_the_intro_sequence() {
     let mut runtime_shell = core_modular_title_shell_for_test();
-    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    finish_intro_for_test(&mut runtime_shell, "test");
     let fade_frames = RuntimeTitlePresentationParameters::from_program(
         runtime_shell.runtime.title_presentation_program(),
     )
@@ -90,8 +256,6 @@ fn visible_title_timeout_fades_then_restarts_the_intro_sequence() {
     .timeout_fade_frames;
     {
         let title = runtime_shell.title_menu.as_mut().expect("title menu");
-        title.phase = VisibleTitlePhase::PressStart;
-        title.title_timer = 0;
         title
             .presentation_machine
             .memory
@@ -105,7 +269,7 @@ fn visible_title_timeout_fades_then_restarts_the_intro_sequence() {
     tick_visible_title_screen_state(&mut runtime_shell);
     assert!(runtime_shell.intro_screen.is_none());
     assert!(runtime_shell.title_menu.as_ref().is_some_and(|title| {
-        matches!(title.phase, VisibleTitlePhase::FadeOut)
+        matches!(title.source_phase(), VisibleTitlePhase::FadeOut)
             && title.presentation_machine.memory.get("wMusicFade").copied() == Some(8)
     }));
     assert!(runtime_shell.music_fade.as_ref().is_some_and(|fade| {
@@ -117,14 +281,23 @@ fn visible_title_timeout_fades_then_restarts_the_intro_sequence() {
         tick_visible_title_screen_state(&mut runtime_shell);
     }
 
+    assert!(runtime_shell.intro_screen.is_none());
+    assert!(runtime_shell
+        .title_menu
+        .as_ref()
+        .is_some_and(|title| matches!(title.source_phase(), VisibleTitlePhase::Teardown)));
+    for _ in 0..16 {
+        tick_visible_title_screen_state(&mut runtime_shell);
+    }
+
     assert!(
         runtime_shell.intro_screen.is_some(),
         "timeout must tail-dispatch to IntroSequence"
     );
     assert!(runtime_shell.title_menu.as_ref().is_some_and(|title| {
-        matches!(title.phase, VisibleTitlePhase::Entrance)
-            && title.scx == title.entrance_start_scx
-            && title.title_timer == 0
+        matches!(title.source_phase(), VisibleTitlePhase::Entrance)
+            && title.source_scx() == title.entrance_start_scx
+            && title.source_title_timer() == 0
     }));
 }
 
@@ -221,6 +394,911 @@ fn visible_intro_ordinary_audio_schedule_comes_from_exported_scene_operations() 
 }
 
 #[test]
+fn visible_intro_scene2_control_flow_executes_the_exported_branch_graph() {
+    let mut program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+    let end_branch = program
+        .subprograms
+        .iter_mut()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .expect("crystal intro subprogram")
+        .phases
+        .iter_mut()
+        .find(|phase| phase.id == "scene_dispatch")
+        .expect("scene dispatch phase")
+        .operations
+        .iter_mut()
+        .find(|operation| {
+            operation.op == "branch_compare"
+                && operation.fields.get("target").and_then(serde_json::Value::as_str)
+                    == Some(".endscene@IntroScene2")
+        })
+        .expect("IntroScene2 completion branch");
+    end_branch
+        .fields
+        .insert("operand".to_string(), serde_json::json!(1));
+    let mut intro = VisibleIntroScreen::new();
+    intro.jumptable_index = 1;
+    intro.scene_frame_counter = 1;
+
+    let (run, source_frame, palette_selector, finished) =
+        execute_visible_intro_scene_dispatch(&mut intro, &program)
+            .expect("execute exported IntroScene2 graph");
+
+    assert!(run.returned);
+    assert!(finished, "mutated source threshold must drive completion");
+    assert_eq!(source_frame, 1);
+    assert_eq!(intro.scene_frame_counter, 2);
+    assert_eq!(palette_selector, None);
+
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let intro = runtime_shell.intro_screen.as_mut().expect("intro screen");
+    intro.jumptable_index = 1;
+    intro.scene_frame_counter = 0;
+    tick_visible_intro_screen(&mut runtime_shell).expect("tick exported IntroScene2 graph");
+    assert_eq!(
+        runtime_shell
+            .intro_screen
+            .as_ref()
+            .expect("intro remains visible")
+            .scene_frame_counter,
+        1,
+        "the source post-increment must not be repeated by the outer dispatcher"
+    );
+}
+
+#[test]
+fn visible_intro_scene6_executes_both_exported_unown_branches_and_completion() {
+    let mut program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+
+    for (frame, expected_selector, expected_audio) in [
+        (0x20, 0, "SFX_INTRO_UNOWN_2"),
+        (0x60, 1, "SFX_INTRO_UNOWN_1"),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 5;
+        intro.scene_frame_counter = frame;
+        let (run, source_frame, selector, finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene6 branch");
+        assert!(!finished);
+        assert_eq!(source_frame, frame);
+        assert_eq!(selector, Some(expected_selector));
+        assert!(run.effects.iter().any(|operation| {
+            operation.op == "sprite_init_group"
+        }));
+        assert!(run.effects.iter().any(|operation| {
+            operation.op == "play_audio"
+                && operation.fields.get("audio").and_then(serde_json::Value::as_str)
+                    == Some(expected_audio)
+        }));
+    }
+
+    let end_branch = program
+        .subprograms
+        .iter_mut()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .expect("crystal intro subprogram")
+        .phases
+        .iter_mut()
+        .find(|phase| phase.id == "scene_dispatch")
+        .expect("scene dispatch phase")
+        .operations
+        .iter_mut()
+        .find(|operation| {
+            operation.op == "branch_compare"
+                && operation.fields.get("target").and_then(serde_json::Value::as_str)
+                    == Some(".endscene@IntroScene6")
+        })
+        .expect("IntroScene6 completion branch");
+    end_branch
+        .fields
+        .insert("operand".to_string(), serde_json::json!(1));
+    let mut intro = VisibleIntroScreen::new();
+    intro.jumptable_index = 5;
+    intro.scene_frame_counter = 1;
+    let (_, _, _, finished) = execute_visible_intro_scene_dispatch(&mut intro, &program)
+        .expect("execute mutated IntroScene6 completion branch");
+    assert!(finished, "mutated source threshold must drive completion");
+}
+
+#[test]
+fn visible_intro_scene8_executes_exported_perspective_motion_and_finish_graph() {
+    let program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+
+    let mut intro = VisibleIntroScreen::new();
+    intro.jumptable_index = 7;
+    intro.scene_frame_counter = 0x20;
+    intro.global_anim_x_offset = 8;
+    let (run, source_frame, _, finished) =
+        execute_visible_intro_scene_dispatch(&mut intro, &program)
+            .expect("execute exported IntroScene8 perspective branch");
+    assert_eq!(source_frame, 0x20);
+    assert_eq!(intro.scene_frame_counter, 0x21);
+    assert_eq!(intro.global_anim_x_offset, 8);
+    assert!(!finished);
+    assert_eq!(
+        run.effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["perspective_scroll"]
+    );
+
+    intro.scene_frame_counter = 0x40;
+    intro.global_anim_x_offset = 8;
+    let (run, _, _, finished) = execute_visible_intro_scene_dispatch(&mut intro, &program)
+        .expect("execute exported IntroScene8 Suicune motion branch");
+    assert!(!finished);
+    assert_eq!(intro.global_anim_x_offset, 0);
+    assert_eq!(
+        run.effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["play_audio", "transform_memory_byte"]
+    );
+
+    intro.scene_frame_counter = 0x41;
+    let (run, _, _, finished) = execute_visible_intro_scene_dispatch(&mut intro, &program)
+        .expect("execute exported IntroScene8 finish branch");
+    assert!(finished);
+    assert_eq!(
+        run.effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["play_audio", "deinitialize_all_sprites"]
+    );
+
+    let mut mutated = program;
+    let finish_branch = mutated
+        .subprograms
+        .iter_mut()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .expect("crystal intro subprogram")
+        .phases
+        .iter_mut()
+        .find(|phase| phase.id == "scene_dispatch")
+        .expect("scene dispatch phase")
+        .operations
+        .iter_mut()
+        .find(|operation| {
+            operation.op == "branch_compare"
+                && operation.fields.get("value").and_then(serde_json::Value::as_str)
+                    == Some("global_anim_x")
+                && operation.fields.get("target").and_then(serde_json::Value::as_str)
+                    == Some(".finish@IntroScene8")
+        })
+        .expect("IntroScene8 finish branch");
+    finish_branch
+        .fields
+        .insert("operand".to_string(), serde_json::json!(8));
+    let mut intro = VisibleIntroScreen::new();
+    intro.jumptable_index = 7;
+    intro.scene_frame_counter = 0x41;
+    intro.global_anim_x_offset = 8;
+    let (_, _, _, finished) = execute_visible_intro_scene_dispatch(&mut intro, &mutated)
+        .expect("execute mutated IntroScene8 completion branch");
+    assert!(finished, "mutated source offset must drive completion");
+    assert_eq!(intro.global_anim_x_offset, 8);
+}
+
+#[test]
+fn clearing_the_asm_sprite_animation_region_resets_its_global_x_offset() {
+    let mut intro = VisibleIntroScreen::new();
+    intro.global_anim_x_offset = 0x80;
+    let operation = crystal_assets::RuntimePresentationOperation {
+        op: "fill_memory".to_string(),
+        fields: [
+            ("target".to_string(), serde_json::json!("wSpriteAnimData")),
+            ("value".to_string(), serde_json::json!(0)),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+
+    apply_visible_intro_setup_operation(&mut intro, &operation)
+        .expect("apply source ClearSpriteAnims memory range");
+
+    assert_eq!(intro.global_anim_x_offset, 0);
+}
+
+#[test]
+fn visible_intro_scene10_executes_exported_rustle_and_character_branches() {
+    let program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+
+    for (frame, expected_effects) in [
+        (0x10, vec!["indexed_2bpp_request"]),
+        (
+            0x20,
+            vec!["indexed_2bpp_request", "sprite_activate", "play_audio"],
+        ),
+        (0x40, vec!["sprite_activate", "play_audio"]),
+        (0xc0, vec![]),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 9;
+        intro.scene_frame_counter = frame;
+        let (run, source_frame, _, finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene10 branch");
+        assert_eq!(source_frame, frame);
+        assert_eq!(
+            run.effects
+                .iter()
+                .map(|operation| operation.op.as_str())
+                .collect::<Vec<_>>(),
+            expected_effects
+        );
+        assert_eq!(finished, frame == 0xc0);
+    }
+
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let intro = runtime_shell.intro_screen.as_mut().expect("intro screen");
+    intro.jumptable_index = 9;
+    intro.scene_dispatch_tick = 32;
+    intro.scene_frame_counter = 0x20;
+    assert!(!step_visible_intro_scene(&mut runtime_shell)
+        .expect("step exported IntroScene10 Wooper branch"));
+    let intro = runtime_shell.intro_screen.as_ref().expect("intro remains visible");
+    assert_eq!(intro.scene_frame_counter, 0x21);
+    assert!(intro.tile_override.is_some());
+    assert!(!intro.sprites.is_empty());
+}
+
+#[test]
+fn visible_intro_scene12_executes_exported_audio_and_both_fade_halves() {
+    let program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+
+    for (frame, timer, selector, expected_effects, finished) in [
+        (
+            0x00,
+            0,
+            Some(0),
+            vec![
+                "scheduled_audio",
+                "write_memory_byte_from_result",
+                "palette_fade_lookup",
+            ],
+            false,
+        ),
+        (
+            0x21,
+            2,
+            Some(1),
+            vec!["write_memory_byte_from_result", "palette_fade_lookup"],
+            false,
+        ),
+        (
+            0x80,
+            0,
+            Some(4),
+            vec![
+                "scheduled_audio",
+                "write_memory_byte_from_result",
+                "palette_fade_lookup",
+            ],
+            false,
+        ),
+        (
+            0x81,
+            4,
+            Some(4),
+            vec!["write_memory_byte_from_result", "palette_fade_lookup"],
+            false,
+        ),
+        (0xc0, 0, None, vec![], true),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 11;
+        intro.scene_frame_counter = frame;
+        let (run, source_frame, actual_selector, actual_finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene12 branch");
+        assert_eq!(source_frame, frame);
+        assert_eq!(intro.scene_timer, timer);
+        assert_eq!(actual_selector, selector);
+        assert_eq!(actual_finished, finished);
+        assert_eq!(
+            run.effects
+                .iter()
+                .map(|operation| operation.op.as_str())
+                .collect::<Vec<_>>(),
+            expected_effects
+        );
+    }
+}
+
+#[test]
+fn visible_intro_scene14_executes_exported_run_jump_and_disappear_graph() {
+    let program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+
+    for (frame, offset, expected_offset, timer, effects, finished) in [
+        (0x20, 0, 0, 0, vec![], false),
+        (0x40, 10, 8, 0, vec!["subtract_memory_byte"], false),
+        (
+            0x60,
+            0x90,
+            0x88,
+            1,
+            vec![
+                "play_audio",
+                "write_memory_byte",
+                "subtract_memory_byte",
+            ],
+            false,
+        ),
+        (
+            0x61,
+            0x87,
+            0x87,
+            1,
+            vec!["write_memory_byte", "deinitialize_all_sprites"],
+            false,
+        ),
+        (0x80, 0, 0, 0, vec![], true),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 13;
+        intro.scene_frame_counter = frame;
+        intro.scroll_x = 5;
+        intro.global_anim_x_offset = offset;
+        let (run, source_frame, _, actual_finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene14 branch");
+        assert_eq!(source_frame, frame);
+        assert_eq!(intro.scroll_x, 251);
+        assert_eq!(intro.global_anim_x_offset, expected_offset);
+        assert_eq!(intro.scene_timer, timer);
+        assert_eq!(actual_finished, finished);
+        assert_eq!(
+            run.effects
+                .iter()
+                .filter(|operation| operation.op != "subtract_memory_byte" || operation.fields.get("target").and_then(serde_json::Value::as_str) != Some("hSCX"))
+                .map(|operation| operation.op.as_str())
+                .collect::<Vec<_>>(),
+            effects
+        );
+    }
+
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let intro = runtime_shell.intro_screen.as_mut().expect("intro screen");
+    intro.jumptable_index = 13;
+    intro.scene_frame_counter = 0x61;
+    intro.global_anim_x_offset = 0x87;
+    intro.sprite_count = 1;
+    assert!(!step_visible_intro_scene(&mut runtime_shell)
+        .expect("step exported IntroScene14 disappearance branch"));
+    let intro = runtime_shell.intro_screen.as_ref().expect("intro remains visible");
+    assert_eq!(intro.scene_frame_counter, 0x62);
+    assert_eq!(intro.scene_timer, 1);
+    assert_eq!(intro.sprite_count, 0);
+}
+
+#[test]
+fn visible_intro_scene16_executes_exported_swap_cadence_and_vertical_scroll() {
+    let program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+
+    for (frame, scroll_y, expected_scroll_y, effects, finished) in [
+        (
+            2,
+            248,
+            0,
+            vec!["conditional_tilemap_xor", "add_memory_byte"],
+            false,
+        ),
+        (3, 0, 0, vec!["conditional_tilemap_xor"], false),
+        (4, 0, 0, vec![], false),
+        (0x80, 8, 8, vec![], true),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 15;
+        intro.scene_frame_counter = frame;
+        intro.scroll_y = scroll_y;
+        let (run, source_frame, _, actual_finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene16 branch");
+        assert_eq!(source_frame, frame);
+        assert_eq!(intro.scroll_y, expected_scroll_y);
+        assert_eq!(actual_finished, finished);
+        assert_eq!(
+            run.effects
+                .iter()
+                .map(|operation| operation.op.as_str())
+                .collect::<Vec<_>>(),
+            effects
+        );
+    }
+
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let intro = runtime_shell.intro_screen.as_mut().expect("intro screen");
+    intro.jumptable_index = 15;
+    intro.scene_frame_counter = 3;
+    assert!(!step_visible_intro_scene(&mut runtime_shell)
+        .expect("step exported IntroScene16 tile swap"));
+    let intro = runtime_shell.intro_screen.as_mut().expect("intro remains visible");
+    assert_eq!(intro.scene_frame_counter, 4);
+    assert_eq!(intro.tilemap_xor_mask, 8);
+    intro.scene_frame_counter = 7;
+    assert!(!step_visible_intro_scene(&mut runtime_shell)
+        .expect("step second exported IntroScene16 tile swap"));
+    assert_eq!(
+        runtime_shell
+            .intro_screen
+            .as_ref()
+            .expect("intro remains visible")
+            .tilemap_xor_mask,
+        0
+    );
+}
+
+#[test]
+fn visible_intro_scene18_executes_exported_scroll_stop_and_completion() {
+    let program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+
+    for (frame, scroll_x, expected_scroll_x, effects, finished) in [
+        (0, 0, 8, vec!["add_memory_byte"], false),
+        (1, 0x60, 0x60, vec![], false),
+        (0x60, 0, 0, vec![], true),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 17;
+        intro.scene_frame_counter = frame;
+        intro.scroll_x = scroll_x;
+        let (run, source_frame, _, actual_finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene18 branch");
+        assert_eq!(source_frame, frame);
+        assert_eq!(intro.scroll_x, expected_scroll_x);
+        assert_eq!(actual_finished, finished);
+        assert_eq!(
+            run.effects
+                .iter()
+                .map(|operation| operation.op.as_str())
+                .collect::<Vec<_>>(),
+            effects
+        );
+    }
+}
+
+#[test]
+fn visible_intro_scene20_executes_exported_hold_scroll_and_unown_reveal_graph() {
+    let program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+
+    for (frame, expected_scroll, expected_timer, selector, effects, finished) in [
+        (0x00, 1, 0, None, vec![], false),
+        (0x28, 0, 0, None, vec![], false),
+        (0x40, 0, 0, None, vec![], false),
+        (
+            0x43,
+            0,
+            2,
+            Some(0),
+            vec!["write_memory_byte_from_masked_result", "copy_indexed_palette"],
+            false,
+        ),
+        (0x58, 0, 0, None, vec![], false),
+        (0x98, 0, 0, None, vec![], true),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 19;
+        intro.scene_frame_counter = frame;
+        let (run, source_frame, actual_selector, actual_finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene20 branch");
+        assert_eq!(source_frame, frame);
+        assert_eq!(intro.scroll_y, expected_scroll);
+        assert_eq!(intro.scene_timer, expected_timer);
+        assert_eq!(actual_selector, selector);
+        assert_eq!(actual_finished, finished);
+        assert_eq!(
+            run.effects
+                .iter()
+                .map(|operation| operation.op.as_str())
+                .collect::<Vec<_>>(),
+            effects
+        );
+    }
+
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let intro = runtime_shell.intro_screen.as_mut().expect("intro screen");
+    intro.jumptable_index = 19;
+    intro.scene_frame_counter = 0x43;
+    assert!(!step_visible_intro_scene(&mut runtime_shell)
+        .expect("step exported IntroScene20 reveal branch"));
+    let intro = runtime_shell.intro_screen.as_ref().expect("intro remains visible");
+    assert_eq!(intro.scene_frame_counter, 0x44);
+    assert_eq!(intro.scene_timer, 2);
+    assert!(matches!(
+        intro.palette_effect,
+        VisibleIntroPaletteEffect::AppearUnown { revealed: 2, .. }
+    ));
+}
+
+#[test]
+fn visible_intro_scene22_executes_exported_delayed_sprite_teardown() {
+    let program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+    for (frame, effects, finished) in [
+        (7, vec![], false),
+        (8, vec!["deinitialize_all_sprites"], true),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 21;
+        intro.scene_frame_counter = frame;
+        let (run, source_frame, _, actual_finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene22 branch");
+        assert_eq!(source_frame, frame);
+        assert_eq!(actual_finished, finished);
+        assert_eq!(
+            run.effects
+                .iter()
+                .map(|operation| operation.op.as_str())
+                .collect::<Vec<_>>(),
+            effects
+        );
+    }
+}
+
+#[test]
+fn visible_intro_scenes24_and25_execute_exported_fade_and_countdown_graphs() {
+    let program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+
+    for (frame, selector, effects, finished, resulting_frame) in [
+        (0, Some(0), vec!["broadcast_indexed_palette"], false, 1),
+        (1, None, vec![], false, 2),
+        (4, Some(8), vec!["broadcast_indexed_palette"], false, 5),
+        (0x20, None, vec!["write_memory_byte"], true, 0x40),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 23;
+        intro.scene_frame_counter = frame;
+        let (run, source_frame, actual_selector, actual_finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene24 branch");
+        assert_eq!(source_frame, frame);
+        assert_eq!(actual_selector, selector);
+        assert_eq!(actual_finished, finished);
+        assert_eq!(intro.scene_frame_counter, resulting_frame);
+        assert_eq!(
+            run.effects
+                .iter()
+                .map(|operation| operation.op.as_str())
+                .collect::<Vec<_>>(),
+            effects
+        );
+    }
+
+    for (frame, resulting_frame, effects, finished) in [
+        (0x40, 0x3f, vec!["write_memory_byte_from_result"], false),
+        (1, 1, vec![], true),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 24;
+        intro.scene_frame_counter = frame;
+        let (run, _, _, actual_finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene25 branch");
+        assert_eq!(intro.scene_frame_counter, resulting_frame);
+        assert_eq!(actual_finished, finished);
+        assert_eq!(
+            run.effects
+                .iter()
+                .map(|operation| operation.op.as_str())
+                .collect::<Vec<_>>(),
+            effects
+        );
+    }
+}
+
+#[test]
+fn visible_intro_scenes27_and28_execute_exported_final_fade_and_exit_graphs() {
+    let program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+
+    for (frame, timer, selector, effects, finished, resulting_frame) in [
+        (
+            0,
+            0,
+            Some(0),
+            vec![
+                "write_memory_byte_from_masked_result",
+                "fade_unown_word_palettes",
+            ],
+            false,
+            1,
+        ),
+        (
+            0x71,
+            1,
+            Some(7),
+            vec![
+                "write_memory_byte_from_masked_result",
+                "fade_unown_word_palettes",
+            ],
+            false,
+            0x72,
+        ),
+        (0x80, 1, None, vec!["write_memory_byte"], true, 0x80),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 26;
+        intro.scene_frame_counter = frame;
+        let (run, source_frame, actual_selector, actual_finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene27 branch");
+        assert_eq!(source_frame, frame);
+        assert_eq!(intro.scene_timer, timer);
+        assert_eq!(actual_selector, selector);
+        assert_eq!(actual_finished, finished);
+        assert_eq!(intro.scene_frame_counter, resulting_frame);
+        assert_eq!(
+            run.effects
+                .iter()
+                .map(|operation| operation.op.as_str())
+                .collect::<Vec<_>>(),
+            effects
+        );
+    }
+
+    for (frame, resulting_frame, expected_effect, finished) in [
+        (7, 6, None, false),
+        (8, 7, Some("play_audio"), false),
+        (0x18, 0x17, Some("fill_memory"), false),
+        (0, 0, None, true),
+    ] {
+        let mut intro = VisibleIntroScreen::new();
+        intro.jumptable_index = 27;
+        intro.scene_frame_counter = frame;
+        let (run, _, _, actual_finished) =
+            execute_visible_intro_scene_dispatch(&mut intro, &program)
+                .expect("execute exported IntroScene28 branch");
+        assert_eq!(intro.scene_frame_counter, resulting_frame);
+        assert_eq!(actual_finished, finished);
+        assert_eq!(
+            run.effects.first().map(|operation| operation.op.as_str()),
+            expected_effect
+        );
+    }
+
+
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let intro = runtime_shell.intro_screen.as_mut().expect("intro screen");
+    intro.jumptable_index = 26;
+    intro.scene_frame_counter = 0;
+    assert!(!step_visible_intro_scene(&mut runtime_shell)
+        .expect("step exported IntroScene27 fade"));
+    assert!(matches!(
+        runtime_shell
+            .intro_screen
+            .as_ref()
+            .expect("intro remains visible")
+            .palette_effect,
+        VisibleIntroPaletteEffect::CrystalWordFade { palette_colors }
+            if palette_colors[0].is_some()
+    ));
+
+    let intro = runtime_shell.intro_screen.as_mut().expect("intro screen");
+    intro.jumptable_index = 27;
+    intro.scene_dispatch_tick = 104;
+    intro.scene_frame_counter = 0x18;
+    tick_visible_intro_screen(&mut runtime_shell).expect("tick exported IntroScene28 clear");
+    let intro = runtime_shell.intro_screen.as_ref().expect("intro remains visible");
+    assert_eq!(intro.scene_frame_counter, 0x17);
+    assert_eq!(intro.scene_block_frames, 4);
+    assert!(matches!(
+        intro.palette_effect,
+        VisibleIntroPaletteEffect::ClearBg {
+            color: [248, 248, 248]
+        }
+    ));
+    tick_visible_intro_screen(&mut runtime_shell).expect("tick blocked IntroScene28 wait");
+    assert_eq!(
+        runtime_shell
+            .intro_screen
+            .as_ref()
+            .expect("intro remains visible")
+            .scene_block_frames,
+        3
+    );
+}
+
+#[test]
+fn visible_intro_scene4_control_flow_executes_the_exported_branch_graph() {
+    let mut program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+    let end_branch = program
+        .subprograms
+        .iter_mut()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .expect("crystal intro subprogram")
+        .phases
+        .iter_mut()
+        .find(|phase| phase.id == "scene_dispatch")
+        .expect("scene dispatch phase")
+        .operations
+        .iter_mut()
+        .find(|operation| {
+            operation.op == "branch_compare"
+                && operation.fields.get("target").and_then(serde_json::Value::as_str)
+                    == Some(".endscene@IntroScene4")
+        })
+        .expect("IntroScene4 completion branch");
+    end_branch
+        .fields
+        .insert("operand".to_string(), serde_json::json!(1));
+    let mut intro = VisibleIntroScreen::new();
+    intro.jumptable_index = 3;
+    intro.scene_frame_counter = 1;
+
+    let (run, source_frame, palette_selector, finished) =
+        execute_visible_intro_scene_dispatch(&mut intro, &program)
+            .expect("execute exported IntroScene4 graph");
+
+    assert!(run.returned);
+    assert!(finished, "mutated source threshold must drive completion");
+    assert_eq!(source_frame, 1);
+    assert_eq!(intro.scene_frame_counter, 1);
+    assert_eq!(palette_selector, None);
+    assert_eq!(
+        run.effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["perspective_scroll"]
+    );
+}
+
+#[test]
+fn visible_intro_setup_scenes_wait_for_every_source_frame_and_blocking_transfer() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let baseline = runtime_shell.intro_screen.clone().expect("intro screen");
+
+    for (scene_index, expected_ticks, expected_sprites) in [
+        (0, 65, 0),
+        (2, 44, 0),
+        (4, 65, 0),
+        (6, 102, 1),
+        (8, 7, 0),
+        (10, 48, 0),
+        (12, 81, 1),
+        (14, 63, 2),
+        (16, 64, 0),
+        (18, 66, 1),
+        (20, 4, 0),
+        (22, 1, 0),
+        (25, 44, 0),
+    ] {
+        runtime_shell.intro_screen = Some(baseline.clone());
+        runtime_shell
+            .intro_screen
+            .as_mut()
+            .expect("intro screen")
+            .jumptable_index = scene_index;
+        let mut dispatch_ticks = 0;
+        while runtime_shell
+            .intro_screen
+            .as_ref()
+            .is_some_and(|intro| intro.jumptable_index == scene_index)
+        {
+            tick_visible_intro_screen(&mut runtime_shell)
+                .expect("tick exported CrystalIntro setup scene");
+            dispatch_ticks += 1;
+            assert!(
+                dispatch_ticks <= expected_ticks,
+                "IntroScene{} exceeded its source timing",
+                scene_index + 1
+            );
+        }
+
+        assert_eq!(
+            dispatch_ticks,
+            expected_ticks,
+            "IntroScene{} timing",
+            scene_index + 1
+        );
+        let intro = runtime_shell
+            .intro_screen
+            .as_ref()
+            .expect("intro remains visible");
+        assert_eq!(intro.jumptable_index, scene_index + 1);
+        assert_eq!(intro.scene_delay_frames, 0);
+        assert!(intro.scene_setup_cursor.is_none());
+        assert_eq!(
+            intro.sprites.len(),
+            expected_sprites,
+            "IntroScene{} source sprite activations",
+            scene_index + 1
+        );
+    }
+}
+
+#[test]
+fn visible_intro_scene13_starts_music_when_the_exported_setup_operation_executes() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let intro = runtime_shell.intro_screen.as_mut().expect("intro screen");
+    intro.jumptable_index = 12;
+
+    for _ in 0..80 {
+        tick_visible_intro_screen(&mut runtime_shell).expect("tick IntroScene13 transfer waits");
+        assert_ne!(
+            runtime_shell.active_music.as_deref(),
+            Some("MUSIC_CRYSTAL_OPENING"),
+            "opening music started before the source PlayMusic operation"
+        );
+    }
+    tick_visible_intro_screen(&mut runtime_shell).expect("execute IntroScene13 final operations");
+    assert_eq!(
+        runtime_shell.active_music.as_deref(),
+        Some("MUSIC_CRYSTAL_OPENING")
+    );
+}
+
+#[test]
 fn visible_intro_palette_and_scroll_effects_come_from_exported_operations() {
     let runtime_shell = core_modular_title_shell_for_test();
     let mut intro = runtime_shell.intro_screen.clone().expect("intro screen");
@@ -249,8 +1327,16 @@ fn visible_intro_palette_and_scroll_effects_come_from_exported_operations() {
         visible_intro_crystal_word_fade_effect(&intro, program, 0, 15)
             .expect("source Crystal word fade"),
         VisibleIntroPaletteEffect::CrystalWordFade {
-            fade_level: 0,
-            colors: [[72, 72, 72], [128, 128, 128]],
+            palette_colors: [
+                Some([[72, 72, 72], [128, 128, 128]]),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
         }
     );
 
@@ -523,6 +1609,10 @@ fn visible_intro_live_skip_enters_title_entrance() {
         assert!(runtime_shell.title_menu.is_some());
     }
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    for _ in 0..8 {
+        let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        tick_visible_intro_screen(&mut runtime_shell).expect("advance live intro cleanup");
+    }
     {
         let runtime_shell = app.world().resource::<BevyRuntimeShell>();
         assert_eq!(runtime_shell.last_error, None);
@@ -531,7 +1621,7 @@ fn visible_intro_live_skip_enters_title_entrance() {
             .as_ref()
             .expect("title should remain after intro skip");
         assert!(matches!(
-            title.phase,
+            title.source_phase(),
             VisibleTitlePhase::Entrance | VisibleTitlePhase::Timer | VisibleTitlePhase::PressStart
         ));
         assert!(
@@ -545,16 +1635,64 @@ fn visible_intro_live_skip_enters_title_entrance() {
 }
 
 #[test]
+fn visible_intro_cleanup_honors_both_exported_four_frame_waits() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+
+    skip_visible_intro_screen(&mut runtime_shell, GameButton::Start)
+        .expect("begin source CrystalIntro button exit");
+
+    let cleanup = runtime_shell
+        .intro_screen
+        .as_ref()
+        .and_then(|intro| intro.cleanup_cursor.as_ref())
+        .expect("intro must remain visible during its first WaitBGMap");
+    assert_eq!(cleanup.wait_frames_remaining, 4);
+    assert!(!runtime_shell.pending_audio.iter().any(|command| {
+        command.kind == ModpackAudioKind::SoundEffect
+            && command.audio_id == "SFX_TITLE_SCREEN_ENTRANCE"
+    }));
+    skip_visible_intro_screen(&mut runtime_shell, GameButton::B)
+        .expect("cleanup must consume later button presses");
+    assert_eq!(
+        runtime_shell
+            .intro_screen
+            .as_ref()
+            .and_then(|intro| intro.cleanup_cursor.as_ref())
+            .map(|cleanup| cleanup.wait_frames_remaining),
+        Some(4),
+        "button input must not advance or restart CrystalIntro cleanup"
+    );
+
+    for frame in 1..=7 {
+        tick_visible_intro_screen(&mut runtime_shell).expect("advance CrystalIntro cleanup");
+        assert!(
+            runtime_shell.intro_screen.is_some(),
+            "CrystalIntro returned before cleanup frame {frame} completed"
+        );
+    }
+    tick_visible_intro_screen(&mut runtime_shell).expect("finish CrystalIntro cleanup");
+
+    assert!(runtime_shell.intro_screen.is_none());
+    assert!(runtime_shell.pending_audio.iter().any(|command| {
+        command.kind == ModpackAudioKind::SoundEffect
+            && command.audio_id == "SFX_TITLE_SCREEN_ENTRANCE"
+    }));
+}
+
+#[test]
 fn visible_title_direct_confirm_runs_the_source_scene_before_opening_the_menu() {
     let mut runtime_shell = core_modular_title_shell_for_test();
-    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    finish_intro_for_test(&mut runtime_shell, "test");
 
     press_visible_title_confirm_button(&mut runtime_shell, GameButton::A)
         .expect("entrance input should execute the source entrance scene");
     let title = runtime_shell.title_menu.as_ref().expect("title menu");
-    assert!(!matches!(title.phase, VisibleTitlePhase::MainMenu));
+    assert!(!matches!(
+        title.source_phase(),
+        VisibleTitlePhase::MainMenu
+    ));
     assert_eq!(
-        title.scx,
+        title.source_scx(),
         title
             .entrance_start_scx
             .wrapping_sub(title.entrance_scroll_step)
@@ -563,20 +1701,82 @@ fn visible_title_direct_confirm_runs_the_source_scene_before_opening_the_menu() 
     advance_visible_title_to_press_start(&mut runtime_shell);
     press_visible_title_confirm_button(&mut runtime_shell, GameButton::Start)
         .expect("Start should execute the source main scene");
+    assert!(runtime_shell.title_menu.as_ref().is_some_and(|title| {
+        title.title_teardown.is_some()
+            && title.main_menu_entry_interpreter.is_none()
+            && !visible_title_main_menu_ready(title)
+    }));
+    for _ in 0..15 {
+        tick_visible_title_screen_state(&mut runtime_shell);
+        assert!(
+            runtime_shell
+                .title_menu
+                .as_ref()
+                .is_some_and(|title| title.title_teardown.is_some()),
+            "the four exported four-frame waits must retain the title teardown"
+        );
+    }
+    tick_visible_title_screen_state(&mut runtime_shell);
+    assert!(runtime_shell.title_menu.as_ref().is_some_and(|title| {
+        title.title_teardown.is_none() && title.main_menu_entry_interpreter.is_some()
+    }));
+    assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_NONE"));
+
+    tick_visible_title_screen_state(&mut runtime_shell);
     assert!(
         runtime_shell
             .title_menu
             .as_ref()
             .is_some_and(visible_title_main_menu_ready)
     );
+    assert!(runtime_shell.pending_audio.iter().any(|command| {
+        command.audio_id == "MUSIC_MAIN_MENU" && command.kind == ModpackAudioKind::Music
+    }));
+}
+
+#[test]
+fn visible_title_ticks_execute_the_source_suicune_iterator() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    finish_intro_for_test(&mut runtime_shell, "test");
+
+    tick_visible_title_screen_state(&mut runtime_shell);
+    let title = runtime_shell.title_menu.as_ref().expect("title menu");
+    assert_eq!(title.presentation_machine.memory["wSuicuneFrame"], 1);
+    assert_eq!(title.source_suicune_frame(), 0);
+
+    tick_visible_title_screen_state(&mut runtime_shell);
+    let title = runtime_shell.title_menu.as_ref().expect("title menu");
+    assert_eq!(title.presentation_machine.memory["wSuicuneFrame"], 2);
+    assert_eq!(title.source_suicune_frame(), 1);
 }
 
 #[test]
 fn visible_main_menu_ignores_start_and_accepts_only_a() {
     let mut runtime_shell = core_modular_title_shell_for_test();
-    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    finish_intro_for_test(&mut runtime_shell, "test");
     advance_visible_title_to_press_start(&mut runtime_shell);
     open_visible_title_main_menu(&mut runtime_shell).expect("open main menu");
+    let title = runtime_shell.title_menu.as_ref().expect("title menu");
+    assert_eq!(title.presentation_machine.memory["hJoyDown"], 0x08);
+    assert_eq!(
+        title.presentation_machine.memory["wTitleScreenSelectedOption"],
+        0
+    );
+    assert_ne!(
+        title.presentation_machine.memory["wJumptableIndex"] & 0x80,
+        0
+    );
+    assert!(title.main_menu_waiting_for_input);
+    assert_eq!(
+        title
+            .main_menu_phase_interpreter
+            .as_ref()
+            .expect("exported MainMenu interpreter")
+            .operation_index,
+        9
+    );
+    assert_eq!(title.presentation_machine.memory["wDisableTextAcceleration"], 0);
+    assert_eq!(title.presentation_machine.memory["wWhichIndexSet"], 0);
     let before = runtime_shell.title_menu.clone();
 
     press_visible_title_confirm_button(&mut runtime_shell, GameButton::Start)
@@ -595,21 +1795,112 @@ fn visible_main_menu_ignores_start_and_accepts_only_a() {
 #[test]
 fn visible_main_menu_b_returns_through_start_title_screen() {
     let mut runtime_shell = core_modular_title_shell_for_test();
-    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    finish_intro_for_test(&mut runtime_shell, "test");
     advance_visible_title_to_press_start(&mut runtime_shell);
     open_visible_title_main_menu(&mut runtime_shell).expect("open main menu");
 
     press_visible_title_cancel_button(&mut runtime_shell).expect("cancel main menu");
 
     let title = runtime_shell.title_menu.as_ref().expect("title menu");
-    assert!(matches!(title.phase, VisibleTitlePhase::Entrance));
+    assert!(matches!(
+        title.source_phase(),
+        VisibleTitlePhase::Entrance
+    ));
     assert_eq!(title.presentation_machine.memory["wJumptableIndex"], 0);
-    assert_eq!(title.scx, title.entrance_start_scx);
+    assert_eq!(title.source_scx(), title.entrance_start_scx);
+    assert!(title.main_menu_phase_interpreter.is_none());
+    assert!(!title.main_menu_waiting_for_input);
     assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_NONE"));
     assert!(runtime_shell.pending_audio.iter().any(|command| {
         command.audio_id == "SFX_TITLE_SCREEN_ENTRANCE"
             && command.kind == ModpackAudioKind::SoundEffect
     }));
+}
+
+#[test]
+fn visible_main_menu_option_returns_through_the_exported_loop_jump() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    finish_intro_for_test(&mut runtime_shell, "test");
+    advance_visible_title_to_press_start(&mut runtime_shell);
+    open_visible_title_main_menu(&mut runtime_shell).expect("open main menu");
+    move_visible_title_menu_cursor(&mut runtime_shell, 1).expect("select Option");
+
+    press_visible_title_confirm_button(&mut runtime_shell, GameButton::A)
+        .expect("dispatch Option through exported MainMenu");
+    assert!(runtime_shell.options_menu_open);
+    let title = runtime_shell.title_menu.as_ref().expect("retained title menu");
+    assert!(!title.main_menu_waiting_for_input);
+    assert_eq!(title.presentation_machine.memory["wMenuJoypad"], 0x01);
+    assert_eq!(title.presentation_machine.memory["wMenuSelection"], 2);
+    assert_eq!(
+        title
+            .main_menu_phase_interpreter
+            .as_ref()
+            .expect("exported MainMenu interpreter")
+            .operation_index,
+        13
+    );
+
+    close_visible_options_menu(&mut runtime_shell);
+    let title = runtime_shell.title_menu.as_ref().expect("returned title menu");
+    assert!(visible_title_main_menu_ready(title));
+    assert_eq!(
+        title
+            .main_menu_phase_interpreter
+            .as_ref()
+            .expect("exported MainMenu interpreter")
+            .operation_index,
+        9
+    );
+}
+
+#[test]
+fn visible_main_menu_continue_cancel_returns_through_the_exported_loop_jump() {
+    let save_path = std::env::temp_dir().join(format!(
+        "crystal-bevy-main-menu-continue-{}.crystalsave",
+        std::process::id()
+    ));
+    let backup_path = PathBuf::from(format!("{}.bak", save_path.display()));
+    let _ = std::fs::remove_file(&save_path);
+    let _ = std::fs::remove_file(&backup_path);
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.shell.save(&save_path).expect("write title save");
+    runtime_shell
+        .title_menu
+        .as_mut()
+        .expect("title menu")
+        .save_path = Some(save_path.clone());
+    finish_intro_for_test(&mut runtime_shell, "test");
+    advance_visible_title_to_press_start(&mut runtime_shell);
+    open_visible_title_main_menu(&mut runtime_shell).expect("open main menu");
+
+    press_visible_title_confirm_button(&mut runtime_shell, GameButton::A)
+        .expect("dispatch Continue through exported MainMenu");
+    assert!(runtime_shell.visible_continue_screen.is_some());
+    assert!(runtime_shell.title_menu.as_ref().is_some_and(|title| {
+        !title.main_menu_waiting_for_input
+            && title
+                .main_menu_phase_interpreter
+                .as_ref()
+                .is_some_and(|interpreter| interpreter.operation_index == 13)
+    }));
+
+    press_visible_title_cancel_button(&mut runtime_shell).expect("cancel Continue summary");
+    let title = runtime_shell.title_menu.as_ref().expect("returned title menu");
+    assert!(runtime_shell.visible_continue_screen.is_none());
+    assert!(visible_title_main_menu_ready(title));
+    assert_eq!(title.cursor.option_index, 0);
+    assert_eq!(
+        title
+            .main_menu_phase_interpreter
+            .as_ref()
+            .expect("exported MainMenu interpreter")
+            .operation_index,
+        9
+    );
+
+    let _ = std::fs::remove_file(&save_path);
+    let _ = std::fs::remove_file(&backup_path);
 }
 
 #[test]
@@ -666,7 +1957,7 @@ fn intro_title_handoff_clears_fade_and_old_audio_before_title_cue() {
         looped: true,
     });
 
-    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    finish_intro_for_test(&mut runtime_shell, "test");
 
     assert!(runtime_shell.screen_fade.is_none());
     assert!(runtime_shell.pending_music_stop);
@@ -681,6 +1972,26 @@ fn intro_title_handoff_clears_fade_and_old_audio_before_title_cue() {
         vec![(ModpackAudioKind::SoundEffect, "SFX_TITLE_SCREEN_ENTRANCE")],
         "only the title entrance cue may survive the intro audio boundary"
     );
+}
+
+#[test]
+fn natural_intro_completion_preserves_opening_music_into_title_entrance() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.active_music = Some("MUSIC_CRYSTAL_OPENING".to_string());
+
+    finish_intro_for_test(&mut runtime_shell, "complete");
+
+    assert_eq!(
+        runtime_shell.active_music.as_deref(),
+        Some("MUSIC_CRYSTAL_OPENING"),
+        "CrystalIntro falls through cleanup without PlayMusic(MUSIC_NONE)"
+    );
+    assert!(!runtime_shell.pending_music_stop);
+    assert!(!runtime_shell.pending_full_audio_reset);
+    assert!(runtime_shell.pending_audio.iter().any(|command| {
+        command.kind == ModpackAudioKind::SoundEffect
+            && command.audio_id == "SFX_TITLE_SCREEN_ENTRANCE"
+    }));
 }
 
 #[test]
@@ -705,6 +2016,7 @@ fn visible_title_delete_save_combo_opens_prompt_from_press_start() {
         keys.clear_just_pressed(KeyCode::KeyX);
         keys.clear_just_pressed(KeyCode::ArrowUp);
     }
+    finish_title_teardown_for_test(&mut app);
 
     let runtime_shell = app.world().resource::<BevyRuntimeShell>();
     assert_eq!(
@@ -719,7 +2031,7 @@ fn visible_title_delete_save_combo_opens_prompt_from_press_start() {
         runtime_shell
             .title_menu
             .as_ref()
-            .is_some_and(|title| matches!(title.phase, VisibleTitlePhase::PressStart)),
+            .is_some_and(|title| matches!(title.source_phase(), VisibleTitlePhase::PressStart)),
         "delete-save prompt should sit over the press-start title state"
     );
 }
@@ -746,7 +2058,7 @@ fn visible_delete_save_confirm_removes_configured_save_and_restarts_title() {
         .as_mut()
         .expect("title menu")
         .save_path = Some(save_path.clone());
-    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    finish_intro_for_test(&mut runtime_shell, "test");
     advance_visible_title_to_press_start(&mut runtime_shell);
 
     open_visible_delete_save_screen(&mut runtime_shell).expect("open delete save");
@@ -766,7 +2078,7 @@ fn visible_delete_save_confirm_removes_configured_save_and_restarts_title() {
         runtime_shell
             .title_menu
             .as_ref()
-            .is_some_and(|title| matches!(title.phase, VisibleTitlePhase::Entrance)),
+            .is_some_and(|title| matches!(title.source_phase(), VisibleTitlePhase::Entrance)),
         "delete-save confirmation should return through a fresh title entrance"
     );
     let title = runtime_shell.title_menu.as_ref().expect("restarted title");
@@ -823,7 +2135,7 @@ fn visible_title_clock_reset_combo_opens_prompt_after_select_release() {
             runtime_shell
                 .title_menu
                 .as_ref()
-                .is_some_and(|title| title.clock_reset_trigger),
+                .is_some_and(TitleMenu::source_clock_reset_trigger),
             "Down+B+Select should arm clock reset on the title screen"
         );
         assert!(runtime_shell.pending_clock_reset.is_none());
@@ -841,6 +2153,7 @@ fn visible_title_clock_reset_combo_opens_prompt_after_select_release() {
         keys.press(KeyCode::ArrowUp);
     }
     app.update();
+    finish_title_teardown_for_test(&mut app);
 
     let runtime_shell = app.world().resource::<BevyRuntimeShell>();
     assert!(
@@ -856,7 +2169,7 @@ fn visible_title_clock_reset_combo_opens_prompt_after_select_release() {
 fn visible_clock_reset_flow_commits_manual_time_and_restarts_title() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     runtime_shell.latest_rtc_sample = Some(native_rtc_source_for_test().sample());
-    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    finish_intro_for_test(&mut runtime_shell, "test");
     advance_visible_title_to_press_start(&mut runtime_shell);
 
     open_visible_clock_reset_screen(&mut runtime_shell).expect("open clock reset");
@@ -889,7 +2202,7 @@ fn visible_clock_reset_flow_commits_manual_time_and_restarts_title() {
         runtime_shell
             .title_menu
             .as_ref()
-            .is_some_and(|title| matches!(title.phase, VisibleTitlePhase::Entrance)),
+            .is_some_and(|title| matches!(title.source_phase(), VisibleTitlePhase::Entrance)),
         "clock reset confirmation should return through a fresh title entrance"
     );
 }
@@ -961,12 +2274,66 @@ fn clock_reset_prompt_frame_uses_boot_window_and_value_phases() {
 }
 
 #[test]
+fn visible_intro_accumulates_exported_decompression_cpu_work() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let expected_machine_cycles = {
+        let intro = runtime_shell
+            .intro_screen
+            .as_ref()
+            .expect("intro presentation state");
+        visible_intro_scene_operations(
+            intro,
+            &runtime_shell.runtime.data().runtime_title_screen.program,
+        )
+        .expect("source-owned IntroScene1 operations")
+        .iter()
+        .filter(|operation| operation.op == "decompress_lz3_resource")
+        .map(|operation| {
+            operation
+                .fields
+                .get("decompress_machine_cycles")
+                .and_then(serde_json::Value::as_u64)
+                .expect("decompression operation has exact CPU work")
+        })
+        .sum::<u64>()
+    };
+    for _ in 0..64 {
+        if runtime_shell
+            .intro_screen
+            .as_ref()
+            .is_some_and(|intro| intro.jumptable_index > 0)
+        {
+            break;
+        }
+        tick_visible_intro_screen(&mut runtime_shell).expect("tick IntroScene1 CPU work");
+    }
+    let intro = runtime_shell
+        .intro_screen
+        .as_ref()
+        .expect("intro remains active after IntroScene1");
+    assert_eq!(intro.jumptable_index, 1);
+    assert_eq!(intro.cpu_work_machine_cycles, expected_machine_cycles);
+    assert!(expected_machine_cycles > 0);
+}
+
+#[test]
+fn visible_intro_clock_advances_from_entry_to_the_first_input_hook() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let intro = runtime_shell
+        .intro_screen
+        .as_ref()
+        .expect("intro presentation state");
+    assert_eq!(intro.frame_clock.frame_t_cycles, 70_224);
+    assert_eq!(intro.frame_clock.phase_t_cycles, 3_324);
+}
+
+#[test]
 fn visible_intro_completes_to_title_within_typescript_frame_budget() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     let mut saw_opening_music_command = false;
     let mut saw_final_whoosh_command = false;
 
-    for _ in 0..2400 {
+    for _ in 0..2500 {
         tick_visible_intro_screen(&mut runtime_shell).expect("tick intro state machine");
         saw_opening_music_command |= runtime_shell.pending_audio.iter().any(|command| {
             command.audio_id == "MUSIC_CRYSTAL_OPENING"
@@ -1010,6 +2377,85 @@ fn visible_intro_completes_to_title_within_typescript_frame_budget() {
 }
 
 #[test]
+fn visible_intro_sprite_scheduler_blocks_at_exported_rom_crossings() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    {
+        let intro = runtime_shell.intro_screen.as_mut().expect("intro screen");
+        intro.jumptable_index = 7;
+        intro.scene_dispatch_tick = 0;
+        intro.scene_block_frames = 0;
+    }
+    apply_visible_intro_sprite_pipeline_for_shell(&mut runtime_shell)
+        .expect("execute ROM-crossing sprite scheduler call");
+    assert_eq!(
+        runtime_shell
+            .intro_screen
+            .as_ref()
+            .expect("intro screen")
+            .scene_block_frames,
+        1,
+        "dispatcher entry 7 tick 1 crosses one ROM frame boundary"
+    );
+
+    {
+        let intro = runtime_shell.intro_screen.as_mut().expect("intro screen");
+        intro.scene_dispatch_tick = 1;
+        intro.scene_block_frames = 0;
+    }
+    apply_visible_intro_sprite_pipeline_for_shell(&mut runtime_shell)
+        .expect("execute non-crossing sprite scheduler call");
+    assert_eq!(
+        runtime_shell
+            .intro_screen
+            .as_ref()
+            .expect("intro screen")
+            .scene_block_frames,
+        0,
+        "dispatcher entry 7 tick 2 does not cross a ROM frame boundary"
+    );
+
+    {
+        let intro = runtime_shell.intro_screen.as_mut().expect("intro screen");
+        intro.jumptable_index = 15;
+        intro.scene_dispatch_tick = 0;
+        intro.scene_block_frames = 0;
+    }
+    apply_visible_intro_sprite_pipeline_for_shell(&mut runtime_shell)
+        .expect("execute crossing after a scene-advancing setup dispatch");
+    assert_eq!(
+        runtime_shell
+            .intro_screen
+            .as_ref()
+            .expect("intro screen")
+            .scene_block_frames,
+        1,
+        "the scheduler uses the advanced scene identity at the setup handoff"
+    );
+
+    let mut handoff_shell = core_modular_title_shell_for_test();
+    {
+        let intro = handoff_shell.intro_screen.as_mut().expect("intro screen");
+        intro.jumptable_index = 22;
+        intro.scene_dispatch_tick = 0;
+        intro.scene_setup_cursor = None;
+        intro.sprite_scheduler_frame_crossings.push(
+            RuntimeIntroSpriteSchedulerFrameCrossing {
+                dispatcher_entry: 23,
+                dispatch_tick: 1,
+                elapsed_t_cycles_between_hooks: 1,
+            },
+        );
+    }
+    tick_visible_intro_screen(&mut handoff_shell).expect("execute setup-to-scene handoff");
+    let intro = handoff_shell.intro_screen.as_ref().expect("intro screen");
+    assert_eq!(intro.jumptable_index, 23);
+    assert_eq!(
+        intro.scene_block_frames, 1,
+        "NextIntroScene must run before the central sprite scheduler"
+    );
+}
+
+#[test]
 fn visible_intro_scene_13_restores_the_asm_scroll_origin() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     {
@@ -1022,7 +2468,17 @@ fn visible_intro_scene_13_restores_the_asm_scroll_origin() {
         intro.scroll_y = 0x4a;
     }
 
-    tick_visible_intro_screen(&mut runtime_shell).expect("set up Suicune forest scene");
+    for _ in 0..80 {
+        tick_visible_intro_screen(&mut runtime_shell).expect("wait for Suicune forest transfers");
+    }
+    let intro = runtime_shell
+        .intro_screen
+        .as_ref()
+        .expect("intro remains active during setup");
+    assert_eq!(intro.scroll_x, 0x35);
+    assert_eq!(intro.scroll_y, 0x4a);
+
+    tick_visible_intro_screen(&mut runtime_shell).expect("finish Suicune forest setup");
 
     let intro = runtime_shell
         .intro_screen
@@ -1039,7 +2495,8 @@ fn visible_intro_never_loses_its_lcd_surface_during_a_full_sequence() {
     let mut images = Assets::<Image>::default();
     let mut saw_lit_lcd_pixel = false;
 
-    for _ in 0..2400 {
+    // The ROM completes CrystalIntro on frame 2442, followed by eight cleanup frames.
+    for _ in 0..2450 {
         if let Some(intro) = runtime_shell.intro_screen.as_ref() {
             let frame = intro_scene_frame_for_art_with_bundle(
                 &mut rendered_art,
@@ -1093,7 +2550,7 @@ fn visible_intro_never_loses_its_lcd_surface_during_a_full_sequence() {
 }
 
 fn complete_time_set_for_test(app: &mut App) {
-    for _ in 0..64 {
+    for _ in 0..256 {
         if app
             .world()
             .resource::<BevyRuntimeShell>()
@@ -1131,12 +2588,35 @@ fn complete_oak_intro_for_test(app: &mut App) {
                 .pending_name_choice
                 .is_some()
             {
+                {
+                    let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+                    for _ in 0..40 {
+                        tick_visible_player_name_choice(&mut runtime_shell)
+                            .expect("finish MovePlayerPicRight");
+                    }
+                }
                 press_key_for_runtime_hotkey_app(app, KeyCode::KeyZ);
             }
             return;
         }
         {
             let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+            if runtime_shell
+                .pending_oak_intro
+                .as_ref()
+                .is_some_and(|oak_intro| {
+                    oak_intro.scene_phase == VisibleOakIntroPhase::Cry
+                        && oak_intro.wooper_cry_queued
+                })
+            {
+                runtime_shell.pending_audio.retain(|command| {
+                    !matches!(
+                        command.kind,
+                        ModpackAudioKind::SoundEffect | ModpackAudioKind::Cry
+                    )
+                });
+                runtime_shell.active_transient_kind = None;
+            }
             tick_visible_oak_intro(&mut runtime_shell).expect("tick Oak intro");
             if let Some(oak_intro) = runtime_shell.pending_oak_intro.as_mut() {
                 if !oak_intro.current_text.is_empty()

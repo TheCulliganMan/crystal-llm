@@ -127,9 +127,10 @@ fn runtime_failed_run_stages_enemy_selection_and_turn_as_one_replayable_stream()
             BattleAction::Run,
             None,
             |combat, rng| {
-                Ok(crystal_core::battle::turn::select_wild_enemy_move_slot(
-                    combat, rng,
-                ))
+                Ok(crystal_core::battle::turn::EnemyMoveSelection {
+                    slot: crystal_core::battle::turn::select_wild_enemy_move_slot(combat, rng),
+                    ai_damage_register: 0,
+                })
             },
             |slot, _combat, _rng| Ok(BattleAction::Move { slot }),
         )
@@ -700,7 +701,6 @@ fn runtime_poke_doll_consumes_item_and_clears_active_wild_battle_state() {
     session.state.money = 300;
     session.state.battle_pay_day_money = 55;
     session.state.battle_escape_attempts = 2;
-    session.state.battle_player_stat_drop_guard_turns = 5;
 
     let item_escape = session
         .use_bag_item_to_escape_active_wild_battle(&runtime, "POKE_DOLL")
@@ -715,7 +715,6 @@ fn runtime_poke_doll_consumes_item_and_clears_active_wild_battle_state() {
     assert_eq!(session.state.battle_active_enemy_party_index, None);
     assert!(session.state.battle_rewarded_enemy_party_indices.is_empty());
     assert_eq!(session.state.battle_escape_attempts, 0);
-    assert_eq!(session.state.battle_player_stat_drop_guard_turns, 0);
     assert_eq!(session.state.battle_result, 2);
     assert_eq!(session.state.money, 300, "DRAW skips CheckPayDay");
     assert_eq!(session.state.battle_pay_day_money, 0);
@@ -773,7 +772,7 @@ fn runtime_rejects_poke_doll_in_trainer_battle_without_consumption() {
 }
 
 #[test]
-fn runtime_guard_spec_consumes_item_and_sets_stat_drop_guard_turns() {
+fn runtime_guard_spec_uses_the_authoritative_persistent_mist_bit() {
     let root = temp_repository_root("battle-guard-spec");
     write_floor_tileset(&root, "johto");
     let asset_root = AssetRoot::new(&root);
@@ -784,7 +783,6 @@ fn runtime_guard_spec_consumes_item_and_sets_stat_drop_guard_turns() {
     guard_spec.battle_usable = true;
     guard_spec.consumable = true;
     guard_spec.battle_stat_drop_guard = Some(true);
-    guard_spec.battle_stat_drop_guard_turns = Some(5);
     data.items.insert("GUARD_SPEC".to_string(), guard_spec);
     let runtime = CrystalRuntime::from_compiled_pack(
         &asset_root,
@@ -801,11 +799,17 @@ fn runtime_guard_spec_consumes_item_and_sets_stat_drop_guard_turns() {
         .storage
         .register_capture_in_box(0, player)
         .expect("register player");
+    let reserve = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+    session
+        .state
+        .storage
+        .register_capture_in_box(0, reserve)
+        .expect("register reserve");
     session.state.sync_party_from_storage();
     session
         .state
         .bag
-        .add_item(&runtime.data.items["GUARD_SPEC"], 1)
+        .add_item(&runtime.data.items["GUARD_SPEC"], 2)
         .expect("add Guard Spec");
     session
         .start_scripted_wild_battle(&runtime, "RuntimeMap", "RuntimeWildScript", 4)
@@ -817,14 +821,36 @@ fn runtime_guard_spec_consumes_item_and_sets_stat_drop_guard_turns() {
 
     assert!(guard.item_use.consumed);
     assert_eq!(guard.item_use.item_id, "GUARD_SPEC");
-    assert_eq!(guard.stat_drop_guard_turns_before, 0);
-    assert_eq!(guard.stat_drop_guard_turns_after, 5);
-    assert_eq!(session.state.battle_player_stat_drop_guard_turns, 5);
+    assert!(!guard.mist_active_before);
+    assert!(guard.mist_active_after);
+    assert!(session.state.bag.has_item(&runtime.data.items["GUARD_SPEC"]));
+    let before_repeat = session.state.clone();
+    let error = session
+        .use_bag_guard_spec_in_active_battle(&runtime, "GUARD_SPEC")
+        .expect_err("active Guard Spec is not consumed again");
+    assert!(error_debug(error).contains("already active"));
+    assert_eq!(session.state, before_repeat);
+    session
+        .resolve_active_battle_enemy_action(&runtime, BattleAction::Move { slot: 0 })
+        .expect("enemy turn preserves Guard Spec");
+    assert!(
+        session
+            .state
+            .script_runtime
+            .active_battle_combat
+            .as_ref()
+            .is_some_and(|combat| combat.player_mist_active)
+    );
+    session
+        .switch_active_battle_party(&runtime, 1)
+        .expect("switch clears Guard Spec");
     assert!(
         !session
             .state
-            .bag
-            .has_item(&runtime.data.items["GUARD_SPEC"])
+            .script_runtime
+            .active_battle_combat
+            .as_ref()
+            .is_some_and(|combat| combat.player_mist_active)
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1352,7 +1378,7 @@ fn runtime_blocked_ball_and_enemy_response_are_one_replayable_turn() {
             |combat, rng| {
                 runtime
                     .data
-                    .select_trainer_enemy_move_slot(combat, ai_move_flags, rng)
+                    .select_trainer_enemy_move_with_scratch(combat, ai_move_flags, rng)
             },
             |slot, _combat, _rng| Ok(BattleAction::Move { slot }),
         )
@@ -1520,9 +1546,10 @@ fn runtime_failed_ball_residual_then_wild_flee_replays_in_one_rng_stream() {
         .resolve_active_battle_ball_turn_with_enemy_selectors(
             "POKE_BALL",
             |combat, rng| {
-                Ok(crystal_core::battle::turn::select_wild_enemy_move_slot(
-                    combat, rng,
-                ))
+                Ok(crystal_core::battle::turn::EnemyMoveSelection {
+                    slot: crystal_core::battle::turn::select_wild_enemy_move_slot(combat, rng),
+                    ai_damage_register: 0,
+                })
             },
             |slot, _combat, _rng| Ok(BattleAction::Move { slot }),
         )

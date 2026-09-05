@@ -1,9 +1,11 @@
 use super::*;
+use crate::battle::damage::TypeEffectivenessEntry;
 use crate::battle::stats::BattleStatMultiplier;
 use crate::models::{
     BaseStats, Dv, Item, LearnedMove, PokemonSpecies, PokemonType, item_pocket, pokemon_type,
 };
 use crate::random::{CrystalRandomState, ExactBattleRandom, Random, ReplayDivider};
+use crate::systems::battle_items::BattleItemStageChange;
 
 struct ScriptedBattleRandom {
     bytes: std::vec::IntoIter<u8>,
@@ -24,6 +26,52 @@ impl BattleRandomSource for ScriptedBattleRandom {
         self.calls += 1;
         self.bytes.next().expect("scripted battle RNG exhausted")
     }
+}
+
+fn has_post_check_hit_failure(events: &[BattleEvent], effect: &str, expected_move: &str) -> bool {
+    events.iter().any(|event| match (effect, event) {
+        (
+            "CONVERSION2",
+            BattleEvent::Conversion2Failed {
+                side: BattleSide::Player,
+                move_name,
+            },
+        ) => move_name == expected_move,
+        (
+            "ATTRACT",
+            BattleEvent::AttractFailed {
+                side: BattleSide::Player,
+                move_name,
+                target: BattleSide::Enemy,
+                ..
+            },
+        ) => move_name == expected_move,
+        (
+            "DISABLE",
+            BattleEvent::DisableFailed {
+                side: BattleSide::Player,
+                move_name,
+                target: BattleSide::Enemy,
+            },
+        ) => move_name == expected_move,
+        (
+            "FORESIGHT",
+            BattleEvent::ForesightFailed {
+                side: BattleSide::Player,
+                move_name,
+                target: BattleSide::Enemy,
+            },
+        ) => move_name == expected_move,
+        (
+            "FORCE_SWITCH",
+            BattleEvent::ForceSwitchFailed {
+                side: BattleSide::Player,
+                move_name,
+                target: BattleSide::Enemy,
+            },
+        ) => move_name == expected_move,
+        _ => false,
+    })
 }
 
 #[test]
@@ -290,93 +338,39 @@ fn weather_modifiers() -> WeatherModifiers {
 }
 
 fn type_effectiveness_table() -> TypeEffectivenessTable {
-    let types = [
-        "NORMAL",
-        "ELECTRIC",
-        "FIGHTING",
-        "FLYING",
-        "GHOST",
-        "GROUND",
-        "DARK",
-        "ROCK",
-        "FIRE",
-        "PSYCHIC_TYPE",
-        "PSYCHIC",
-        "DRAGON",
-        "WATER",
-        "GRASS",
-        "BUG",
-        "POISON",
-        "STEEL",
-        "ICE",
-    ];
-    let mut matchups: BTreeMap<_, _> = types
-        .iter()
-        .map(|attacker| {
-            (
-                pokemon_type(attacker),
-                types
-                    .iter()
-                    .map(|defender| {
-                        (
-                            pokemon_type(defender),
-                            crate::battle::damage::TypeMultiplier::one(),
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    matchups.entry(pokemon_type("NORMAL")).or_default().insert(
-        pokemon_type("GHOST"),
-        crate::battle::damage::TypeMultiplier::zero(),
-    );
-    matchups
-        .entry(pokemon_type("ELECTRIC"))
-        .or_default()
-        .insert(
-            pokemon_type("GROUND"),
-            crate::battle::damage::TypeMultiplier::zero(),
-        );
-    matchups
-        .entry(pokemon_type("FIGHTING"))
-        .or_default()
-        .insert(
-            pokemon_type("NORMAL"),
-            crate::battle::damage::TypeMultiplier {
-                numerator: 2,
-                denominator: 1,
-            },
-        );
-    matchups
-        .entry(pokemon_type("FIGHTING"))
-        .or_default()
-        .insert(
-            pokemon_type("GHOST"),
-            crate::battle::damage::TypeMultiplier::zero(),
-        );
-    matchups.entry(pokemon_type("POISON")).or_default().insert(
-        pokemon_type("STEEL"),
-        crate::battle::damage::TypeMultiplier::zero(),
-    );
     TypeEffectivenessTable {
-        matchups,
-        foresight_matchups: BTreeMap::from([
-            (
-                pokemon_type("NORMAL"),
-                BTreeMap::from([(
-                    pokemon_type("GHOST"),
-                    crate::battle::damage::TypeMultiplier::one(),
-                )]),
-            ),
-            (
-                pokemon_type("FIGHTING"),
-                BTreeMap::from([(
-                    pokemon_type("GHOST"),
-                    crate::battle::damage::TypeMultiplier::one(),
-                )]),
-            ),
-        ]),
+        matchups: vec![
+            TypeEffectivenessEntry {
+                attacker: pokemon_type("ELECTRIC"),
+                defender: pokemon_type("GROUND"),
+                multiplier: TypeMultiplier::zero(),
+            },
+            TypeEffectivenessEntry {
+                attacker: pokemon_type("FIGHTING"),
+                defender: pokemon_type("NORMAL"),
+                multiplier: TypeMultiplier {
+                    numerator: 2,
+                    denominator: 1,
+                },
+            },
+            TypeEffectivenessEntry {
+                attacker: pokemon_type("POISON"),
+                defender: pokemon_type("STEEL"),
+                multiplier: TypeMultiplier::zero(),
+            },
+        ],
+        foresight_matchups: vec![
+            TypeEffectivenessEntry {
+                attacker: pokemon_type("NORMAL"),
+                defender: pokemon_type("GHOST"),
+                multiplier: TypeMultiplier::zero(),
+            },
+            TypeEffectivenessEntry {
+                attacker: pokemon_type("FIGHTING"),
+                defender: pokemon_type("GHOST"),
+                multiplier: TypeMultiplier::zero(),
+            },
+        ],
     }
 }
 
@@ -625,27 +619,7 @@ fn battle_state(player: Pokemon, enemy: Pokemon, _fixture_seed: u32) -> BattleCo
 }
 
 #[test]
-fn trace_is_battle_local_and_restores_the_party_ability_on_switch() {
-    let mut player = pokemon("RALTS", 30, pokemon_type("PSYCHIC"), "SPLASH");
-    player.species.ability = "TRACE".to_string();
-    let mut enemy = pokemon("DUSKULL", 20, pokemon_type("GHOST"), "SPLASH");
-    enemy.species.ability = "LEVITATE".to_string();
-    let mut state = battle_state(player, enemy, 0);
-
-    apply_switch_in_ability(&mut state, BattleSide::Player).expect("Trace switch-in");
-    assert_eq!(state.player.species.ability, "LEVITATE");
-    assert_eq!(
-        state.player_trace_original_ability.as_deref(),
-        Some("TRACE")
-    );
-
-    switch_battle_combat_pokemon(&mut state, BattleSide::Player, 1).expect("switch traced user");
-    assert_eq!(state.player_party[0].species.ability, "TRACE");
-    assert_eq!(state.player_trace_original_ability, None);
-}
-
-#[test]
-fn soundproof_members_are_not_cured_by_heal_bell() {
+fn heal_bell_cures_every_party_member_regardless_of_ability() {
     let mut player = pokemon("WHISMUR", 30, pokemon_type("NORMAL"), "HEAL_BELL");
     player.species.ability = "SOUNDPROOF".to_string();
     player.status = Some("POISON".to_string());
@@ -656,100 +630,931 @@ fn soundproof_members_are_not_cured_by_heal_bell() {
     state.player_party[1].species.ability = "NATURAL_CURE".to_string();
     let mut events = Vec::new();
 
-    apply_heal_bell_effect(&mut state, BattleSide::Player, "HEAL_BELL", &mut events);
+    apply_heal_bell_effect(
+        &mut state,
+        BattleSide::Player,
+        "HEAL_BELL",
+        &stat_multipliers(),
+        &mut events,
+    )
+    .expect("Heal Bell resolves");
 
-    assert_eq!(state.player.status.as_deref(), Some("POISON"));
-    assert_eq!(state.player_party[0].status.as_deref(), Some("POISON"));
+    assert_eq!(state.player.status, None);
+    assert_eq!(state.player_party[0].status, None);
     assert_eq!(state.player_party[1].status, None);
 }
 
 #[test]
-fn pickup_uses_the_emerald_level_table_after_a_victory() {
+fn enemy_heal_bell_clears_nightmare_party_statuses_and_loaded_penalties() {
+    let player = pokemon("RATTATA", 20, pokemon_type("NORMAL"), "SPLASH");
+    let mut enemy = pokemon("WHISMUR", 30, pokemon_type("NORMAL"), "HEAL_BELL");
+    enemy.species.ability = "SOUNDPROOF".to_string();
+    enemy.status = Some("PARALYSIS".to_string());
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_party[0] = state.enemy.clone();
+    state.enemy_party[1].status = Some("BURN".to_string());
+    state.enemy_nightmare_source = Some(BattleSide::Player);
+    state.enemy_paralysis_speed_penalty_active = true;
+    let mut events = Vec::new();
+
+    apply_heal_bell_effect(
+        &mut state,
+        BattleSide::Enemy,
+        "HEAL_BELL",
+        &stat_multipliers(),
+        &mut events,
+    )
+    .expect("Heal Bell resolves");
+
+    assert_eq!(state.enemy.status, None);
+    assert_eq!(state.enemy_party[0].status, None);
+    assert_eq!(state.enemy_party[1].status, None);
+    assert_eq!(state.enemy_nightmare_source, None);
+    assert!(!state.enemy_paralysis_speed_penalty_active);
+}
+
+#[test]
+fn soundproof_does_not_block_crystal_sound_moves() {
+    let player = pokemon("STANTLER", 50, pokemon_type("NORMAL"), "GROWL");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    enemy.species.ability = "SOUNDPROOF".to_string();
+    let moves = BTreeMap::from([
+        (
+            "GROWL".to_string(),
+            move_data_with_stat(
+                "GROWL",
+                pokemon_type("NORMAL"),
+                0,
+                100,
+                "ATTACK_DOWN",
+                0,
+                Stat::Attack,
+                -1,
+            ),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, rng.seed()),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Growl turn resolves");
+
+    assert_eq!(
+        outcome.state.enemy.stat_boosts.get(&Stat::Attack),
+        Some(&-1)
+    );
+    assert!(outcome.events.contains(&BattleEvent::StatStageChanged {
+        side: BattleSide::Player,
+        move_name: "GROWL".to_string(),
+        target: BattleSide::Enemy,
+        stat: Stat::Attack,
+        amount: -1,
+        stage_before: 0,
+        stage_after: -1,
+    }));
+}
+
+#[test]
+fn direct_status_commands_ignore_target_abilities() {
+    for (move_name, effect, status, ability) in [
+        ("SLEEP_TEST", "SLEEP", "SLEEP", "INSOMNIA"),
+        ("SLEEP_TEST_2", "SLEEP", "SLEEP", "VITAL_SPIRIT"),
+        ("POISON_TEST", "POISON", "POISON", "IMMUNITY"),
+        ("PARALYZE_TEST", "PARALYZE", "PARALYSIS", "LIMBER"),
+    ] {
+        let player = pokemon("MEW", 90, pokemon_type("PSYCHIC"), move_name);
+        let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+        enemy.species.ability = ability.to_string();
+        let moves = BTreeMap::from([
+            (
+                move_name.to_string(),
+                move_data_with_effect(move_name, pokemon_type("NORMAL"), 0, 100, effect),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
+        // CheckHit consumes 0. Sleep additionally accepts the masked value 1.
+        let mut rng = ScriptedBattleRandom::new(vec![0, 1]);
+
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, 0),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .unwrap_or_else(|error| panic!("{move_name} against {ability} resolves: {error:?}"));
+
+        assert_eq!(
+            outcome.state.enemy.status.as_deref(),
+            Some(status),
+            "{ability} must not preempt {move_name}"
+        );
+        assert!(outcome.events.contains(&BattleEvent::StatusApplied {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+            status: status.to_string(),
+        }));
+    }
+}
+
+#[test]
+fn damaging_status_commands_ignore_target_abilities() {
+    for (move_name, status, ability) in [
+        ("BURN_HIT_TEST", "BURN", "WATER_VEIL"),
+        ("FREEZE_HIT_TEST", "FREEZE", "MAGMA_ARMOR"),
+        ("POISON_HIT_TEST", "POISON", "IMMUNITY"),
+        ("PARALYZE_HIT_TEST", "PARALYSIS", "LIMBER"),
+    ] {
+        let player = pokemon("MEW", 90, pokemon_type("PSYCHIC"), move_name);
+        let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+        enemy.species.ability = ability.to_string();
+        let mut state = battle_state(player, enemy, 0);
+        let mut rng = Random::new(1);
+        let mut events = Vec::new();
+
+        apply_secondary_status_after_success(
+            &mut state,
+            BattleSide::Player,
+            move_name,
+            BattleSide::Enemy,
+            status,
+            &BTreeMap::new(),
+            &mut rng,
+            &mut events,
+        )
+        .expect("status effect resolves");
+
+        assert_eq!(
+            state.enemy.status.as_deref(),
+            Some(status),
+            "{ability} must not preempt {move_name}"
+        );
+        assert!(events.contains(&BattleEvent::StatusApplied {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+            status: status.to_string(),
+        }));
+    }
+}
+
+#[test]
+fn confusion_commands_ignore_target_abilities() {
+    let player = pokemon("MEW", 90, pokemon_type("PSYCHIC"), "CONFUSE_RAY");
+    let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    enemy.species.ability = "OWN_TEMPO".to_string();
+
+    let mut direct_state = battle_state(player.clone(), enemy.clone(), 0);
+    let mut direct_rng = ScriptedBattleRandom::new(vec![0]);
+    let mut direct_events = Vec::new();
+    apply_confusion_to_target(
+        &mut direct_state,
+        BattleSide::Player,
+        "CONFUSE_RAY",
+        &BTreeMap::new(),
+        &mut direct_rng,
+        &mut direct_events,
+    )
+    .expect("direct confusion resolves");
+    assert_eq!(direct_state.enemy.confusion_turns, 2);
+    assert!(direct_events.contains(&BattleEvent::ConfusionApplied {
+        side: BattleSide::Player,
+        move_name: "CONFUSE_RAY".to_string(),
+        target: BattleSide::Enemy,
+        turns: 2,
+    }));
+
+    let mut secondary_state = battle_state(player, enemy, 0);
+    let mut secondary_rng = ScriptedBattleRandom::new(vec![3]);
+    let mut secondary_events = Vec::new();
+    apply_secondary_confusion_effect(
+        &mut secondary_state,
+        BattleSide::Player,
+        "CONFUSION_HIT_TEST",
+        EffectChanceResult {
+            chance_percent: 100,
+            succeeds: true,
+            roll: None,
+        },
+        &BTreeMap::new(),
+        &mut secondary_rng,
+        &mut secondary_events,
+    )
+    .expect("secondary confusion resolves");
+    assert_eq!(secondary_state.enemy.confusion_turns, 5);
+    assert!(secondary_events.contains(&BattleEvent::ConfusionApplied {
+        side: BattleSide::Player,
+        move_name: "CONFUSION_HIT_TEST".to_string(),
+        target: BattleSide::Enemy,
+        turns: 5,
+    }));
+}
+
+#[test]
+fn flinch_commands_ignore_target_abilities() {
+    let player = pokemon("MEW", 90, pokemon_type("PSYCHIC"), "HEADBUTT");
+    let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    enemy.species.ability = "INNER_FOCUS".to_string();
+
+    let mut secondary_state = battle_state(player.clone(), enemy.clone(), 0);
+    let mut secondary_events = Vec::new();
+    apply_secondary_flinch_effect(
+        &mut secondary_state,
+        BattleSide::Player,
+        "HEADBUTT",
+        EffectChanceResult {
+            chance_percent: 30,
+            succeeds: true,
+            roll: Some(0),
+        },
+        false,
+        &mut secondary_events,
+    );
+    assert!(secondary_state.enemy.flinching);
+    assert!(secondary_events.contains(&BattleEvent::FlinchApplied {
+        side: BattleSide::Player,
+        move_name: "HEADBUTT".to_string(),
+        target: BattleSide::Enemy,
+    }));
+
+    let mut held_player = player;
+    held_player.item = Some("KINGS_ROCK".to_string());
+    let mut held_state = battle_state(held_player, enemy, 0);
+    let mut kings_rock = held_boost_item("KINGS_ROCK", "HELD_FLINCH");
+    kings_rock.parameter = 255;
+    let items = BTreeMap::from([("KINGS_ROCK".to_string(), kings_rock)]);
+    let tackle = move_data("TACKLE", pokemon_type("NORMAL"), 35, 100);
+    let mut held_rng = ScriptedBattleRandom::new(vec![0]);
+    let mut held_events = Vec::new();
+    apply_kings_rock_flinch(
+        &mut held_state,
+        BattleSide::Player,
+        "TACKLE",
+        &tackle,
+        1,
+        &items,
+        &mut held_rng,
+        &mut held_events,
+    )
+    .expect("King's Rock flinch resolves");
+    assert!(held_state.enemy.flinching);
+    assert!(held_events.contains(&BattleEvent::FlinchApplied {
+        side: BattleSide::Player,
+        move_name: "TACKLE".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
+fn stat_down_commands_ignore_target_abilities() {
+    for (move_name, ability, stat) in [
+        ("GROWL_CLEAR", "CLEAR_BODY", Stat::Attack),
+        ("GROWL_WHITE", "WHITE_SMOKE", Stat::Attack),
+        ("GROWL_HYPER", "HYPER_CUTTER", Stat::Attack),
+        ("SAND_ATTACK_KEEN", "KEEN_EYE", Stat::Accuracy),
+    ] {
+        let player = pokemon("MEW", 90, pokemon_type("PSYCHIC"), move_name);
+        let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+        enemy.species.ability = ability.to_string();
+        let mut state = battle_state(player, enemy, 0);
+        let move_data = move_data_with_stat(
+            move_name,
+            pokemon_type("NORMAL"),
+            0,
+            100,
+            "STAT_DOWN_TEST",
+            0,
+            stat,
+            -1,
+        );
+        let mut rng = ScriptedBattleRandom::new(vec![]);
+        let mut events = Vec::new();
+
+        assert!(
+            apply_stat_stage_effect(
+                &mut state,
+                BattleSide::Player,
+                move_name,
+                &move_data,
+                &stat_multipliers(),
+                &mut rng,
+                &mut events,
+            )
+            .expect("stat-down command resolves")
+        );
+
+        assert_eq!(state.enemy.stat_boosts.get(&stat), Some(&-1));
+        assert!(events.contains(&BattleEvent::StatStageChanged {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+            stat,
+            amount: -1,
+            stage_before: 0,
+            stage_after: -1,
+        }));
+    }
+}
+
+#[test]
+fn effect_chance_ignores_battler_abilities() {
+    let mut serene_player = pokemon("MEW", 90, pokemon_type("PSYCHIC"), "HEADBUTT");
+    serene_player.species.ability = "SERENE_GRACE".to_string();
+    let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    let serene_state = battle_state(serene_player, enemy.clone(), 0);
+    let headbutt = move_data_with_effect_chance(
+        "HEADBUTT",
+        pokemon_type("NORMAL"),
+        70,
+        100,
+        "FLINCH_HIT",
+        30,
+    );
+    let mut serene_rng = ScriptedBattleRandom::new(vec![100]);
+    let serene_result = sample_effect_chance_against_target(
+        &serene_state,
+        BattleSide::Player,
+        &headbutt,
+        &mut serene_rng,
+    );
+    assert_eq!(serene_result.chance_percent, 30);
+    assert!(!serene_result.succeeds);
+    assert_eq!(serene_result.roll, Some(100));
+
+    let player = pokemon("MEW", 90, pokemon_type("PSYCHIC"), "HEADBUTT");
+    let mut shield_enemy = enemy;
+    shield_enemy.species.ability = "SHIELD_DUST".to_string();
+    let shield_state = battle_state(player, shield_enemy, 0);
+    let mut shield_rng = ScriptedBattleRandom::new(vec![0]);
+    let shield_result = sample_effect_chance_against_target(
+        &shield_state,
+        BattleSide::Player,
+        &headbutt,
+        &mut shield_rng,
+    );
+    assert_eq!(shield_result.chance_percent, 30);
+    assert!(shield_result.succeeds);
+    assert_eq!(shield_result.roll, Some(0));
+}
+
+#[test]
+fn check_hit_accuracy_ignores_battler_abilities() {
+    let tackle = move_data("TACKLE", pokemon_type("NORMAL"), 35, 50);
+    let mut attacker = pokemon("MEW", 90, pokemon_type("PSYCHIC"), "TACKLE");
+    let mut defender = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+
+    attacker.species.ability = "COMPOUND_EYES".to_string();
+    assert_eq!(
+        accuracy_byte_with_weather(
+            &tackle,
+            BattleSide::Player,
+            &attacker,
+            &defender,
+            &stat_multipliers(),
+            Weather::None,
+            false,
+        )
+        .expect("Compound Eyes accuracy resolves"),
+        127,
+    );
+
+    attacker.species.ability = "HUSTLE".to_string();
+    assert_eq!(
+        accuracy_byte_with_weather(
+            &tackle,
+            BattleSide::Player,
+            &attacker,
+            &defender,
+            &stat_multipliers(),
+            Weather::None,
+            false,
+        )
+        .expect("Hustle accuracy resolves"),
+        127,
+    );
+
+    attacker.species.ability.clear();
+    defender.species.ability = "SAND_VEIL".to_string();
+    assert_eq!(
+        accuracy_byte_with_weather(
+            &tackle,
+            BattleSide::Player,
+            &attacker,
+            &defender,
+            &stat_multipliers(),
+            Weather::Sandstorm,
+            false,
+        )
+        .expect("Sand Veil accuracy resolves"),
+        127,
+    );
+}
+
+#[test]
+fn victory_does_not_run_pickup() {
     let mut player = pokemon("ZIGZAGOON", 30, pokemon_type("NORMAL"), "TACKLE");
     player.species.ability = "PICKUP".to_string();
-    player.level = 1;
     player.item = None;
-    let enemy = pokemon("POOCHYENA", 20, pokemon_type("DARK"), "SPLASH");
-    let mut state =
-        BattleCombatState::new(player.clone(), enemy).with_parties(vec![player], Vec::new());
-    let mut rng = ScriptedBattleRandom::new(vec![0, 0, 0, 0]);
-    let mut events = Vec::new();
-
-    apply_pickup_after_victory(&mut state, &mut rng, &mut events);
-
-    assert_eq!(state.player.item.as_deref(), Some("POTION"));
-    assert!(matches!(
-        events.as_slice(),
-        [BattleEvent::PickupFound { party_index: 0, item_id }] if item_id == "POTION"
-    ));
+    let mut enemy = pokemon("POOCHYENA", 20, pokemon_type("DARK"), "SPLASH");
+    enemy.hp = 1;
+    let state = BattleCombatState::new(player.clone(), enemy.clone())
+        .with_parties(vec![player], vec![enemy]);
+    let moves = BTreeMap::from([
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 100, 100),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX, 0, 0, 0, 0]);
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("victory turn resolves");
+    assert_eq!(outcome.state.player.item, None);
 }
 
 #[test]
-fn weather_intimidate_and_forecast_activate_on_switch_in() {
-    let mut player = pokemon("CASTFORM", 30, pokemon_type("NORMAL"), "SPLASH");
-    player.species.ability = "FORECAST".to_string();
+fn switching_ignores_outgoing_and_incoming_abilities() {
+    let mut player = pokemon("CELEBI", 50, pokemon_type("PSYCHIC"), "SPLASH");
+    player.species.ability = "NATURAL_CURE".to_string();
+    player.status = Some("PARALYSIS".to_string());
+    let enemy = pokemon("RATTATA", 20, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    state.player_party[0] = state.player.clone();
+    state.player_party[1].species.ability = "DROUGHT".to_string();
+
+    switch_battle_combat_pokemon(&mut state, BattleSide::Player, 1)
+        .expect("ability-bearing switch resolves");
+
+    assert_eq!(state.player_party[0].status.as_deref(), Some("PARALYSIS"));
+    assert_eq!(state.weather, Weather::None);
+    assert_eq!(state.player.species.ability, "DROUGHT");
+}
+
+#[test]
+fn battle_start_ignores_switch_in_abilities() {
+    let mut player = pokemon("MEW", 50, pokemon_type("PSYCHIC"), "SPLASH");
+    player.species.ability = "INSOMNIA".to_string();
+    player.status = Some("SLEEP".to_string());
+    player.sleep_turns = 2;
     let mut enemy = pokemon("GROUDON", 20, pokemon_type("GROUND"), "SPLASH");
     enemy.species.ability = "DROUGHT".to_string();
-    let mut state = battle_state(player, enemy, 0);
+    let state = battle_state(player, enemy, 0);
+    let moves = BTreeMap::from([(
+        "SPLASH".to_string(),
+        move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+    )]);
+    let mut rng = ScriptedBattleRandom::new(vec![]);
 
-    apply_switch_in_ability(&mut state, BattleSide::Enemy).expect("Drought switch-in");
-    apply_switch_in_ability(&mut state, BattleSide::Player).expect("Forecast switch-in");
-    assert_eq!(state.weather, Weather::Sun);
-    assert_eq!(state.weather_turns, 0);
-    assert_eq!(state.player_type_override.as_ref().unwrap().type1, "FIRE");
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("battle start resolves");
 
-    state.enemy.species.ability = "INTIMIDATE".to_string();
-    apply_switch_in_ability(&mut state, BattleSide::Enemy).expect("Intimidate switch-in");
-    assert_eq!(state.player.stat_boosts[&Stat::Attack], -1);
+    assert_eq!(outcome.state.player.status.as_deref(), Some("SLEEP"));
+    assert_eq!(outcome.state.player.sleep_turns, 1);
+    assert_eq!(outcome.state.weather, Weather::None);
 }
 
 #[test]
-fn speed_boost_skips_the_switch_in_turn_and_truant_toggles_after_move_attempts() {
-    let mut player = pokemon("NINCADA", 30, pokemon_type("BUG"), "SPLASH");
-    player.species.ability = "SPEED_BOOST".to_string();
-    let mut enemy = pokemon("SLAKOTH", 20, pokemon_type("NORMAL"), "SPLASH");
-    enemy.species.ability = "TRUANT".to_string();
+fn switching_ignores_trapping_abilities() {
+    for (ability, player_type) in [("SHADOW_TAG", "NORMAL"), ("MAGNET_PULL", "STEEL")] {
+        let player = pokemon("MEW", 50, pokemon_type(player_type), "SPLASH");
+        let mut enemy = pokemon("RATTATA", 20, pokemon_type("NORMAL"), "SPLASH");
+        enemy.species.ability = ability.to_string();
+        let moves = BTreeMap::from([(
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        )]);
+        let mut rng = ScriptedBattleRandom::new(vec![]);
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, 0),
+            BattleTurnInput {
+                player: BattleAction::Switch { party_index: 1 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .unwrap_or_else(|error| panic!("switch against {ability} resolves: {error:?}"));
+        assert_eq!(outcome.state.player_party_index, 1);
+        assert!(outcome.events.contains(&BattleEvent::Switched {
+            side: BattleSide::Player,
+            party_index: 1,
+        }));
+    }
+}
+
+#[test]
+fn wild_run_ignores_run_away() {
+    let mut player = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    player.species.ability = "RUN_AWAY".to_string();
+    let enemy = pokemon("PIDGEY", 120, pokemon_type("NORMAL"), "SPLASH");
+    let state = battle_state(player, enemy, 0);
+    let rules = BattleEscapeRules {
+        player_speed_multiplier: 32,
+        enemy_speed_divisor: 4,
+        failed_attempt_bonus: 30,
+        rng_roll_values: 256,
+    };
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX]);
+    let escape = resolve_wild_battle_run(&state, &rules, 0, &stat_multipliers(), &mut rng)
+        .expect("Run Away escape resolves");
+    assert!(!escape.escaped);
+    assert_eq!(escape.roll, Some(u8::MAX));
+    assert_eq!(escape.attempts_after, 1);
+}
+
+#[test]
+fn weather_and_status_commands_ignore_remaining_abilities() {
+    let mut player = pokemon("CASTFORM", 50, pokemon_type("NORMAL"), "SUNNY_DAY");
+    player.species.ability = "FORECAST".to_string();
+    let mut enemy = pokemon("RATTATA", 20, pokemon_type("NORMAL"), "SPLASH");
+    enemy.species.ability = "AIR_LOCK".to_string();
     let mut state = battle_state(player, enemy, 0);
-    let mut rng = ScriptedBattleRandom::new(Vec::new());
+    state.weather = Weather::Rain;
+    assert_eq!(battle_effective_weather(&state), Weather::Rain);
+
     let mut events = Vec::new();
+    apply_weather_effect(
+        &mut state,
+        BattleSide::Player,
+        "SUNNY_DAY",
+        Weather::Sun,
+        &mut events,
+    );
+    assert_eq!(state.player_type_override, None);
 
-    apply_end_turn_abilities(&mut state, &mut rng, &mut events).expect("first turn abilities");
-    assert_eq!(state.player.stat_boosts[&Stat::Speed], 0);
-    advance_truant_after_move_attempt(&mut state, BattleSide::Enemy);
-    assert!(state.enemy_truant_loafing);
-
-    apply_end_turn_abilities(&mut state, &mut rng, &mut events).expect("second turn abilities");
-    assert_eq!(state.player.stat_boosts[&Stat::Speed], 1);
-    advance_truant_after_move_attempt(&mut state, BattleSide::Enemy);
-    assert!(!state.enemy_truant_loafing);
+    state.enemy.species.ability = "SYNCHRONIZE".to_string();
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+    apply_secondary_status_after_success(
+        &mut state,
+        BattleSide::Player,
+        "EMBER",
+        BattleSide::Enemy,
+        "BURN",
+        &BTreeMap::new(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("status effect resolves");
+    assert_eq!(state.enemy.status.as_deref(), Some("BURN"));
+    assert_eq!(state.player.status, None);
 }
 
 #[test]
-fn white_herb_from_the_pickup_table_restores_all_lowered_stages_once() {
+fn held_prevent_poison_blocks_the_direct_status_command_without_consumption() {
+    let player = pokemon("EKANS", 30, pokemon_type("POISON"), "POISON_POWDER");
+    let mut enemy = pokemon("RATTATA", 20, pokemon_type("NORMAL"), "SPLASH");
+    enemy.item = Some("TEST_POISON_GUARD".to_string());
+    let moves = BTreeMap::from([
+        (
+            "POISON_POWDER".to_string(),
+            move_data_with_effect("POISON_POWDER", pokemon_type("POISON"), 0, 100, "POISON"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let items = BTreeMap::from([(
+        "TEST_POISON_GUARD".to_string(),
+        held_boost_item("TEST_POISON_GUARD", "HELD_PREVENT_POISON"),
+    )]);
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX]);
+
+    let outcome = resolve_battle_turn_with_items(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("held poison prevention turn resolves");
+
+    assert_eq!(outcome.state.enemy.status, None);
+    assert_eq!(
+        outcome.state.enemy.item.as_deref(),
+        Some("TEST_POISON_GUARD")
+    );
+    assert!(outcome.events.contains(&BattleEvent::HeldItemProtected {
+        side: BattleSide::Player,
+        move_name: "POISON_POWDER".to_string(),
+        target: BattleSide::Enemy,
+        item_id: "TEST_POISON_GUARD".to_string(),
+        held_effect: "HELD_PREVENT_POISON".to_string(),
+        effect: "POISON".to_string(),
+    }));
+}
+
+#[test]
+fn held_prevent_sleep_is_checked_before_the_already_asleep_branch() {
+    let player = pokemon("DROWZEE", 30, pokemon_type("PSYCHIC"), "HYPNOSIS");
+    let mut enemy = pokemon("RATTATA", 20, pokemon_type("NORMAL"), "SPLASH");
+    enemy.status = Some("SLEEP".to_string());
+    enemy.sleep_turns = 2;
+    enemy.item = Some("TEST_SLEEP_GUARD".to_string());
+    let moves = BTreeMap::from([
+        (
+            "HYPNOSIS".to_string(),
+            move_data_with_effect("HYPNOSIS", pokemon_type("PSYCHIC"), 0, 100, "SLEEP"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let items = BTreeMap::from([(
+        "TEST_SLEEP_GUARD".to_string(),
+        held_boost_item("TEST_SLEEP_GUARD", "HELD_PREVENT_SLEEP"),
+    )]);
+    let mut rng = ScriptedBattleRandom::new(vec![0]);
+
+    let outcome = resolve_battle_turn_with_items(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("held sleep prevention turn resolves");
+
+    assert!(outcome.events.contains(&BattleEvent::HeldItemProtected {
+        side: BattleSide::Player,
+        move_name: "HYPNOSIS".to_string(),
+        target: BattleSide::Enemy,
+        item_id: "TEST_SLEEP_GUARD".to_string(),
+        held_effect: "HELD_PREVENT_SLEEP".to_string(),
+        effect: "SLEEP".to_string(),
+    }));
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::StatusFailed { move_name, .. } if move_name == "HYPNOSIS"
+    )));
+}
+
+#[test]
+fn held_prevention_table_preempts_safeguard_silently_for_secondary_commands() {
+    for (status, held_effect) in [
+        ("POISON", "HELD_PREVENT_POISON"),
+        ("BURN", "HELD_PREVENT_BURN"),
+        ("FREEZE", "HELD_PREVENT_FREEZE"),
+        ("PARALYSIS", "HELD_PREVENT_PARALYZE"),
+    ] {
+        let item_id = format!("TEST_{held_effect}");
+        let player = pokemon("MEW", 50, pokemon_type("PSYCHIC"), "TACKLE");
+        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+        enemy.item = Some(item_id.clone());
+        let mut state = battle_state(player, enemy, 0);
+        state.enemy_safeguard_turns = 3;
+        let items = BTreeMap::from([(item_id.clone(), held_boost_item(&item_id, held_effect))]);
+        let mut rng = ScriptedBattleRandom::new(vec![]);
+        let mut events = Vec::new();
+
+        apply_secondary_status_after_success(
+            &mut state,
+            BattleSide::Player,
+            "SECONDARY_TEST",
+            BattleSide::Enemy,
+            status,
+            &items,
+            &mut rng,
+            &mut events,
+        )
+        .expect("secondary prevention resolves");
+
+        assert_eq!(state.enemy.status, None, "{held_effect}");
+        assert_eq!(state.enemy.item.as_deref(), Some(item_id.as_str()));
+        assert!(events.is_empty(), "{held_effect}: {events:?}");
+    }
+
+    let player = pokemon("MEW", 50, pokemon_type("PSYCHIC"), "CONFUSION");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.item = Some("TEST_CONFUSION_GUARD".to_string());
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_safeguard_turns = 3;
+    let items = BTreeMap::from([(
+        "TEST_CONFUSION_GUARD".to_string(),
+        held_boost_item("TEST_CONFUSION_GUARD", "HELD_PREVENT_CONFUSE"),
+    )]);
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+    let mut events = Vec::new();
+    apply_secondary_confusion_effect(
+        &mut state,
+        BattleSide::Player,
+        "CONFUSION",
+        EffectChanceResult {
+            chance_percent: 100,
+            succeeds: true,
+            roll: None,
+        },
+        &items,
+        &mut rng,
+        &mut events,
+    )
+    .expect("secondary confusion prevention resolves");
+    assert_eq!(state.enemy.confusion_turns, 0);
+    assert_eq!(state.enemy.item.as_deref(), Some("TEST_CONFUSION_GUARD"));
+    assert!(events.is_empty());
+}
+
+#[test]
+fn white_herb_has_no_non_asm_runtime_activation() {
     let mut player = pokemon("ZIGZAGOON", 30, pokemon_type("NORMAL"), "SPLASH");
     player.item = Some("WHITE_HERB".to_string());
     player.stat_boosts.insert(Stat::Attack, -2);
     player.stat_boosts.insert(Stat::Speed, -1);
     player.stat_boosts.insert(Stat::Defense, 2);
     let enemy = pokemon("POOCHYENA", 20, pokemon_type("DARK"), "SPLASH");
-    let mut state = battle_state(player, enemy, 0);
+    let state = battle_state(player, enemy, 0);
+    let moves = BTreeMap::from([(
+        "SPLASH".to_string(),
+        move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+    )]);
     let mut white_herb = held_boost_item("WHITE_HERB", "HELD_WHITE_HERB");
     white_herb.consumable = true;
     let items = BTreeMap::from([("WHITE_HERB".to_string(), white_herb)]);
+    let mut rng = ScriptedBattleRandom::new(vec![0]);
+
+    let outcome = resolve_battle_turn_with_items(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("turn resolves without Generation III held effects");
+
+    assert_eq!(outcome.state.player.stat_boosts[&Stat::Attack], -2);
+    assert_eq!(outcome.state.player.stat_boosts[&Stat::Speed], -1);
+    assert_eq!(outcome.state.player.stat_boosts[&Stat::Defense], 2);
+    assert_eq!(outcome.state.player.item.as_deref(), Some("WHITE_HERB"));
+}
+
+#[test]
+fn held_stat_up_table_raises_one_stage_at_end_turn_and_consumes_only_on_success() {
+    for (held_effect, stat) in [
+        ("HELD_ATTACK_UP", Stat::Attack),
+        ("HELD_DEFENSE_UP", Stat::Defense),
+        ("HELD_SPEED_UP", Stat::Speed),
+        ("HELD_SP_ATTACK_UP", Stat::SpecialAttack),
+        ("HELD_SP_DEFENSE_UP", Stat::SpecialDefense),
+        ("HELD_ACCURACY_UP", Stat::Accuracy),
+        ("HELD_EVASION_UP", Stat::Evasion),
+    ] {
+        let item_id = format!("TEST_{held_effect}");
+        let mut player = pokemon("MEW", 50, pokemon_type("PSYCHIC"), "SPLASH");
+        player.item = Some(item_id.clone());
+        let enemy = pokemon("RATTATA", 20, pokemon_type("NORMAL"), "SPLASH");
+        let mut state = battle_state(player, enemy, 0);
+        let items = BTreeMap::from([(item_id.clone(), held_boost_item(&item_id, held_effect))]);
+        let mut events = Vec::new();
+        let mut rng = ScriptedBattleRandom::new(vec![]);
+
+        if held_effect == "HELD_ATTACK_UP" {
+            apply_berserk_gene_start_of_turn(
+                &mut state,
+                BattleSide::Player,
+                &items,
+                &stat_multipliers(),
+                &mut events,
+            )
+            .expect("non-Berserk held Attack item is ignored at turn start");
+            assert_eq!(state.player.stat_boosts[&Stat::Attack], 0);
+            assert_eq!(state.player.confusion_turns, 0);
+            assert_eq!(state.player.item.as_deref(), Some(item_id.as_str()));
+        }
+
+        apply_end_turn_effects(
+            &mut state,
+            &BTreeMap::new(),
+            &items,
+            &stat_multipliers(),
+            &mut rng,
+            &mut events,
+        )
+        .expect("held stat-up pass resolves");
+
+        assert_eq!(state.player.stat_boosts[&stat], 1, "{held_effect}");
+        assert_eq!(state.player.item, None, "{held_effect}");
+        assert!(events.contains(&BattleEvent::HeldItemActivated {
+            side: BattleSide::Player,
+            item_id,
+            held_effect: held_effect.to_string(),
+        }));
+    }
+
+    let item_id = "TEST_HELD_DEFENSE_UP";
+    let mut player = pokemon("MEW", 50, pokemon_type("PSYCHIC"), "SPLASH");
+    player.item = Some(item_id.to_string());
+    player.stat_boosts.insert(Stat::Defense, 6);
+    let enemy = pokemon("RATTATA", 20, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    let items = BTreeMap::from([(
+        item_id.to_string(),
+        held_boost_item(item_id, "HELD_DEFENSE_UP"),
+    )]);
     let mut events = Vec::new();
+    let mut rng = ScriptedBattleRandom::new(vec![]);
 
-    apply_held_white_herb(&mut state, BattleSide::Player, &items, &mut events)
-        .expect("White Herb activation");
+    apply_end_turn_effects(
+        &mut state,
+        &BTreeMap::new(),
+        &items,
+        &stat_multipliers(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("capped held stat-up pass resolves");
 
-    assert_eq!(state.player.stat_boosts[&Stat::Attack], 0);
-    assert_eq!(state.player.stat_boosts[&Stat::Speed], 0);
-    assert_eq!(state.player.stat_boosts[&Stat::Defense], 2);
-    assert_eq!(state.player.item, None);
-    assert!(matches!(
-        events.as_slice(),
-        [BattleEvent::HeldItemStatsRestored { side: BattleSide::Player, item_id, stats }]
-            if item_id == "WHITE_HERB" && stats.len() == 2
-    ));
+    assert_eq!(state.player.stat_boosts[&Stat::Defense], 6);
+    assert_eq!(state.player.item.as_deref(), Some(item_id));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        BattleEvent::HeldItemActivated { item_id: activated, .. } if activated == item_id
+    )));
 }
 
 #[test]
@@ -901,6 +1706,27 @@ fn glacier_badge_special_defense_boost_preserves_the_asm_accumulator_bug() {
 }
 
 #[test]
+fn battle_speed_applies_badge_after_stage_and_paralysis() {
+    let mut player = pokemon("MEW", 90, pokemon_type("NORMAL"), "SPLASH");
+    player.speed = 100;
+    player.stat_boosts.insert(Stat::Speed, -6);
+    player.status = Some("PARALYSIS".to_string());
+    let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    state.badge_boosts_enabled = true;
+    state.obedience_badges[2] = true;
+    recalculate_loaded_stats(&mut state, BattleSide::Player, &stat_multipliers())
+        .expect("loaded Speed recalculates");
+
+    // 100 at -6 is 25, paralysis quarters that to 6, and Plain Badge adds 0.
+    assert_eq!(
+        battle_speed(&state, BattleSide::Player, &stat_multipliers())
+            .expect("badge-boosted paralyzed Speed resolves"),
+        6,
+    );
+}
+
+#[test]
 fn cascade_badge_applies_the_kanto_water_type_boost() {
     let player = pokemon("TOTODILE", 30, pokemon_type("WATER"), "WATER_GUN");
     let enemy = pokemon("RATTATA", 20, pokemon_type("NORMAL"), "SPLASH");
@@ -1019,6 +1845,146 @@ fn commit_battle_turn_outcome_updates_party_and_enemy_together() {
 }
 
 #[test]
+fn amulet_coin_activation_uses_the_held_effect_not_one_item_id() {
+    let mut state = GameState::default();
+    let mut player = pokemon("CHIKORITA", 45, pokemon_type("GRASS"), "SPLASH");
+    player.item = Some("LUCKY_CHARM".to_string());
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    state.storage.party.pokemon[0] = Some(player.clone());
+    state.battle_active_party_index = Some(0);
+    state.battle_active_enemy_party_index = Some(0);
+    state.battle = BattleMemory::Wild {
+        battle_type: "BATTLETYPE_NORMAL".to_string(),
+        battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+        map_name: "ROUTE_29".to_string(),
+        roaming_slot: None,
+        enemy_pokemon: enemy.clone(),
+        enemy_party: vec![enemy.clone()],
+    };
+    let moves = BTreeMap::from([(
+        "SPLASH".to_string(),
+        move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+    )]);
+    let items = BTreeMap::from([(
+        "LUCKY_CHARM".to_string(),
+        held_boost_item("LUCKY_CHARM", "HELD_AMULET_COIN"),
+    )]);
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+
+    let outcome = resolve_battle_turn_with_items(
+        BattleCombatState::new(player.clone(), enemy.clone())
+            .with_parties(vec![player], vec![enemy]),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("held-effect Amulet Coin turn resolves");
+    commit_battle_turn_outcome(&mut state, 0, &outcome).expect("commit Amulet Coin turn");
+
+    assert!(state.battle_amulet_coin_active);
+}
+
+#[test]
+fn switching_in_an_amulet_coin_effect_item_sets_the_sticky_battle_flag() {
+    let player = pokemon("CHIKORITA", 45, pokemon_type("GRASS"), "SPLASH");
+    let mut benched = pokemon("BAYLEEF", 44, pokemon_type("GRASS"), "SPLASH");
+    benched.item = Some("LUCKY_CHARM".to_string());
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let moves = BTreeMap::from([(
+        "SPLASH".to_string(),
+        move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+    )]);
+    let items = BTreeMap::from([(
+        "LUCKY_CHARM".to_string(),
+        held_boost_item("LUCKY_CHARM", "HELD_AMULET_COIN"),
+    )]);
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+
+    let outcome = resolve_battle_turn_with_items(
+        BattleCombatState::new(player.clone(), enemy.clone())
+            .with_parties(vec![player, benched], vec![enemy]),
+        BattleTurnInput {
+            player: BattleAction::Switch { party_index: 1 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Amulet Coin switch turn resolves");
+
+    assert!(outcome.state.amulet_coin_active);
+    assert_eq!(outcome.state.player_party_index, 1);
+}
+
+#[test]
+fn commit_battle_turn_outcome_keeps_mimic_battle_only() {
+    let mut state = GameState::default();
+    let player = pokemon("MR_MIME", 45, pokemon_type("PSYCHIC_TYPE"), "MIMIC");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    state.storage.party.pokemon[0] = Some(player.clone());
+    state.battle_active_enemy_party_index = Some(0);
+    state.battle = BattleMemory::Wild {
+        battle_type: "BATTLETYPE_NORMAL".to_string(),
+        battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+        map_name: "ROUTE_29".to_string(),
+        roaming_slot: None,
+        enemy_pokemon: enemy.clone(),
+        enemy_party: vec![enemy.clone()],
+    };
+
+    let mut active_player = player.clone();
+    active_player.moves[0] = LearnedMove {
+        name: "TACKLE".to_string(),
+        current_pp: 5,
+        pp_ups: 0,
+    };
+    let mut party_player = player;
+    party_player.moves[0].current_pp = 4;
+    let outcome = BattleTurnOutcome {
+        state: BattleCombatState::new(active_player, enemy.clone())
+            .with_parties(vec![party_player], vec![enemy]),
+        order: vec![BattleSide::Player, BattleSide::Enemy],
+        events: vec![BattleEvent::MimicApplied {
+            side: BattleSide::Player,
+            move_name: "MIMIC".to_string(),
+            slot: 0,
+            replaced_move: "MIMIC".to_string(),
+            copied_move: "TACKLE".to_string(),
+        }],
+    };
+
+    commit_battle_turn_outcome(&mut state, 0, &outcome).expect("commit Mimic turn");
+
+    let stored = state.storage.party.pokemon[0].as_ref().unwrap();
+    assert_eq!(stored.moves[0].name, "MIMIC");
+    assert_eq!(stored.moves[0].current_pp, 4);
+    let committed = state
+        .script_runtime
+        .active_battle_combat
+        .as_ref()
+        .expect("committed active combat");
+    assert_eq!(committed.player.moves[0].name, "TACKLE");
+    assert_eq!(committed.player.moves[0].current_pp, 5);
+    assert_eq!(committed.player_party[0].moves[0].name, "MIMIC");
+    assert_eq!(committed.player_party[0].moves[0].current_pp, 4);
+}
+
+#[test]
 fn commit_battle_turn_outcome_accumulates_enemy_pay_day_with_24_bit_wrap() {
     let mut state = GameState::default();
     let player = pokemon("CHIKORITA", 45, pokemon_type("GRASS"), "TACKLE");
@@ -1059,6 +2025,7 @@ fn commit_battle_turn_outcome_applies_heal_bell_to_player_party() {
     let mut benched = pokemon("CHIKORITA", 45, pokemon_type("GRASS"), "TACKLE");
     benched.status = Some("PARALYSIS".to_string());
     benched.sleep_turns = 3;
+    benched.species.ability = "SOUNDPROOF".to_string();
     let mut empty_status = pokemon("TOTODILE", 45, pokemon_type("WATER"), "TACKLE");
     empty_status.status = None;
     empty_status.sleep_turns = 0;
@@ -1370,7 +2337,6 @@ fn battle_item(id: &str, heal_amount: i16, battle_usable: bool) -> Item {
         battle_capture_ball: None,
         battle_focus_energy: None,
         battle_stat_drop_guard: None,
-        battle_stat_drop_guard_turns: None,
         confusion_heal: None,
         repel_steps: None,
         escape_rope_mode: None,
@@ -1539,7 +2505,45 @@ fn accuracy_byte_uses_asm_accuracy_and_evasion_stages_for_hundred_accuracy_moves
     )
     .expect("accuracy calculates");
 
-    assert_eq!(accuracy, 153);
+    assert_eq!(accuracy, 143);
+}
+
+#[test]
+fn accuracy_and_evasion_apply_as_two_separately_floored_asm_multipliers() {
+    let mut attacker = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "TACKLE");
+    let mut defender = pokemon("PIDGEY", 90, pokemon_type("NORMAL"), "TACKLE");
+    attacker.stat_boosts.insert(Stat::Accuracy, 1);
+    defender.stat_boosts.insert(Stat::Evasion, 1);
+
+    let accuracy = accuracy_byte(
+        &move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        BattleSide::Player,
+        &attacker,
+        &defender,
+        &stat_multipliers(),
+    )
+    .expect("accuracy calculates");
+
+    // floor(floor($ff * 133 / 100) * 75 / 100) = $fe. Combining the
+    // nominally equal stages first incorrectly restores the base $ff.
+    assert_eq!(accuracy, 254);
+}
+
+#[test]
+fn zero_move_accuracy_uses_stat_modifiers_minimum_one_not_a_sure_hit_sentinel() {
+    let attacker = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "TEST_MOVE");
+    let defender = pokemon("PIDGEY", 90, pokemon_type("NORMAL"), "TACKLE");
+
+    let accuracy = accuracy_byte(
+        &move_data("TEST_MOVE", pokemon_type("NORMAL"), 35, 0),
+        BattleSide::Player,
+        &attacker,
+        &defender,
+        &stat_multipliers(),
+    )
+    .expect("zero-byte accuracy calculates");
+
+    assert_eq!(accuracy, 1);
 }
 
 #[test]
@@ -1662,6 +2666,105 @@ fn foresight_ignores_non_advantageous_accuracy_evasion_levels_only() {
 }
 
 #[test]
+fn thunder_splits_critical_and_effect_chance_around_accuracy() {
+    let player = pokemon("PIKACHU", 90, pokemon_type("ELECTRIC"), "THUNDER");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let moves = BTreeMap::from([(
+        "THUNDER".to_string(),
+        move_data_with_effect_chance("THUNDER", pokemon_type("ELECTRIC"), 120, 70, "THUNDER", 30),
+    )]);
+    // critical -> checkhit accuracy -> effectchance -> damagevariation
+    let mut rng = ScriptedBattleRandom::new(vec![200, 0, 200, 221]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Thunder split command stream resolves");
+
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::SecondaryStatusMissed {
+            side: BattleSide::Player,
+            move_name,
+            status,
+            roll: 200,
+            ..
+        } if move_name == "THUNDER" && status == "PARALYSIS"
+    )));
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Damage {
+            side: BattleSide::Player,
+            move_name,
+            critical_roll: 200,
+            roll: 238,
+            ..
+        } if move_name == "THUNDER"
+    )));
+    assert_eq!(rng.calls, 4);
+}
+
+#[test]
+fn protected_thunder_samples_only_its_pre_checkhit_critical_byte() {
+    let player = pokemon("CHIKORITA", 40, pokemon_type("GRASS"), "PROTECT");
+    let enemy = pokemon("PIKACHU", 90, pokemon_type("ELECTRIC"), "THUNDER");
+    let moves = BTreeMap::from([
+        (
+            "PROTECT".to_string(),
+            move_data_with_effect("PROTECT", pokemon_type("NORMAL"), 0, 100, "PROTECT"),
+        ),
+        (
+            "THUNDER".to_string(),
+            move_data_with_effect_chance(
+                "THUNDER",
+                pokemon_type("ELECTRIC"),
+                120,
+                70,
+                "THUNDER",
+                30,
+            ),
+        ),
+    ]);
+    // Protect samples its success byte, then Thunder samples critical before
+    // CheckHit observes Protect. Accuracy, effect chance, and variation skip.
+    let mut rng = ScriptedBattleRandom::new(vec![1, 200]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("protected Thunder resolves");
+
+    assert!(outcome.events.contains(&BattleEvent::MoveProtected {
+        side: BattleSide::Enemy,
+        move_name: "THUNDER".to_string(),
+        target: BattleSide::Player,
+    }));
+    assert_eq!(rng.calls, 2);
+}
+
+#[test]
 fn faster_move_user_attacks_first_and_damage_is_deterministic() {
     let player = pokemon("PIKACHU", 90, pokemon_type("ELECTRIC"), "THUNDERSHOCK");
     let enemy = pokemon("GEODUDE", 20, pokemon_type("ROCK"), "TACKLE");
@@ -1761,6 +2864,8 @@ fn only_disabled_move_automatically_uses_struggle() {
         move_name: "TACKLE".to_string(),
         turns_remaining: 3,
     });
+    state.player_last_move = Some("TACKLE".to_string());
+    state.player_last_counter_move = Some("TACKLE".to_string());
     state.player_substitute_hp = 20;
     state.player_nightmare_source = Some(BattleSide::Enemy);
     state.player_trap = Some(BattleTrapState {
@@ -2883,7 +3988,7 @@ fn active_bide_storeenergy_precedes_and_can_skip_doturn() {
     state.player_last_move = Some("BIDE".to_string());
     state.player_bide_turns = 2;
     state.player_bide_damage = 12;
-    let mut rng = ScriptedBattleRandom::new(vec![0, u8::MAX, u8::MAX]);
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX, u8::MAX]);
 
     let outcome = resolve_battle_turn(
         state,
@@ -3355,6 +4460,393 @@ fn focus_energy_attack_uses_focused_critical_threshold() {
 }
 
 #[test]
+fn stage_three_critical_uses_the_rom_integer_division_threshold() {
+    let mut player = pokemon("RATTATA", 90, pokemon_type("NORMAL"), "SLASH");
+    player.focus_energy = true;
+    let mut rng = ScriptedBattleRandom::new(vec![85]);
+
+    let result = roll_critical_hit(
+        BattleSide::Player,
+        "SLASH",
+        &player,
+        &BTreeMap::new(),
+        &mut rng,
+    )
+    .expect("critical roll resolves");
+
+    assert_eq!(result, (false, 85, 85));
+}
+
+#[test]
+fn critical_command_ignores_target_abilities() {
+    for ability in ["BATTLE_ARMOR", "SHELL_ARMOR"] {
+        let mut player = pokemon("RATTATA", 90, pokemon_type("NORMAL"), "TACKLE");
+        player.focus_energy = true;
+        let mut enemy = pokemon("PIDGEY", 40, pokemon_type("NORMAL"), "SPLASH");
+        enemy.species.ability = ability.to_string();
+        let moves = BTreeMap::from([
+            (
+                "TACKLE".to_string(),
+                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
+        let mut rng = Random::new(22);
+
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, rng.seed()),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .unwrap_or_else(|error| panic!("critical attack against {ability} resolves: {error:?}"));
+
+        assert!(outcome.events.iter().any(|event| matches!(
+            event,
+            BattleEvent::Damage {
+                side: BattleSide::Player,
+                move_name,
+                critical: true,
+                critical_roll: 22,
+                critical_threshold: 32,
+                ..
+            } if move_name == "TACKLE"
+        )));
+    }
+}
+
+#[test]
+fn damage_calculation_ignores_battler_abilities() {
+    for (attacker_ability, defender_ability, move_type) in [
+        ("PURE_POWER", "", "NORMAL"),
+        ("", "THICK_FAT", "FIRE"),
+        ("", "LEVITATE", "GROUND"),
+        ("", "WONDER_GUARD", "NORMAL"),
+    ] {
+        let mut neutral_attacker = pokemon("MEW", 90, pokemon_type(move_type), "TEST_HIT");
+        let mut ability_attacker = neutral_attacker.clone();
+        ability_attacker.species.ability = attacker_ability.to_string();
+        let neutral_defender = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+        let mut ability_defender = neutral_defender.clone();
+        ability_defender.species.ability = defender_ability.to_string();
+        neutral_attacker.species.ability.clear();
+        let move_data = move_data("TEST_HIT", pokemon_type(move_type), 40, 100);
+        let mut neutral_state = battle_state(neutral_attacker, neutral_defender, 0);
+        let mut ability_state = battle_state(ability_attacker, ability_defender, 0);
+        let mut neutral_rng = ScriptedBattleRandom::new(vec![u8::MAX; 8]);
+        let mut ability_rng = ScriptedBattleRandom::new(vec![u8::MAX; 8]);
+        let mut neutral_events = Vec::new();
+        let mut ability_events = Vec::new();
+
+        for (state, rng, events) in [
+            (&mut neutral_state, &mut neutral_rng, &mut neutral_events),
+            (&mut ability_state, &mut ability_rng, &mut ability_events),
+        ] {
+            apply_damage_hit(
+                state,
+                BattleSide::Player,
+                "TEST_HIT",
+                &move_data,
+                1,
+                false,
+                false,
+                &stat_multipliers(),
+                &type_categories(),
+                &type_effectiveness_table(),
+                &weather_modifiers(),
+                &BTreeMap::new(),
+                rng,
+                events,
+            )
+            .expect("damage hit resolves");
+        }
+
+        let damage = |events: &[BattleEvent]| {
+            events.iter().find_map(|event| match event {
+                BattleEvent::Damage { damage, .. } => Some(*damage),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            damage(&ability_events),
+            damage(&neutral_events),
+            "{attacker_ability}/{defender_ability} must not alter damage"
+        );
+        assert!(damage(&ability_events).is_some_and(|damage| damage > 0));
+    }
+}
+
+#[test]
+fn damaging_moves_ignore_absorb_abilities() {
+    for (move_name, move_type, ability) in [
+        ("FIRE_TEST", "FIRE", "FLASH_FIRE"),
+        ("WATER_TEST", "WATER", "WATER_ABSORB"),
+        ("ELECTRIC_TEST", "ELECTRIC", "VOLT_ABSORB"),
+    ] {
+        let player = pokemon("MEW", 90, pokemon_type(move_type), move_name);
+        let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+        enemy.species.ability = ability.to_string();
+        let moves = BTreeMap::from([
+            (
+                move_name.to_string(),
+                move_data(move_name, pokemon_type(move_type), 40, 100),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
+        let mut rng = ScriptedBattleRandom::new(vec![u8::MAX; 8]);
+
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, 0),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .unwrap_or_else(|error| panic!("{move_name} against {ability} resolves: {error:?}"));
+
+        assert!(outcome.events.iter().any(|event| matches!(
+            event,
+            BattleEvent::Damage {
+                side: BattleSide::Player,
+                move_name: damaged_move,
+                damage,
+                ..
+            } if damaged_move == move_name && *damage > 0
+        )));
+    }
+}
+
+#[test]
+fn completed_damage_does_not_run_post_hit_abilities() {
+    for ability in ["ROUGH_SKIN", "COLOR_CHANGE"] {
+        let player = pokemon("MEW", 90, pokemon_type("NORMAL"), "TACKLE");
+        let player_hp = player.hp;
+        let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+        enemy.species.ability = ability.to_string();
+        let mut state = battle_state(player, enemy, 0);
+        let tackle = move_data("TACKLE", pokemon_type("NORMAL"), 40, 100);
+        let mut rng = ScriptedBattleRandom::new(vec![u8::MAX; 8]);
+        let mut events = Vec::new();
+
+        apply_damage_hit(
+            &mut state,
+            BattleSide::Player,
+            "TACKLE",
+            &tackle,
+            1,
+            false,
+            false,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &BTreeMap::new(),
+            &mut rng,
+            &mut events,
+        )
+        .expect("contact damage resolves");
+
+        assert_eq!(state.player.hp, player_hp, "{ability} added recoil");
+        assert_eq!(state.enemy_type_override, None, "{ability} changed type");
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            BattleEvent::RecoilDamage { move_name, .. } if move_name == ability
+        )));
+    }
+}
+
+#[test]
+fn drain_and_recoil_commands_ignore_abilities() {
+    let mut draining_player = pokemon("MEW", 90, pokemon_type("GRASS"), "MEGA_DRAIN");
+    draining_player.hp -= 10;
+    let drain_hp_before = draining_player.hp;
+    let mut ooze_enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    ooze_enemy.species.ability = "LIQUID_OOZE".to_string();
+    let mut drain_state = battle_state(draining_player, ooze_enemy, 0);
+    let mut drain_events = Vec::new();
+    apply_drain_effect(
+        &mut drain_state,
+        BattleSide::Player,
+        "MEGA_DRAIN",
+        10,
+        &mut drain_events,
+    );
+    assert_eq!(drain_state.player.hp, drain_hp_before + 5);
+    assert!(drain_events.contains(&BattleEvent::HpDrained {
+        side: BattleSide::Player,
+        move_name: "MEGA_DRAIN".to_string(),
+        target: BattleSide::Enemy,
+        damage: 10,
+        hp_before: drain_hp_before,
+        hp_after: drain_hp_before + 5,
+        amount: 5,
+    }));
+
+    let mut recoil_player = pokemon("MEW", 90, pokemon_type("NORMAL"), "TAKE_DOWN");
+    recoil_player.species.ability = "ROCK_HEAD".to_string();
+    let recoil_hp_before = recoil_player.hp;
+    let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    let mut recoil_state = battle_state(recoil_player, enemy, 0);
+    let mut recoil_events = Vec::new();
+    apply_recoil_effect(
+        &mut recoil_state,
+        BattleSide::Player,
+        "TAKE_DOWN",
+        10,
+        &mut recoil_events,
+    );
+    assert_eq!(recoil_state.player.hp, recoil_hp_before - 2);
+    assert!(recoil_events.contains(&BattleEvent::RecoilDamage {
+        side: BattleSide::Player,
+        move_name: "TAKE_DOWN".to_string(),
+        damage_dealt: 10,
+        recoil_damage: 2,
+        hp_before: recoil_hp_before,
+        hp_after: recoil_hp_before - 2,
+    }));
+}
+
+#[test]
+fn action_and_pp_flow_ignore_truant_and_pressure() {
+    let mut player = pokemon("MEW", 90, pokemon_type("NORMAL"), "TACKLE");
+    player.species.ability = "TRUANT".to_string();
+    let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    enemy.species.ability = "PRESSURE".to_string();
+    let state = battle_state(player, enemy, 0);
+    let moves = BTreeMap::from([
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 40, 100),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX; 8]);
+
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Truant/Pressure turn resolves");
+
+    assert_eq!(outcome.state.player.moves[0].current_pp, 4);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Damage {
+            side: BattleSide::Player,
+            damage,
+            ..
+        } if *damage > 0
+    )));
+}
+
+#[test]
+fn sleep_countdown_ignores_early_bird() {
+    let mut player = pokemon("MEW", 90, pokemon_type("NORMAL"), "TACKLE");
+    player.species.ability = "EARLY_BIRD".to_string();
+    player.status = Some("SLEEP".to_string());
+    player.sleep_turns = 2;
+    let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    let mut events = Vec::new();
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+    let blocked = move_blocked_before_disabled_move(
+        &mut state,
+        BattleSide::Player,
+        "TACKLE",
+        &move_data("TACKLE", pokemon_type("NORMAL"), 40, 100),
+        &BTreeMap::new(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("sleep check resolves");
+    assert!(blocked);
+    assert_eq!(state.player.status.as_deref(), Some("SLEEP"));
+    assert_eq!(state.player.sleep_turns, 1);
+}
+
+#[test]
+fn battle_speed_ignores_weather_abilities() {
+    for (ability, weather) in [("SWIFT_SWIM", Weather::Rain), ("CHLOROPHYLL", Weather::Sun)] {
+        let mut player = pokemon("MEW", 90, pokemon_type("NORMAL"), "SPLASH");
+        player.species.ability = ability.to_string();
+        let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+        let mut state = battle_state(player, enemy, 0);
+        state.weather = weather;
+        let mut neutral_state = state.clone();
+        neutral_state.player.species.ability.clear();
+        let neutral_speed = battle_speed(&neutral_state, BattleSide::Player, &stat_multipliers())
+            .expect("neutral battle speed resolves");
+        assert_eq!(
+            battle_speed(&state, BattleSide::Player, &stat_multipliers())
+                .expect("battle speed resolves"),
+            neutral_speed,
+        );
+    }
+}
+
+#[test]
+fn end_turn_ignores_speed_boost_and_shed_skin() {
+    let mut player = pokemon("MEW", 90, pokemon_type("NORMAL"), "SPLASH");
+    player.species.ability = "SPEED_BOOST".to_string();
+    let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    enemy.species.ability = "SHED_SKIN".to_string();
+    enemy.status = Some("PARALYSIS".to_string());
+    let mut state = battle_state(player, enemy, 0);
+    let mut rng = ScriptedBattleRandom::new(vec![0, 0]);
+    let mut events = Vec::new();
+    apply_end_turn_effects(
+        &mut state,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &stat_multipliers(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("end turn resolves");
+    assert_eq!(state.player.stat_boosts.get(&Stat::Speed), Some(&0));
+    assert_eq!(state.enemy.status.as_deref(), Some("PARALYSIS"));
+    assert_eq!(rng.calls, 0);
+}
+
+#[test]
 fn high_critical_moves_use_the_asm_two_stage_bonus() {
     let attacker = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SLASH");
     for move_name in [
@@ -3376,6 +4868,27 @@ fn high_critical_moves_use_the_asm_two_stage_bonus() {
         )
         .expect("critical roll resolves");
         assert_eq!(threshold, 64, "{move_name}");
+    }
+}
+
+#[test]
+fn species_critical_items_jump_directly_to_the_stage_two_table_entry() {
+    for (species, item_id) in [("CHANSEY", "LUCKY_PUNCH"), ("FARFETCH_D", "STICK")] {
+        let mut attacker = pokemon(species, 40, pokemon_type("NORMAL"), "SLASH");
+        attacker.item = Some(item_id.to_string());
+        attacker.focus_energy = true;
+        let mut rng = ScriptedBattleRandom::new(vec![100]);
+
+        let result = roll_critical_hit(
+            BattleSide::Player,
+            "SLASH",
+            &attacker,
+            &BTreeMap::new(),
+            &mut rng,
+        )
+        .unwrap_or_else(|error| panic!("{species}/{item_id} critical roll resolves: {error:?}"));
+
+        assert_eq!(result, (false, 100, 64), "{species}/{item_id}");
     }
 }
 
@@ -3477,6 +4990,62 @@ fn obedience_swap_uses_the_complete_random_byte() {
     assert_eq!(swap_nibbles(0xf0), 0x0f);
     assert!(swap_nibbles(0x02) < 50);
     assert!(swap_nibbles(0x05) >= 50);
+}
+
+#[test]
+fn ignored_orders_while_sleeping_preserves_prior_move_history() {
+    let mut player = pokemon("RATTATA", 50, pokemon_type("NORMAL"), "SNORE");
+    player.original_trainer_id = 2;
+    player.status = Some("SLEEP".to_string());
+    player.sleep_turns = 2;
+    let mut state = battle_state(
+        player,
+        pokemon("PIDGEY", 20, pokemon_type("NORMAL"), "TACKLE"),
+        0,
+    )
+    .with_obedience(1, [false; 8]);
+    state.player_last_move = Some("TACKLE".to_string());
+    state.player_last_counter_move = Some("TACKLE".to_string());
+    state.player_encore = Some(BattleEncoreState {
+        move_name: "SNORE".to_string(),
+        turns_remaining: 3,
+    });
+    let moves = BTreeMap::from([(
+        "SNORE".to_string(),
+        move_data_with_effect("SNORE", pokemon_type("NORMAL"), 40, 100, "SNORE"),
+    )]);
+    // swap(1) = 16: below level + obedience (30), but not below the
+    // badge-derived obedience level (10), so IgnoreSleepOnly runs.
+    let mut rng = ScriptedBattleRandom::new(vec![1]);
+    let mut events = Vec::new();
+
+    let result = apply_player_obedience(
+        &mut state,
+        0,
+        &moves,
+        &BTreeMap::new(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("sleep-only disobedience resolves");
+
+    assert!(matches!(result, ObedienceAction::Stop));
+    assert!(events.contains(&BattleEvent::DisobedienceIgnoredSleeping {
+        side: BattleSide::Player,
+    }));
+    assert_eq!(state.player_last_move.as_deref(), Some("TACKLE"));
+    assert_eq!(state.player_last_counter_move.as_deref(), Some("TACKLE"));
+    assert_eq!(
+        state.player_encore,
+        Some(BattleEncoreState {
+            move_name: "SNORE".to_string(),
+            turns_remaining: 3,
+        })
+    );
 }
 
 #[test]
@@ -3611,6 +5180,10 @@ fn reversal_power_uses_exact_hp_ratio_breakpoints() {
     assert_eq!(reversal_power(16, 48), 80);
     assert_eq!(reversal_power(32, 48), 40);
     assert_eq!(reversal_power(33, 48), 20);
+    // For two-byte max HP, the cartridge shifts both HP*48 and max HP right
+    // twice before Divide. That truncation moves this value across the
+    // 16-pixel table boundary: 1092 / 64 = 17, so power is 40 rather than 80.
+    assert_eq!(reversal_power(91, 257), 40);
     assert_eq!(reversal_power(10, 0), 20);
 
     let base_reversal =
@@ -3791,6 +5364,119 @@ fn pursuit_keeps_normal_power_when_target_is_not_switching() {
             ..
         } if move_name == "PURSUIT"
     )));
+}
+
+#[test]
+fn pursuit_miss_doubles_retained_damage_before_accuracy() {
+    let player = pokemon("UMBREON", 120, pokemon_type("DARK"), "PURSUIT");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let moves = BTreeMap::from([(
+        "PURSUIT".to_string(),
+        move_data_with_effect("PURSUIT", pokemon_type("DARK"), 40, 1, "PURSUIT"),
+    )]);
+    // critical -> variation -> pursuit doubling -> checkhit
+    let mut rng = ScriptedBattleRandom::new(vec![0, u8::MAX, u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("missed Pursuit switch resolves");
+
+    assert!(outcome.events.contains(&BattleEvent::PursuitPower {
+        side: BattleSide::Player,
+        move_name: "PURSUIT".to_string(),
+        target: BattleSide::Enemy,
+        power: 80,
+    }));
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            ..
+        } if move_name == "PURSUIT"
+    )));
+    assert_eq!(rng.calls, 3);
+}
+
+#[test]
+fn pursuit_doubles_final_rounded_damage_for_switching_target() {
+    let player = pokemon("UMBREON", 120, pokemon_type("DARK"), "PURSUIT");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.hp = 1_000;
+    enemy.max_hp = 1_000;
+    let pursuit = move_data_with_effect("PURSUIT", pokemon_type("DARK"), 40, 100, "PURSUIT");
+    let mut base_state = battle_state(player, enemy, 0);
+    let mut switching_state = base_state.clone();
+    let mut base_rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX]);
+    let mut switching_rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX]);
+    let mut base_events = Vec::new();
+    let mut switching_events = Vec::new();
+
+    apply_damage_hit(
+        &mut base_state,
+        BattleSide::Player,
+        "PURSUIT",
+        &pursuit,
+        1,
+        false,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BTreeMap::new(),
+        &mut base_rng,
+        &mut base_events,
+    )
+    .expect("base Pursuit damage resolves");
+    apply_damage_hit(
+        &mut switching_state,
+        BattleSide::Player,
+        "PURSUIT",
+        &pursuit,
+        1,
+        true,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BTreeMap::new(),
+        &mut switching_rng,
+        &mut switching_events,
+    )
+    .expect("switching-target Pursuit damage resolves");
+
+    let dealt_damage = |events: &[BattleEvent]| {
+        events
+            .iter()
+            .find_map(|event| match event {
+                BattleEvent::Damage {
+                    side: BattleSide::Player,
+                    move_name,
+                    damage,
+                    ..
+                } if move_name == "PURSUIT" => Some(*damage),
+                _ => None,
+            })
+            .expect("Pursuit damage event")
+    };
+    assert_eq!(
+        dealt_damage(&switching_events),
+        dealt_damage(&base_events) * 2
+    );
 }
 
 #[test]
@@ -3992,6 +5678,67 @@ fn beat_up_hits_once_for_each_eligible_party_member() {
 }
 
 #[test]
+fn beat_up_samples_critical_for_every_slot_but_variation_only_for_eligible_hits() {
+    let player = pokemon("UMBREON", 120, pokemon_type("DARK"), "BEAT_UP");
+    let mut poisoned = pokemon("ZUBAT", 80, pokemon_type("POISON"), "TACKLE");
+    poisoned.status = Some("POISON".to_string());
+    let mut fainted = pokemon("RATTATA", 70, pokemon_type("NORMAL"), "TACKLE");
+    fainted.hp = 0;
+    let mut enemy = pokemon("SENTRET", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.hp = 200;
+    let moves = BTreeMap::from([
+        (
+            "BEAT_UP".to_string(),
+            move_data_with_effect("BEAT_UP", pokemon_type("DARK"), 10, 100, "BEAT_UP"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    // Slot 0: critical, variation. Slots 1 and 2: critical only, because
+    // BeatUp rejects their status/HP after the Critical command has run.
+    let mut rng = ScriptedBattleRandom::new(vec![200, u8::MAX, 201, 0]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player.clone(), enemy.clone(), 0)
+            .with_parties(vec![player, poisoned, fainted], vec![enemy]),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Beat Up visits ineligible slots");
+
+    assert_eq!(
+        outcome
+            .events
+            .iter()
+            .filter(|event| matches!(event, BattleEvent::BeatUpParticipant { .. }))
+            .count(),
+        1
+    );
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Damage {
+            move_name,
+            critical_roll: 200,
+            roll: u8::MAX,
+            ..
+        } if move_name == "BEAT_UP"
+    )));
+    assert_eq!(rng.calls, 4);
+    assert_eq!(outcome.state.critical_hit_register, 1);
+}
+
+#[test]
 fn one_member_party_beat_up_skips_the_kings_rock_tail() {
     let mut player = pokemon("UMBREON", 120, pokemon_type("DARK"), "BEAT_UP");
     player.item = Some("KINGS_ROCK".to_string());
@@ -4010,7 +5757,7 @@ fn one_member_party_beat_up_skips_the_kings_rock_tail() {
     let mut kings_rock = held_boost_item("KINGS_ROCK", "HELD_FLINCH");
     kings_rock.parameter = 255;
     let items = BTreeMap::from([("KINGS_ROCK".to_string(), kings_rock)]);
-    let mut rng = Random::new(28);
+    let mut rng = ScriptedBattleRandom::new(vec![0, u8::MAX]);
 
     let outcome = resolve_battle_turn_with_items(
         BattleCombatState::new(player.clone(), enemy.clone())
@@ -4046,6 +5793,139 @@ fn one_member_party_beat_up_skips_the_kings_rock_tail() {
             ..
         } if move_name == "BEAT_UP"
     )));
+    assert_eq!(rng.calls, 2);
+    assert_eq!(outcome.state.critical_hit_register, 0);
+}
+
+#[test]
+fn one_ineligible_member_beat_up_rolls_critical_then_skips_kings_rock() {
+    let mut player = pokemon("UMBREON", 120, pokemon_type("DARK"), "BEAT_UP");
+    player.status = Some("POISON".to_string());
+    player.item = Some("KINGS_ROCK".to_string());
+    let enemy = pokemon("SENTRET", 40, pokemon_type("NORMAL"), "SPLASH");
+    let moves = BTreeMap::from([
+        (
+            "BEAT_UP".to_string(),
+            move_data_with_effect("BEAT_UP", pokemon_type("DARK"), 10, 100, "BEAT_UP"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut kings_rock = held_boost_item("KINGS_ROCK", "HELD_FLINCH");
+    kings_rock.parameter = 255;
+    let items = BTreeMap::from([("KINGS_ROCK".to_string(), kings_rock)]);
+    // Critical runs before BeatUp rejects the poisoned sole participant. The
+    // one-member EndLoop branch then jumps to EndMoveEffect, leaving byte 0
+    // unused instead of treating it as a guaranteed King's Rock success.
+    let mut rng = ScriptedBattleRandom::new(vec![200, 0]);
+
+    let outcome = resolve_battle_turn_with_items(
+        BattleCombatState::new(player.clone(), enemy.clone())
+            .with_parties(vec![player], vec![enemy]),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("ineligible one-member Beat Up resolves");
+
+    assert!(outcome.events.contains(&BattleEvent::NoEffect {
+        side: BattleSide::Player,
+        move_name: "BEAT_UP".to_string(),
+    }));
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::FlinchApplied {
+            side: BattleSide::Player,
+            move_name,
+            ..
+        } if move_name == "BEAT_UP"
+    )));
+    assert_eq!(rng.calls, 1);
+}
+
+#[test]
+fn wild_enemy_beat_up_uses_only_the_active_attacker_and_ignores_its_status() {
+    let mut player = pokemon("SENTRET", 40, pokemon_type("NORMAL"), "SPLASH");
+    player.hp = 200;
+    player.max_hp = 200;
+    let mut enemy = pokemon("HOUNDOUR", 120, pokemon_type("DARK"), "BEAT_UP");
+    enemy.status = Some("POISON".to_string());
+    let bench = pokemon("MURKROW", 90, pokemon_type("DARK"), "TACKLE");
+    let mut state = BattleCombatState::new(player.clone(), enemy.clone())
+        .with_parties(vec![player], vec![enemy, bench]);
+    let beat_up = move_data_with_effect("BEAT_UP", pokemon_type("DARK"), 10, 100, "BEAT_UP");
+    // The wild branch bypasses party HP/status checks: active critical then
+    // variation. EndLoop takes its one-attacker exit without visiting bench.
+    let mut rng = ScriptedBattleRandom::new(vec![200, u8::MAX]);
+    let mut events = Vec::new();
+
+    apply_beat_up_effect(
+        &mut state,
+        BattleSide::Enemy,
+        "BEAT_UP",
+        &beat_up,
+        true,
+        false,
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BTreeMap::new(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("wild-enemy Beat Up resolves");
+
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                BattleEvent::BeatUpParticipant {
+                    side: BattleSide::Enemy,
+                    party_index,
+                    species,
+                    ..
+                } => Some((*party_index, species.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![(0, "HOUNDOUR")]
+    );
+    assert!(state.player.hp < 200);
+    assert_eq!(rng.calls, 2);
+}
+
+#[test]
+fn wild_enemy_beat_up_uses_the_players_loaded_special_defense_badge_boost() {
+    let mut player = pokemon("SENTRET", 40, pokemon_type("NORMAL"), "SPLASH");
+    player.special_attack = 206;
+    player.special_defense = 100;
+    let mut enemy = pokemon("HOUNDOUR", 120, pokemon_type("DARK"), "BEAT_UP");
+    enemy.special_attack = 100;
+    let mut badges = [false; 8];
+    badges[6] = true;
+    let badge_state = BattleCombatState::new(player, enemy)
+        .with_obedience(1, badges)
+        .with_badge_boosts_enabled(true);
+    let no_badge_state = badge_state.clone().with_badge_boosts_enabled(false);
+
+    let calculate = |state: &BattleCombatState| {
+        calculate_wild_enemy_beat_up_damage(state, BattleSide::Enemy, 250, 0, false, u8::MAX)
+            .expect("wild-enemy Beat Up damage")
+            .damage
+    };
+
+    assert!(calculate(&badge_state) < calculate(&no_badge_state));
 }
 
 #[test]
@@ -4227,7 +6107,10 @@ fn baton_pass_preserves_modeled_passable_state_while_switching() {
     player.stat_boosts.insert(Stat::Attack, 3);
     player.stat_boosts.insert(Stat::Speed, -2);
     player.focus_energy = true;
-    let ally = pokemon("UMBREON", 90, pokemon_type("DARK"), "TACKLE");
+    let mut ally = pokemon("UMBREON", 90, pokemon_type("DARK"), "TACKLE");
+    ally.status = Some("PARALYSIS".to_string());
+    let ally_attack = ally.attack;
+    let ally_speed = ally.speed;
     let enemy = pokemon("SENTRET", 40, pokemon_type("NORMAL"), "SPLASH");
     let moves = BTreeMap::from([
         (
@@ -4279,6 +6162,15 @@ fn baton_pass_preserves_modeled_passable_state_while_switching() {
         outcome.state.player.stat_boosts.get(&Stat::Speed),
         Some(&-2)
     );
+    assert_eq!(
+        outcome.state.player_loaded_stats.attack,
+        apply_stage(&stat_multipliers(), ally_attack, 3).unwrap()
+    );
+    assert_eq!(
+        outcome.state.player_loaded_stats.speed,
+        apply_stage(&stat_multipliers(), ally_speed, -2).unwrap(),
+        "Baton Pass's final stat-level application overwrites the switch-in paralysis penalty"
+    );
     assert_eq!(outcome.state.player.confusion_turns, 0);
     assert!(outcome.state.player.focus_energy);
     assert_eq!(outcome.state.player_substitute_hp, 20);
@@ -4290,6 +6182,11 @@ fn baton_pass_preserves_modeled_passable_state_while_switching() {
     assert!(!outcome.state.player.flinching);
     assert_eq!(outcome.state.player_party[1], outcome.state.player);
     assert_eq!(outcome.state.player_disable, None);
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(
+        outcome.state.player_last_counter_move.as_deref(),
+        Some("BATON_PASS")
+    );
     assert!(outcome.events.contains(&BattleEvent::BatonPassed {
         side: BattleSide::Player,
         move_name: "BATON_PASS".to_string(),
@@ -4305,7 +6202,7 @@ fn baton_pass_preserves_modeled_passable_state_while_switching() {
 }
 
 #[test]
-fn baton_pass_switch_in_triggers_berserk_gene_from_item_catalog() {
+fn baton_pass_switch_in_berserk_gene_uses_end_turn_stat_table() {
     let mut player = pokemon("EEVEE", 120, pokemon_type("NORMAL"), "BATON_PASS");
     player.confusion_turns = 3;
     let mut ally = pokemon("UMBREON", 90, pokemon_type("DARK"), "TACKLE");
@@ -4325,7 +6222,7 @@ fn baton_pass_switch_in_triggers_berserk_gene_from_item_catalog() {
         "BERSERK_GENE".to_string(),
         held_status_item("BERSERK_GENE", "HELD_ATTACK_UP"),
     )]);
-    let mut rng = Random::new(6);
+    let mut rng = Random::new(8);
     let state = battle_state(player.clone(), enemy.clone(), rng.seed())
         .with_parties(vec![player, ally], vec![enemy]);
 
@@ -4349,37 +6246,13 @@ fn baton_pass_switch_in_triggers_berserk_gene_from_item_catalog() {
     )
     .expect("baton pass Berserk Gene resolves");
 
-    assert_eq!(outcome.state.player.item.as_deref(), Some("BERSERK_GENE"));
+    assert_eq!(outcome.state.player.item, None);
     assert_eq!(
         outcome.state.player.stat_boosts.get(&Stat::Attack),
-        Some(&0)
+        Some(&1)
     );
     assert_eq!(outcome.state.player.confusion_turns, 2);
-    assert!(!outcome.events.iter().any(|event| matches!(
-        event,
-        BattleEvent::HeldItemActivated { item_id, .. } if item_id == "BERSERK_GENE"
-    )));
-
-    let mut next_turn_state = outcome.state;
-    let mut start_events = Vec::new();
-    apply_berserk_gene_start_of_turn(
-        &mut next_turn_state,
-        BattleSide::Player,
-        &items,
-        &mut start_events,
-    )
-    .expect("Berserk Gene next-turn boundary resolves");
-    assert_eq!(next_turn_state.player.item, None);
-    assert_eq!(
-        next_turn_state
-            .player
-            .stat_boosts
-            .get(&Stat::Attack)
-            .copied(),
-        Some(2)
-    );
-    assert_eq!(next_turn_state.player.confusion_turns, 2);
-    assert!(start_events.contains(&BattleEvent::HeldItemActivated {
+    assert!(outcome.events.contains(&BattleEvent::HeldItemActivated {
         side: BattleSide::Player,
         item_id: "BERSERK_GENE".to_string(),
         held_effect: "HELD_ATTACK_UP".to_string(),
@@ -4389,8 +6262,8 @@ fn baton_pass_switch_in_triggers_berserk_gene_from_item_catalog() {
 #[test]
 fn magnitude_power_uses_exact_random_roll_breakpoints() {
     assert_eq!(magnitude_power(0), 10);
-    assert_eq!(magnitude_power(12), 10);
-    assert_eq!(magnitude_power(13), 30);
+    assert_eq!(magnitude_power(13), 10);
+    assert_eq!(magnitude_power(14), 30);
     assert_eq!(magnitude_power(38), 30);
     assert_eq!(magnitude_power(39), 50);
     assert_eq!(magnitude_power(89), 50);
@@ -4466,6 +6339,123 @@ fn magnitude_roll_selects_power_before_damage() {
 }
 
 #[test]
+fn magnitude_miss_samples_critical_power_and_variation_before_accuracy() {
+    let player = pokemon("GEODUDE", 90, pokemon_type("ROCK"), "MAGNITUDE");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let moves = BTreeMap::from([(
+        "MAGNITUDE".to_string(),
+        move_data_with_effect("MAGNITUDE", pokemon_type("GROUND"), 1, 1, "MAGNITUDE"),
+    )]);
+    // critical -> getmagnitude -> damagevariation -> checkhit
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, 0, u8::MAX, u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Magnitude miss resolves");
+
+    assert!(outcome.events.contains(&BattleEvent::MagnitudePower {
+        side: BattleSide::Player,
+        move_name: "MAGNITUDE".to_string(),
+        roll: 0,
+        power: 10,
+    }));
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            ..
+        } if move_name == "MAGNITUDE"
+    )));
+    assert_eq!(rng.calls, 4);
+}
+
+#[test]
+fn magnitude_doubles_final_damage_against_dig_after_checkhit() {
+    let player = pokemon("GEODUDE", 90, pokemon_type("ROCK"), "MAGNITUDE");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "DIG");
+    enemy.hp = 1_000;
+    enemy.max_hp = 1_000;
+    let magnitude = move_data_with_effect("MAGNITUDE", pokemon_type("GROUND"), 1, 100, "MAGNITUDE");
+    let mut base_state = battle_state(player, enemy, 0);
+    let mut dig_state = base_state.clone();
+    dig_state.enemy_airborne_move = Some("DIG".to_string());
+    let mut base_rng = ScriptedBattleRandom::new(vec![u8::MAX, 90, u8::MAX]);
+    let mut dig_rng = ScriptedBattleRandom::new(vec![u8::MAX, 90, u8::MAX]);
+    let mut base_events = Vec::new();
+    let mut dig_events = Vec::new();
+
+    apply_damage_hit(
+        &mut base_state,
+        BattleSide::Player,
+        "MAGNITUDE",
+        &magnitude,
+        1,
+        false,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BTreeMap::new(),
+        &mut base_rng,
+        &mut base_events,
+    )
+    .expect("base Magnitude damage resolves");
+    apply_damage_hit(
+        &mut dig_state,
+        BattleSide::Player,
+        "MAGNITUDE",
+        &magnitude,
+        1,
+        false,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BTreeMap::new(),
+        &mut dig_rng,
+        &mut dig_events,
+    )
+    .expect("underground Magnitude damage resolves");
+
+    let dealt_damage = |events: &[BattleEvent]| {
+        events
+            .iter()
+            .find_map(|event| match event {
+                BattleEvent::Damage {
+                    side: BattleSide::Player,
+                    move_name,
+                    damage,
+                    ..
+                } if move_name == "MAGNITUDE" => Some(*damage),
+                _ => None,
+            })
+            .expect("Magnitude damage event")
+    };
+    assert_eq!(dealt_damage(&dig_events), dealt_damage(&base_events) * 2);
+    assert!(dig_events.contains(&BattleEvent::EarthquakePower {
+        side: BattleSide::Player,
+        move_name: "MAGNITUDE".to_string(),
+        target_move: "DIG".to_string(),
+        power: 140,
+    }));
+}
+
+#[test]
 fn hidden_power_type_and_power_use_exact_dv_formula() {
     let mut fighting = pokemon("UNOWN", 90, pokemon_type("PSYCHIC_TYPE"), "HIDDEN_POWER");
     fighting.dvs = Dv::from_non_hp(0, 0, 0, 0);
@@ -4482,8 +6472,20 @@ fn hidden_power_type_and_power_use_exact_dv_formula() {
     electric.dvs = Dv::from_non_hp(2, 3, 8, 1);
     assert_eq!(
         hidden_power_type_power(&electric),
-        (pokemon_type("ELECTRIC"), 41)
+        (pokemon_type("ELECTRIC"), 36)
     );
+
+    // HiddenPowerDamage packs the high DV bits in cartridge register order:
+    // Attack contributes bit 3, Defense bit 2, Speed bit 1, and Special bit 0.
+    for (dvs, expected_power) in [
+        (Dv::from_non_hp(8, 0, 0, 0), 51),
+        (Dv::from_non_hp(0, 8, 0, 0), 41),
+        (Dv::from_non_hp(0, 0, 8, 0), 36),
+        (Dv::from_non_hp(0, 0, 0, 8), 33),
+    ] {
+        electric.dvs = dvs;
+        assert_eq!(hidden_power_type_power(&electric).1, expected_power);
+    }
 }
 
 #[test]
@@ -4558,6 +6560,99 @@ fn present_roll_uses_exact_random_roll_breakpoints() {
 }
 
 #[test]
+fn present_heal_samples_critical_before_the_present_roll() {
+    let player = pokemon("DELIBIRD", 90, pokemon_type("ICE"), "PRESENT");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.hp = 10;
+    enemy.max_hp = 44;
+    let moves = BTreeMap::from([
+        (
+            "PRESENT".to_string(),
+            move_data_with_effect("PRESENT", pokemon_type("NORMAL"), 1, 100, "PRESENT"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    // CheckHit needs no byte at perfect accuracy. Critical consumes 0, then
+    // Present consumes 205 and takes its heal branch; no variation follows.
+    let mut rng = ScriptedBattleRandom::new(vec![0, 205, u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Present heal command order resolves");
+
+    assert!(outcome.events.contains(&BattleEvent::PresentHeal {
+        side: BattleSide::Player,
+        move_name: "PRESENT".to_string(),
+        target: BattleSide::Enemy,
+        roll: 205,
+        hp_before: 10,
+        hp_after: 21,
+        amount: 11,
+    }));
+    assert_eq!(rng.calls, 2);
+    assert_eq!(outcome.state.critical_hit_register, 1);
+}
+
+#[test]
+fn immune_present_samples_critical_before_stab_rejects_the_move() {
+    let player = pokemon("DELIBIRD", 90, pokemon_type("ICE"), "PRESENT");
+    let enemy = pokemon("GASTLY", 40, pokemon_type("GHOST"), "SPLASH");
+    let enemy_hp = enemy.hp;
+    let moves = BTreeMap::from([
+        (
+            "PRESENT".to_string(),
+            move_data_with_effect("PRESENT", pokemon_type("NORMAL"), 1, 100, "PRESENT"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    // Present's stream runs Critical and DamageStats before its embedded STAB
+    // command discovers immunity. The Present power/heal byte is not sampled.
+    let mut rng = ScriptedBattleRandom::new(vec![0]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("immune Present resolves");
+
+    assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert!(outcome.events.contains(&BattleEvent::NoEffect {
+        side: BattleSide::Player,
+        move_name: "PRESENT".to_string(),
+    }));
+    assert_eq!(rng.calls, 1);
+    assert_eq!(outcome.state.critical_hit_register, 0);
+}
+
+#[test]
 fn present_damage_branch_selects_power_before_damage() {
     let player = pokemon("DELIBIRD", 90, pokemon_type("ICE"), "PRESENT");
     let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
@@ -4571,10 +6666,11 @@ fn present_damage_branch_selects_power_before_damage() {
             move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
         ),
     ]);
-    let mut rng = Random::new(1);
+    // Critical, Present power selection, then damage variation.
+    let mut rng = ScriptedBattleRandom::new(vec![0, 64, u8::MAX]);
 
     let outcome = resolve_battle_turn(
-        battle_state(player, enemy, rng.seed()),
+        battle_state(player, enemy, 0),
         BattleTurnInput {
             player: BattleAction::Move { slot: 0 },
             enemy: BattleAction::Move { slot: 0 },
@@ -4604,6 +6700,7 @@ fn present_damage_branch_selects_power_before_damage() {
             ..
         } if move_name == "PRESENT" && *damage > 0
     )));
+    assert_eq!(outcome.state.critical_hit_register, 0);
 }
 
 #[test]
@@ -4616,8 +6713,8 @@ fn link_colosseum_present_uses_the_stab_clobbered_damage_registers() {
     state.link_battle = true;
     state.link_colosseum = true;
     let present = move_data_with_effect("PRESENT", pokemon_type("NORMAL"), 1, 100, "PRESENT");
-    // Power 40, no critical hit, maximum damage variation.
-    let mut rng = ScriptedBattleRandom::new(vec![0, 255, 255]);
+    // No critical hit, power 40, maximum damage variation.
+    let mut rng = ScriptedBattleRandom::new(vec![255, 0, 255]);
     let mut events = Vec::new();
 
     apply_damage_hit(
@@ -4671,10 +6768,11 @@ fn present_heal_branch_restores_target_hp_without_damage() {
             move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
         ),
     ]);
-    let mut rng = Random::new(15);
+    // Critical precedes Present's heal selection.
+    let mut rng = ScriptedBattleRandom::new(vec![200, 207]);
 
     let outcome = resolve_battle_turn(
-        battle_state(player, enemy, rng.seed()),
+        battle_state(player, enemy, 0),
         BattleTurnInput {
             player: BattleAction::Move { slot: 0 },
             enemy: BattleAction::Move { slot: 0 },
@@ -4721,10 +6819,11 @@ fn present_heal_branch_fails_when_target_hp_is_full() {
             move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
         ),
     ]);
-    let mut rng = Random::new(15);
+    // Critical precedes Present's failed heal selection.
+    let mut rng = ScriptedBattleRandom::new(vec![200, 207]);
 
     let outcome = resolve_battle_turn(
-        battle_state(player, enemy, rng.seed()),
+        battle_state(player, enemy, 0),
         BattleTurnInput {
             player: BattleAction::Move { slot: 0 },
             enemy: BattleAction::Move { slot: 0 },
@@ -5253,9 +7352,11 @@ fn sky_attack_release_consumes_its_zero_chance_byte_and_never_flinches() {
     )
     .expect("Sky Attack accuracy");
     let mut expected_rng = rng;
+    // SkyAttack prepares critical damage and variation before checkhit, then
+    // samples its effectchance byte only after the accuracy check succeeds.
+    consume_standard_damage_calculation_rng(&mut expected_rng);
     let accuracy_roll = expected_rng.battle_random_byte();
     assert!(accuracy_roll < release_accuracy, "fixture must hit");
-    consume_standard_damage_calculation_rng(&mut expected_rng);
     let effect_chance_roll = expected_rng.battle_random_byte();
 
     let released = resolve_battle_turn(
@@ -5457,9 +7558,11 @@ fn static_damage_move_uses_pack_power_as_damage_amount() {
         ),
     ]);
     let mut rng = Random::new(1);
+    let mut state = battle_state(player, enemy, rng.seed());
+    state.critical_hit_register = 1;
 
     let outcome = resolve_battle_turn(
-        battle_state(player, enemy, rng.seed()),
+        state,
         BattleTurnInput {
             player: BattleAction::Move { slot: 0 },
             enemy: BattleAction::Move { slot: 0 },
@@ -5488,6 +7591,7 @@ fn static_damage_move_uses_pack_power_as_damage_amount() {
             ..
         } if move_name == "SONICBOOM"
     )));
+    assert_eq!(outcome.state.critical_hit_register, 1);
 }
 
 #[test]
@@ -5600,6 +7704,31 @@ fn thief_transfers_target_held_item_after_successful_damage() {
 }
 
 #[test]
+fn thief_cannot_steal_mail_from_either_side() {
+    for side in [BattleSide::Player, BattleSide::Enemy] {
+        let player = pokemon("SNEASEL", 60, pokemon_type("DARK"), "THIEF");
+        let enemy = pokemon("ABRA", 45, pokemon_type("PSYCHIC_TYPE"), "THIEF");
+        let mut state = battle_state(player, enemy, 0);
+        state.pokemon_mut(side.other()).item = Some("FLOWER_MAIL".to_string());
+        let mut events = Vec::new();
+
+        apply_thief_effect(&mut state, side, "THIEF", &mut events);
+
+        assert_eq!(state.pokemon(side).item, None);
+        assert_eq!(
+            state.pokemon(side.other()).item.as_deref(),
+            Some("FLOWER_MAIL")
+        );
+        assert!(events.contains(&BattleEvent::HeldItemStealFailed {
+            side,
+            move_name: "THIEF".to_string(),
+            target: side.other(),
+            reason: "target_holds_mail".to_string(),
+        }));
+    }
+}
+
+#[test]
 fn fixed_damage_move_still_respects_type_no_effect() {
     let mut player = pokemon("MACHOP", 45, pokemon_type("FIGHTING"), "SEISMIC_TOSS");
     player.level = 37;
@@ -5622,12 +7751,14 @@ fn fixed_damage_move_still_respects_type_no_effect() {
         ),
     ]);
     let mut rng = Random::new(1);
+    let mut state = battle_state(player, enemy, rng.seed());
+    state.critical_hit_register = 1;
 
     let outcome = resolve_battle_turn(
-        battle_state(player, enemy, rng.seed()),
+        state,
         BattleTurnInput {
             player: BattleAction::Move { slot: 0 },
-            enemy: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
         },
         &moves,
         &move_priorities(),
@@ -5644,6 +7775,7 @@ fn fixed_damage_move_still_respects_type_no_effect() {
         side: BattleSide::Player,
         move_name: "SEISMIC_TOSS".to_string(),
     }));
+    assert_eq!(outcome.state.critical_hit_register, 0);
 }
 
 #[test]
@@ -5743,6 +7875,138 @@ fn psywave_rejection_samples_nonzero_damage_below_one_and_a_half_levels() {
             && *event_damage == damage
             && result.damage == damage
     )));
+}
+
+#[test]
+fn psywave_finishes_constant_damage_rng_before_a_later_accuracy_miss() {
+    let mut player = pokemon("MISDREAVUS", 90, pokemon_type("GHOST"), "PSYWAVE");
+    player.level = 40;
+    let enemy = pokemon("PIDGEY", 40, pokemon_type("NORMAL"), "SPLASH");
+    let enemy_hp = enemy.hp;
+    let moves = BTreeMap::from([(
+        "PSYWAVE".to_string(),
+        move_data_with_effect("PSYWAVE", pokemon_type("PSYCHIC_TYPE"), 1, 1, "PSYWAVE"),
+    )]);
+    // ConstantDamage rejects 0 and the exclusive upper bound (60), accepts
+    // 17, and only then does CheckHit consume the accuracy-miss byte.
+    let mut rng = ScriptedBattleRandom::new(vec![0, 60, 17, u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Psywave accuracy miss resolves");
+
+    assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            roll: u8::MAX,
+            ..
+        } if move_name == "PSYWAVE"
+    )));
+    assert_eq!(rng.calls, 4);
+}
+
+#[test]
+fn protected_psywave_still_finishes_its_pre_checkhit_rejection_loop() {
+    let mut player = pokemon("CHIKORITA", 40, pokemon_type("GRASS"), "PROTECT");
+    player.speed = 1_000;
+    let mut enemy = pokemon("MISDREAVUS", 90, pokemon_type("GHOST"), "PSYWAVE");
+    enemy.level = 40;
+    enemy.speed = 1;
+    let moves = BTreeMap::from([
+        (
+            "PROTECT".to_string(),
+            move_data_with_effect("PROTECT", pokemon_type("NORMAL"), 0, 100, "PROTECT"),
+        ),
+        (
+            "PSYWAVE".to_string(),
+            move_data_with_effect("PSYWAVE", pokemon_type("PSYCHIC_TYPE"), 1, 80, "PSYWAVE"),
+        ),
+    ]);
+    // Protect succeeds first. Psywave then rejects 0 and 60 and accepts 17
+    // before CheckHit observes Protect; accuracy is never sampled.
+    let mut rng = ScriptedBattleRandom::new(vec![1, 0, 60, 17]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("protected Psywave resolves");
+
+    assert!(outcome.events.contains(&BattleEvent::MoveProtected {
+        side: BattleSide::Enemy,
+        move_name: "PSYWAVE".to_string(),
+        target: BattleSide::Player,
+    }));
+    assert_eq!(rng.calls, 4);
+}
+
+#[test]
+fn immune_psywave_samples_damage_and_accuracy_before_resetting_type_matchup() {
+    let mut player = pokemon("MISDREAVUS", 90, pokemon_type("GHOST"), "PSYWAVE");
+    player.level = 40;
+    let enemy = pokemon("HOUNDOUR", 40, pokemon_type("DARK"), "SPLASH");
+    let enemy_hp = enemy.hp;
+    let moves = BTreeMap::from([(
+        "PSYWAVE".to_string(),
+        move_data_with_effect("PSYWAVE", pokemon_type("PSYCHIC_TYPE"), 1, 1, "PSYWAVE"),
+    )]);
+    let mut type_effectiveness = type_effectiveness_table();
+    type_effectiveness.matchups.push(TypeEffectivenessEntry {
+        attacker: pokemon_type("PSYCHIC_TYPE"),
+        defender: pokemon_type("DARK"),
+        multiplier: TypeMultiplier::zero(),
+    });
+    // ConstantDamage accepts 17, CheckHit succeeds with 0, and only then
+    // ResetTypeMatchup converts Dark's immunity into a failed attack.
+    let mut rng = ScriptedBattleRandom::new(vec![17, 0]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness,
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("immune Psywave resolves");
+
+    assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert!(outcome.events.contains(&BattleEvent::NoEffect {
+        side: BattleSide::Player,
+        move_name: "PSYWAVE".to_string(),
+    }));
+    assert_eq!(rng.calls, 2);
 }
 
 #[test]
@@ -6383,11 +8647,12 @@ fn pay_day_scatters_money_when_damage_hits_a_substitute() {
 }
 
 #[test]
-fn ohko_move_faints_target_on_successful_level_checked_hit() {
+fn ohko_move_faints_target_on_successful_level_checked_hit_regardless_of_ability() {
     let mut player = pokemon("NIDOKING", 90, pokemon_type("NORMAL"), "HORN_DRILL");
     player.level = 40;
     let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
     enemy.level = 40;
+    enemy.species.ability = "STURDY".to_string();
     let enemy_hp = enemy.hp;
     let moves = BTreeMap::from([
         (
@@ -6405,7 +8670,7 @@ fn ohko_move_faints_target_on_successful_level_checked_hit() {
         battle_state(player, enemy, rng.seed()),
         BattleTurnInput {
             player: BattleAction::Move { slot: 0 },
-            enemy: BattleAction::Switch { party_index: 1 },
+            enemy: BattleAction::Move { slot: 0 },
         },
         &moves,
         &move_priorities(),
@@ -6436,6 +8701,94 @@ fn ohko_move_faints_target_on_successful_level_checked_hit() {
     assert!(outcome.events.contains(&BattleEvent::Fainted {
         side: BattleSide::Enemy,
     }));
+    assert_eq!(outcome.state.critical_hit_register, 0);
+}
+
+#[test]
+fn ohko_accuracy_uses_separately_floored_accuracy_and_evasion_rows() {
+    let mut player = pokemon("NIDOKING", 90, pokemon_type("NORMAL"), "HORN_DRILL");
+    player.level = 40;
+    player.stat_boosts.insert(Stat::Accuracy, 1);
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.level = 40;
+    enemy.stat_boosts.insert(Stat::Evasion, 1);
+    let enemy_hp = enemy.hp;
+    let moves = BTreeMap::from([
+        (
+            "HORN_DRILL".to_string(),
+            move_data_with_effect("HORN_DRILL", pokemon_type("NORMAL"), 1, 100, "OHKO"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![254]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("OHKO staged accuracy boundary resolves");
+
+    assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert!(outcome.events.contains(&BattleEvent::OhkoFailed {
+        side: BattleSide::Player,
+        move_name: "HORN_DRILL".to_string(),
+        reason: OhkoFailureReason::Missed {
+            accuracy: 254,
+            roll: 254,
+        },
+    }));
+    assert_eq!(rng.calls, 1);
+}
+
+#[test]
+fn ohko_final_ff_accuracy_uses_check_hits_zero_read_shortcut() {
+    let mut player = pokemon("NIDOKING", 90, pokemon_type("NORMAL"), "HORN_DRILL");
+    player.level = 40;
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.level = 40;
+    let moves = BTreeMap::from([
+        (
+            "HORN_DRILL".to_string(),
+            move_data_with_effect("HORN_DRILL", pokemon_type("NORMAL"), 1, 100, "OHKO"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("OHKO $ff accuracy shortcut resolves");
+
+    assert_eq!(outcome.state.enemy.hp, 0);
+    assert_eq!(rng.calls, 0);
 }
 
 #[test]
@@ -6482,6 +8835,7 @@ fn ohko_move_fails_when_attacker_level_is_lower() {
             defender_level: 40,
         },
     }));
+    assert_eq!(outcome.state.critical_hit_register, 0);
 }
 
 #[test]
@@ -6656,6 +9010,55 @@ fn ohko_damage_uses_substitute_endure_and_destiny_bond_tail() {
         }
     )));
 
+    let mut low_hp_enemy = enemy.clone();
+    low_hp_enemy.hp = 2;
+    let mut endured_substitute = battle_state(player.clone(), low_hp_enemy.clone(), 0);
+    endured_substitute.player_x_accuracy = true;
+    endured_substitute.enemy_endure_active = true;
+    endured_substitute.enemy_substitute_hp = 10;
+    let mut endured_substitute_events = Vec::new();
+    apply_ohko_effect(
+        &mut endured_substitute,
+        BattleSide::Player,
+        "HORN_DRILL",
+        &move_data,
+        &BTreeMap::new(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &mut Random::new(1),
+        &mut endured_substitute_events,
+    )
+    .expect("OHKO against Endure and Substitute resolves");
+    assert_eq!(endured_substitute.enemy.hp, 2);
+    assert_eq!(endured_substitute.enemy_substitute_hp, 9);
+
+    low_hp_enemy.item = Some("FOCUS_BAND".to_string());
+    let mut focused_substitute = battle_state(player.clone(), low_hp_enemy, 0);
+    focused_substitute.player_x_accuracy = true;
+    focused_substitute.enemy_substitute_hp = 10;
+    let mut focus_band = held_boost_item("FOCUS_BAND", "HELD_FOCUS_BAND");
+    focus_band.parameter = 255;
+    let focus_items = BTreeMap::from([("FOCUS_BAND".to_string(), focus_band)]);
+    let mut focus_rng = ScriptedBattleRandom::new(vec![0]);
+    let mut focused_substitute_events = Vec::new();
+    apply_ohko_effect(
+        &mut focused_substitute,
+        BattleSide::Player,
+        "HORN_DRILL",
+        &move_data,
+        &focus_items,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &mut focus_rng,
+        &mut focused_substitute_events,
+    )
+    .expect("OHKO against Focus Band and Substitute resolves");
+    assert_eq!(focus_rng.calls, 1);
+    assert_eq!(focused_substitute.enemy.hp, 2);
+    assert_eq!(focused_substitute.enemy_substitute_hp, 9);
+
     let mut bonded = battle_state(player, enemy, 0);
     bonded.player_x_accuracy = true;
     bonded.enemy_destiny_bond_active = true;
@@ -6693,7 +9096,7 @@ fn direct_status_move_applies_status_after_accuracy_without_damage() {
     let mut moves = BTreeMap::new();
     moves.insert(
         "HYPNOSIS".to_string(),
-        move_data_with_effect("HYPNOSIS", pokemon_type("PSYCHIC_TYPE"), 0, 0, "SLEEP"),
+        move_data_with_effect("HYPNOSIS", pokemon_type("PSYCHIC_TYPE"), 0, 100, "SLEEP"),
     );
     moves.insert(
         "SPLASH".to_string(),
@@ -6803,7 +9206,7 @@ fn direct_status_move_does_not_overwrite_existing_status() {
     let mut moves = BTreeMap::new();
     moves.insert(
         "HYPNOSIS".to_string(),
-        move_data_with_effect("HYPNOSIS", pokemon_type("PSYCHIC_TYPE"), 0, 0, "SLEEP"),
+        move_data_with_effect("HYPNOSIS", pokemon_type("PSYCHIC_TYPE"), 0, 100, "SLEEP"),
     );
     moves.insert(
         "SPLASH".to_string(),
@@ -7114,9 +9517,11 @@ fn successful_burn_effect_defrosts_an_already_frozen_target() {
         "EMBER",
         BattleSide::Enemy,
         "BURN",
+        &BTreeMap::new(),
         &mut rng,
         &mut events,
-    );
+    )
+    .expect("burn effect resolves");
 
     assert_eq!(state.enemy.status, None);
     assert!(events.contains(&BattleEvent::StatusHealed {
@@ -7142,9 +9547,11 @@ fn successful_freeze_effect_is_suppressed_by_sunlight() {
         "ICE_PUNCH",
         BattleSide::Enemy,
         "FREEZE",
+        &BTreeMap::new(),
         &mut rng,
         &mut events,
-    );
+    )
+    .expect("freeze effect resolves");
 
     assert_eq!(state.enemy.status, None);
     assert!(events.is_empty());
@@ -7165,9 +9572,11 @@ fn damaging_secondary_status_is_silent_for_an_already_statused_target() {
         "FIRE_PUNCH",
         BattleSide::Enemy,
         "BURN",
+        &BTreeMap::new(),
         &mut rng,
         &mut events,
-    );
+    )
+    .expect("burn effect resolves");
 
     assert_eq!(state.enemy.status.as_deref(), Some("PARALYSIS"));
     assert!(events.is_empty());
@@ -7188,9 +9597,11 @@ fn damaging_secondary_status_is_silent_for_an_immune_target_before_safeguard() {
         "FIRE_PUNCH",
         BattleSide::Enemy,
         "BURN",
+        &BTreeMap::new(),
         &mut rng,
         &mut events,
-    );
+    )
+    .expect("burn effect resolves");
 
     assert_eq!(state.enemy.status, None);
     assert!(events.is_empty());
@@ -7210,9 +9621,11 @@ fn twineedle_can_poison_a_steel_type_in_generation_two() {
         "TWINEEDLE",
         BattleSide::Enemy,
         "POISON",
+        &BTreeMap::new(),
         &mut rng,
         &mut events,
-    );
+    )
+    .expect("poison effect resolves");
 
     assert_eq!(state.enemy.status.as_deref(), Some("POISON"));
     assert!(events.contains(&BattleEvent::StatusApplied {
@@ -7467,6 +9880,110 @@ fn swagger_raises_target_attack_and_confuses_target_from_exact_effect() {
 }
 
 #[test]
+fn swagger_failure_at_maximum_attack_ends_before_confuse_target() {
+    let player = pokemon("QUAGSIRE", 50, pokemon_type("WATER"), "SWAGGER");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.stat_boosts.insert(Stat::Attack, 6);
+    let mut state = battle_state(player, enemy, 0);
+    state.critical_hit_register = 1;
+    let mut rng = ScriptedBattleRandom::new(vec![0]);
+    let mut events = Vec::new();
+
+    apply_swagger_effect(
+        &mut state,
+        BattleSide::Player,
+        "SWAGGER",
+        &BTreeMap::new(),
+        &stat_multipliers(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("Swagger resolves");
+
+    assert_eq!(state.enemy.stat_boosts.get(&Stat::Attack), Some(&6));
+    assert_eq!(state.enemy.confusion_turns, 0);
+    assert_eq!(state.critical_hit_register, 0);
+    assert!(events.contains(&BattleEvent::StatStageUnchanged {
+        side: BattleSide::Player,
+        move_name: "SWAGGER".to_string(),
+        target: BattleSide::Enemy,
+        stat: Stat::Attack,
+        amount: 2,
+        stage: 6,
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::ConfusionApplied { .. }))
+    );
+    assert_eq!(rng.calls, 0);
+}
+
+#[test]
+fn swagger_confuse_target_is_silent_when_confusion_already_exists() {
+    let player = pokemon("QUAGSIRE", 50, pokemon_type("WATER"), "SWAGGER");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.confusion_turns = 3;
+    let mut state = battle_state(player, enemy, 0);
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+    let mut events = Vec::new();
+
+    apply_swagger_effect(
+        &mut state,
+        BattleSide::Player,
+        "SWAGGER",
+        &BTreeMap::new(),
+        &stat_multipliers(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("Swagger resolves");
+
+    assert_eq!(state.enemy.stat_boosts.get(&Stat::Attack), Some(&2));
+    assert_eq!(state.enemy.confusion_turns, 3);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::ConfusionFailed { .. }))
+    );
+    assert_eq!(rng.calls, 0);
+}
+
+#[test]
+fn direct_confuse_reports_existing_confusion_before_substitute() {
+    let player = pokemon("ZUBAT", 50, pokemon_type("POISON"), "CONFUSE_RAY");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.confusion_turns = 3;
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_substitute_hp = 10;
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+    let mut events = Vec::new();
+
+    apply_confusion_to_target(
+        &mut state,
+        BattleSide::Player,
+        "CONFUSE_RAY",
+        &BTreeMap::new(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("direct confusion resolves");
+
+    assert!(events.contains(&BattleEvent::ConfusionFailed {
+        side: BattleSide::Player,
+        move_name: "CONFUSE_RAY".to_string(),
+        target: BattleSide::Enemy,
+        turns_remaining: 3,
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::SubstituteBlocked { .. }))
+    );
+    assert_eq!(rng.calls, 0);
+}
+
+#[test]
 fn damaging_secondary_confusion_uses_pack_chance_after_damage() {
     let player = pokemon("PSYDUCK", 50, pokemon_type("WATER"), "CONFUSION");
     let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
@@ -7589,9 +10106,11 @@ fn damaging_secondary_confusion_is_silent_when_confusion_already_exists() {
             succeeds: true,
             roll: Some(0),
         },
+        &BTreeMap::new(),
         &mut rng,
         &mut events,
-    );
+    )
+    .expect("secondary confusion resolves");
 
     assert_eq!(state.enemy.confusion_turns, 3);
     assert!(!events.iter().any(|event| matches!(
@@ -7642,7 +10161,7 @@ fn confusion_turn_can_block_move_with_self_damage() {
         side: BattleSide::Player,
         move_name: "WATER_GUN".to_string(),
         turns_remaining: 2,
-        roll: 0,
+        roll: 64,
     }));
     assert!(outcome.events.iter().any(|event| matches!(
         event,
@@ -7654,6 +10173,41 @@ fn confusion_turn_can_block_move_with_self_damage() {
             ..
         } if move_name == "WATER_GUN" && *hp_before == player_hp && *hp_after < *hp_before
     )));
+}
+
+#[test]
+fn confusion_uses_the_full_random_byte_threshold() {
+    let mut player = pokemon("PSYDUCK", 50, pokemon_type("WATER"), "WATER_GUN");
+    player.confusion_turns = 2;
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    let mut state = battle_state(player, enemy, 0);
+    let selected_move = move_data("WATER_GUN", pokemon_type("WATER"), 40, 100);
+    // $01 is below `50 percent + 1` ($80), but its low bit is set.
+    let mut rng = ScriptedBattleRandom::new(vec![1, u8::MAX]);
+    let mut events = Vec::new();
+
+    assert!(
+        move_blocked_by_confusion(
+            &mut state,
+            BattleSide::Player,
+            "WATER_GUN",
+            &selected_move,
+            &BTreeMap::new(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+            &mut events,
+        )
+        .expect("confusion check resolves")
+    );
+    assert!(events.contains(&BattleEvent::ConfusedTurn {
+        side: BattleSide::Player,
+        move_name: "WATER_GUN".to_string(),
+        turns_remaining: 1,
+        roll: 1,
+    }));
 }
 
 #[test]
@@ -8041,6 +10595,65 @@ fn rest_fully_heals_and_sets_exact_sleep_turns() {
 }
 
 #[test]
+fn rest_ignores_non_crystal_sleep_immunity_abilities() {
+    let moves = BTreeMap::from([
+        (
+            "REST".to_string(),
+            move_data_with_effect("REST", pokemon_type("PSYCHIC_TYPE"), 0, 100, "HEAL"),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+
+    for ability in ["INSOMNIA", "VITAL_SPIRIT"] {
+        let mut player = pokemon("SNORLAX", 30, pokemon_type("NORMAL"), "REST");
+        player.species.ability = ability.to_string();
+        player.hp /= 2;
+        let hp_before = player.hp;
+        let max_hp = player.max_hp;
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let mut rng = Random::new(1);
+
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, rng.seed()),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Switch { party_index: 1 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("Rest resolves regardless of non-Crystal ability data");
+
+        assert_eq!(outcome.state.player.hp, max_hp, "{ability}");
+        assert_eq!(
+            outcome.state.player.status.as_deref(),
+            Some("SLEEP"),
+            "{ability}"
+        );
+        assert_eq!(outcome.state.player.sleep_turns, 3, "{ability}");
+        assert!(
+            outcome.events.contains(&BattleEvent::HealApplied {
+                side: BattleSide::Player,
+                move_name: "REST".to_string(),
+                hp_before,
+                hp_after: max_hp,
+                amount: max_hp - hp_before,
+                animation_param: 0,
+            }),
+            "{ability}"
+        );
+    }
+}
+
+#[test]
 fn rest_does_not_clear_an_existing_nightmare() {
     let mut player = pokemon("SNORLAX", 30, pokemon_type("NORMAL"), "REST");
     player.hp = player.max_hp / 2;
@@ -8149,10 +10762,10 @@ fn heal_bell_clears_active_status_and_chimes_without_curing_confusion() {
             move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
         ),
     ]);
-    let mut state = battle_state(player, enemy, 6);
+    let mut state = battle_state(player, enemy, 8);
     state.player_toxic_turns = 3;
     state.player.confusion_turns = 2;
-    let mut rng = Random::new(6);
+    let mut rng = Random::new(8);
 
     let outcome = resolve_battle_turn(
         state,
@@ -8410,9 +11023,187 @@ fn pain_split_caps_each_side_at_its_own_max_hp() {
 }
 
 #[test]
-fn perish_song_applies_exact_count_to_both_active_pokemon() {
-    let player = pokemon("MISDREAVUS", 50, pokemon_type("GHOST"), "PERISH_SONG");
-    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+fn protected_pain_split_reaches_its_failure_text_after_protecting_text() {
+    let player = pokemon("MISDREAVUS", 50, pokemon_type("GHOST"), "PAIN_SPLIT");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "PROTECT");
+    let player_hp = player.hp;
+    let enemy_hp = enemy.hp;
+    let moves = BTreeMap::from([
+        (
+            "PAIN_SPLIT".to_string(),
+            move_data_with_effect("PAIN_SPLIT", pokemon_type("NORMAL"), 0, 100, "PAIN_SPLIT"),
+        ),
+        (
+            "PROTECT".to_string(),
+            move_data_with_effect("PROTECT", pokemon_type("NORMAL"), 0, 100, "PROTECT"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![1]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("protected Pain Split resolves");
+
+    assert_eq!(outcome.state.player.hp, player_hp);
+    assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert!(outcome.events.contains(&BattleEvent::MoveProtected {
+        side: BattleSide::Player,
+        move_name: "PAIN_SPLIT".to_string(),
+        target: BattleSide::Enemy,
+    }));
+    assert!(outcome.events.contains(&BattleEvent::PainSplitFailed {
+        side: BattleSide::Player,
+        move_name: "PAIN_SPLIT".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
+fn missed_pain_split_reaches_its_command_owned_failure() {
+    let player = pokemon("MISDREAVUS", 50, pokemon_type("GHOST"), "PAIN_SPLIT");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let player_hp = player.hp;
+    let enemy_hp = enemy.hp;
+    let moves = BTreeMap::from([
+        (
+            "PAIN_SPLIT".to_string(),
+            move_data_with_effect("PAIN_SPLIT", pokemon_type("NORMAL"), 0, 1, "PAIN_SPLIT"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("missed Pain Split resolves");
+
+    assert_eq!(rng.calls, 1);
+    assert_eq!(outcome.state.player.hp, player_hp);
+    assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            roll: u8::MAX,
+            ..
+        } if move_name == "PAIN_SPLIT"
+    )));
+    assert!(outcome.events.contains(&BattleEvent::PainSplitFailed {
+        side: BattleSide::Player,
+        move_name: "PAIN_SPLIT".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
+fn airborne_target_pain_split_reaches_its_command_owned_failure() {
+    let player = pokemon("MISDREAVUS", 90, pokemon_type("GHOST"), "PAIN_SPLIT");
+    let enemy = pokemon("PIDGEY", 10, pokemon_type("FLYING"), "FLY");
+    let enemy_hp = enemy.hp;
+    let moves = BTreeMap::from([
+        (
+            "PAIN_SPLIT".to_string(),
+            move_data_with_effect("PAIN_SPLIT", pokemon_type("NORMAL"), 0, 100, "PAIN_SPLIT"),
+        ),
+        (
+            "FLY".to_string(),
+            move_data_with_effect("FLY", pokemon_type("FLYING"), 70, 95, "FLY"),
+        ),
+    ]);
+    let mut rng = Random::new(33);
+    let mut state = battle_state(player, enemy, rng.seed());
+    state.enemy_airborne_move = Some("FLY".to_string());
+
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Pain Split against Fly resolves");
+
+    assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert!(outcome.events.contains(&BattleEvent::AirborneAvoided {
+        side: BattleSide::Player,
+        move_name: "PAIN_SPLIT".to_string(),
+        target: BattleSide::Enemy,
+        airborne_move: "FLY".to_string(),
+    }));
+    assert!(outcome.events.contains(&BattleEvent::PainSplitFailed {
+        side: BattleSide::Player,
+        move_name: "PAIN_SPLIT".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
+fn substitute_blocked_pain_split_uses_its_command_owned_failure() {
+    let player = pokemon("MISDREAVUS", 50, pokemon_type("GHOST"), "PAIN_SPLIT");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_substitute_hp = 10;
+    let player_hp = state.player.hp;
+    let enemy_hp = state.enemy.hp;
+    let mut events = Vec::new();
+
+    apply_pain_split_effect(&mut state, BattleSide::Player, "PAIN_SPLIT", &mut events);
+
+    assert_eq!(state.player.hp, player_hp);
+    assert_eq!(state.enemy.hp, enemy_hp);
+    assert!(events.contains(&BattleEvent::PainSplitFailed {
+        side: BattleSide::Player,
+        move_name: "PAIN_SPLIT".to_string(),
+        target: BattleSide::Enemy,
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::SubstituteBlocked { .. }))
+    );
+}
+
+#[test]
+fn perish_song_applies_exact_count_to_both_active_pokemon_regardless_of_ability() {
+    let mut player = pokemon("MISDREAVUS", 50, pokemon_type("GHOST"), "PERISH_SONG");
+    player.species.ability = "SOUNDPROOF".to_string();
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    enemy.species.ability = "SOUNDPROOF".to_string();
     let moves = BTreeMap::from([
         (
             "PERISH_SONG".to_string(),
@@ -8743,15 +11534,18 @@ fn belly_drum_costs_half_hp_and_maximizes_attack() {
         outcome.state.player.stat_boosts.get(&Stat::Attack),
         Some(&6)
     );
-    assert!(outcome.events.contains(&BattleEvent::StatStageChanged {
+    assert!(outcome.events.contains(&BattleEvent::BellyDrumApplied {
         side: BattleSide::Player,
         move_name: "BELLY_DRUM".to_string(),
-        target: BattleSide::Player,
-        stat: Stat::Attack,
-        amount: 6,
-        stage_before: 0,
-        stage_after: 6,
+        hp_before: player_hp,
+        hp_after: player_hp - max_hp / 2,
+        attack_stage_before: 0,
+        attack_stage_after: 6,
     }));
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::StatStageChanged { move_name, .. } if move_name == "BELLY_DRUM"
+    )));
 }
 
 #[test]
@@ -8759,7 +11553,6 @@ fn belly_drum_at_half_hp_sharply_boosts_then_fails() {
     let mut player = pokemon("POLIWRATH", 50, pokemon_type("WATER"), "BELLY_DRUM");
     player.hp = player.max_hp / 2;
     let player_hp = player.hp;
-    let max_hp = player.max_hp;
     let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
     let moves = BTreeMap::from([
         (
@@ -8794,21 +11587,96 @@ fn belly_drum_at_half_hp_sharply_boosts_then_fails() {
         outcome.state.player.stat_boosts.get(&Stat::Attack),
         Some(&2)
     );
-    assert!(outcome.events.contains(&BattleEvent::StatStageChanged {
+    assert!(outcome.events.contains(&BattleEvent::BellyDrumFailed {
         side: BattleSide::Player,
         move_name: "BELLY_DRUM".to_string(),
-        target: BattleSide::Player,
-        stat: Stat::Attack,
-        amount: 2,
-        stage_before: 0,
-        stage_after: 2,
+        attack_stage_before: 0,
+        attack_stage_after: 2,
     }));
-    assert!(outcome.events.contains(&BattleEvent::HealFailed {
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::StatStageChanged { move_name, .. } if move_name == "BELLY_DRUM"
+    )));
+}
+
+#[test]
+fn belly_drum_fails_without_hp_or_stage_change_at_maximum_attack() {
+    let mut player = pokemon("POLIWRATH", 50, pokemon_type("WATER"), "BELLY_DRUM");
+    player.stat_boosts.insert(Stat::Attack, 6);
+    let player_hp = player.hp;
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    let moves = BTreeMap::from([
+        (
+            "BELLY_DRUM".to_string(),
+            move_data_with_effect("BELLY_DRUM", pokemon_type("NORMAL"), 0, 100, "BELLY_DRUM"),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, rng.seed()),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("maximum-Attack Belly Drum turn resolves");
+
+    assert_eq!(outcome.state.player.hp, player_hp);
+    assert_eq!(
+        outcome.state.player.stat_boosts.get(&Stat::Attack),
+        Some(&6)
+    );
+    assert!(outcome.events.contains(&BattleEvent::BellyDrumFailed {
         side: BattleSide::Player,
         move_name: "BELLY_DRUM".to_string(),
-        hp: player_hp,
-        max_hp,
+        attack_stage_before: 6,
+        attack_stage_after: 6,
     }));
+}
+
+#[test]
+fn belly_drum_raw_maximum_attack_keeps_the_hidden_single_stage_failure() {
+    let mut player = pokemon("POLIWRATH", 50, pokemon_type("WATER"), "BELLY_DRUM");
+    player.attack = 999;
+    let player_hp = player.hp;
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    let mut state = battle_state(player, enemy, 0);
+    let loaded_attack_before = state.player_loaded_stats.attack;
+    let mut events = Vec::new();
+
+    apply_belly_drum_effect(
+        &mut state,
+        BattleSide::Player,
+        "BELLY_DRUM",
+        &stat_multipliers(),
+        &mut events,
+    )
+    .expect("raw-maximum Belly Drum resolves");
+
+    assert_eq!(state.player.hp, player_hp);
+    assert_eq!(state.player.stat_boosts[&Stat::Attack], 1);
+    assert_eq!(state.player_loaded_stats.attack, loaded_attack_before);
+    assert_eq!(
+        events,
+        vec![BattleEvent::BellyDrumFailed {
+            side: BattleSide::Player,
+            move_name: "BELLY_DRUM".to_string(),
+            attack_stage_before: 0,
+            attack_stage_after: 1,
+        }]
+    );
 }
 
 #[test]
@@ -8917,6 +11785,74 @@ fn non_ghost_curse_raises_attack_defense_and_lowers_speed() {
         stage_before: 0,
         stage_after: -1,
     }));
+    let stat_command_order = outcome
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            BattleEvent::StatStageChanged {
+                move_name, stat, ..
+            } if move_name == "CURSE" => Some(*stat),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stat_command_order,
+        vec![Stat::Speed, Stat::Attack, Stat::Defense]
+    );
+}
+
+#[test]
+fn capped_non_ghost_curse_uses_the_source_ability_stat_failure() {
+    let mut player = pokemon("SLOWPOKE", 30, pokemon_type("WATER"), "CURSE");
+    player.stat_boosts.insert(Stat::Attack, 6);
+    player.stat_boosts.insert(Stat::Defense, 6);
+    player.stat_boosts.insert(Stat::Speed, 2);
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    let moves = BTreeMap::from([
+        (
+            "CURSE".to_string(),
+            move_data_with_effect("CURSE", pokemon_type("UNKNOWN_T"), 0, 100, "CURSE"),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, rng.seed()),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("capped non-Ghost Curse turn resolves");
+
+    assert_eq!(
+        outcome.state.player.stat_boosts.get(&Stat::Attack),
+        Some(&6)
+    );
+    assert_eq!(
+        outcome.state.player.stat_boosts.get(&Stat::Defense),
+        Some(&6)
+    );
+    assert_eq!(outcome.state.player.stat_boosts.get(&Stat::Speed), Some(&2));
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::StatStageUnchanged { move_name, .. } if move_name == "CURSE"
+    )));
+    assert!(outcome.events.contains(&BattleEvent::CurseStatsCapped {
+        side: BattleSide::Player,
+        move_name: "CURSE".to_string(),
+    }));
 }
 
 #[test]
@@ -9017,6 +11953,144 @@ fn ghost_curse_fails_when_target_is_already_cursed() {
 }
 
 #[test]
+fn ghost_curse_fails_against_a_hidden_target_without_spending_hp() {
+    let mut player = pokemon("GASTLY", 90, pokemon_type("GHOST"), "CURSE");
+    player.hp = 80;
+    player.max_hp = 80;
+    let enemy = pokemon("PIDGEY", 40, pokemon_type("FLYING"), "FLY");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_airborne_move = Some("FLY".to_string());
+    let mut events = Vec::new();
+
+    apply_curse_effect(
+        &mut state,
+        BattleSide::Player,
+        "CURSE",
+        &stat_multipliers(),
+        &mut events,
+    )
+    .expect("hidden-target Curse command resolves");
+
+    assert_eq!(state.player.hp, 80);
+    assert_eq!(state.enemy_curse_source, None);
+    assert!(events.contains(&BattleEvent::CurseFailed {
+        side: BattleSide::Player,
+        move_name: "CURSE".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
+fn branch_local_hidden_checks_reject_non_damage_effects() {
+    let hidden_state = |move_name: &str| {
+        let player = pokemon("SMEARGLE", 90, pokemon_type("NORMAL"), move_name);
+        let enemy = pokemon("PIDGEY", 40, pokemon_type("FLYING"), "FLY");
+        let mut state = battle_state(player, enemy, 0);
+        state.enemy_airborne_move = Some("FLY".to_string());
+        state
+    };
+
+    let mut nightmare = hidden_state("NIGHTMARE");
+    nightmare.enemy.status = Some("SLEEP".to_string());
+    nightmare.enemy.sleep_turns = 2;
+    let mut events = Vec::new();
+    apply_nightmare_effect(&mut nightmare, BattleSide::Player, "NIGHTMARE", &mut events);
+    assert_eq!(nightmare.enemy_nightmare_source, None);
+    assert!(events.contains(&BattleEvent::NightmareFailed {
+        side: BattleSide::Player,
+        move_name: "NIGHTMARE".to_string(),
+        target: BattleSide::Enemy,
+    }));
+
+    let mut foresight = hidden_state("FORESIGHT");
+    let mut events = Vec::new();
+    apply_foresight_effect(&mut foresight, BattleSide::Player, "FORESIGHT", &mut events);
+    assert!(!foresight.enemy_identified);
+    assert!(events.contains(&BattleEvent::ForesightFailed {
+        side: BattleSide::Player,
+        move_name: "FORESIGHT".to_string(),
+        target: BattleSide::Enemy,
+    }));
+
+    let mut mean_look = hidden_state("MEAN_LOOK");
+    let mut events = Vec::new();
+    apply_escape_trap_effect(&mut mean_look, BattleSide::Player, "MEAN_LOOK", &mut events);
+    assert_eq!(mean_look.enemy_escape_trap, None);
+    assert!(events.contains(&BattleEvent::EscapeTrapFailed {
+        side: BattleSide::Player,
+        move_name: "MEAN_LOOK".to_string(),
+        target: BattleSide::Enemy,
+    }));
+
+    let mut attract = hidden_state("ATTRACT");
+    attract.player.species.gender_ratio = 127;
+    attract.player.dvs = Dv::from_non_hp(10, 10, 10, 10);
+    attract.enemy.species.gender_ratio = 127;
+    attract.enemy.dvs = Dv::from_non_hp(2, 10, 10, 10);
+    let mut events = Vec::new();
+    apply_attract_effect(&mut attract, BattleSide::Player, "ATTRACT", &mut events);
+    assert_eq!(attract.enemy_attracted_by, None);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        BattleEvent::AttractFailed {
+            side: BattleSide::Player,
+            move_name,
+            target: BattleSide::Enemy,
+            ..
+        } if move_name == "ATTRACT"
+    )));
+
+    let mut mimic = hidden_state("MIMIC");
+    mimic.enemy_last_counter_move = Some("TACKLE".to_string());
+    let mimic_moves = BTreeMap::from([
+        (
+            "MIMIC".to_string(),
+            move_data_with_effect("MIMIC", pokemon_type("NORMAL"), 0, 100, "MIMIC"),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    let mut events = Vec::new();
+    apply_mimic_effect(
+        &mut mimic,
+        BattleSide::Player,
+        Some(0),
+        "MIMIC",
+        &mimic_moves,
+        &mut events,
+    );
+    assert_eq!(mimic.player.moves[0].name, "MIMIC");
+    assert!(events.contains(&BattleEvent::MimicFailed {
+        side: BattleSide::Player,
+        move_name: "MIMIC".to_string(),
+        target: BattleSide::Enemy,
+    }));
+
+    let mut transform = hidden_state("TRANSFORM");
+    transform.player_last_move = Some("TRANSFORM".to_string());
+    transform.player_last_counter_move = Some("TRANSFORM".to_string());
+    let mut events = Vec::new();
+    apply_transform_effect(
+        &mut transform,
+        BattleSide::Player,
+        "TRANSFORM",
+        &stat_multipliers(),
+        &mut events,
+    )
+    .expect("Transform resolves");
+    assert_eq!(transform.player_transform, None);
+    assert_eq!(transform.player_last_move, None);
+    assert_eq!(transform.player_last_counter_move, None);
+    assert!(events.contains(&BattleEvent::TransformFailed {
+        side: BattleSide::Player,
+        move_name: "TRANSFORM".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
 fn switching_clears_curse_from_cursed_target() {
     let player = pokemon("GASTLY", 90, pokemon_type("GHOST"), "TACKLE");
     let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
@@ -9105,8 +12179,229 @@ fn leech_hit_heals_half_damage_dealt_after_damage() {
             && *damage > 0
             && *event_hp_before == hp_before
             && *hp_after == hp_before + *amount
-            && *amount == (*damage).div_ceil(2)
+            && *amount == (*damage / 2).max(1)
     )));
+}
+
+#[test]
+fn drain_rounds_odd_retained_damage_down_like_sap_health() {
+    let mut player = pokemon("ODDISH", 50, pokemon_type("GRASS"), "ABSORB");
+    player.hp -= 10;
+    let hp_before = player.hp;
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    let mut state = battle_state(player, enemy, 0);
+    let mut events = Vec::new();
+
+    apply_drain_effect(&mut state, BattleSide::Player, "ABSORB", 5, &mut events);
+
+    assert_eq!(state.player.hp, hp_before + 2);
+    assert!(events.contains(&BattleEvent::HpDrained {
+        side: BattleSide::Player,
+        move_name: "ABSORB".to_string(),
+        target: BattleSide::Enemy,
+        damage: 5,
+        hp_before,
+        hp_after: hp_before + 2,
+        amount: 2,
+    }));
+}
+
+#[test]
+fn drain_command_still_narrates_at_full_hp() {
+    let player = pokemon("ODDISH", 50, pokemon_type("GRASS"), "ABSORB");
+    let hp_before = player.hp;
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    let mut state = battle_state(player, enemy, 0);
+    let mut events = Vec::new();
+
+    apply_drain_effect(&mut state, BattleSide::Player, "ABSORB", 8, &mut events);
+
+    assert_eq!(state.player.hp, hp_before);
+    assert!(events.contains(&BattleEvent::HpDrained {
+        side: BattleSide::Player,
+        move_name: "ABSORB".to_string(),
+        target: BattleSide::Enemy,
+        damage: 8,
+        hp_before,
+        hp_after: hp_before,
+        amount: 0,
+    }));
+}
+
+#[test]
+fn drain_and_recoil_use_retained_damage_on_an_overkill() {
+    for (move_name, effect) in [("MEGA_DRAIN", "LEECH_HIT"), ("TAKE_DOWN", "RECOIL_HIT")] {
+        let mut player = pokemon("MEW", 50, pokemon_type("NORMAL"), move_name);
+        player.hp = if effect == "LEECH_HIT" {
+            1
+        } else {
+            player.max_hp
+        };
+        let player_hp_before = player.hp;
+        let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        enemy.hp = 1;
+        let mut state = battle_state(player, enemy, 0);
+        let move_data = move_data_with_effect(move_name, pokemon_type("NORMAL"), 200, 100, effect);
+        let mut rng = ScriptedBattleRandom::new(vec![255, 255]);
+        let mut events = Vec::new();
+
+        apply_damage_hit(
+            &mut state,
+            BattleSide::Player,
+            move_name,
+            &move_data,
+            1,
+            false,
+            false,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &BTreeMap::new(),
+            &mut rng,
+            &mut events,
+        )
+        .expect("overkill hit resolves");
+
+        let retained_damage = events
+            .iter()
+            .find_map(|event| match event {
+                BattleEvent::Damage {
+                    damage: 1, result, ..
+                } => Some(result.damage),
+                _ => None,
+            })
+            .expect("overkill damage event retains wCurDamage");
+        assert!(retained_damage > 1);
+        match effect {
+            "LEECH_HIT" => assert!(events.iter().any(|event| matches!(
+                event,
+                BattleEvent::HpDrained {
+                    damage,
+                    amount,
+                    hp_before,
+                    hp_after,
+                    ..
+                } if *damage == retained_damage
+                    && *amount == (retained_damage / 2).max(1)
+                    && *hp_before == player_hp_before
+                    && *hp_after == player_hp_before + *amount
+            ))),
+            "RECOIL_HIT" => assert!(events.iter().any(|event| matches!(
+                event,
+                BattleEvent::RecoilDamage {
+                    damage_dealt,
+                    recoil_damage,
+                    hp_before,
+                    hp_after,
+                    ..
+                } if *damage_dealt == retained_damage
+                    && *recoil_damage == (retained_damage / 4).max(1)
+                    && *hp_before == player_hp_before
+                    && *hp_after == player_hp_before - *recoil_damage
+            ))),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn drain_and_recoil_execute_at_one_hp_after_substitute_resets_damage() {
+    for (move_name, effect) in [("MEGA_DRAIN", "LEECH_HIT"), ("TAKE_DOWN", "RECOIL_HIT")] {
+        let mut player = pokemon("MEW", 50, pokemon_type("NORMAL"), move_name);
+        player.hp = player.max_hp / 2;
+        let player_hp_before = player.hp;
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let mut state = battle_state(player, enemy, 0);
+        state.enemy_substitute_hp = 10;
+        let move_data = move_data_with_effect(move_name, pokemon_type("NORMAL"), 200, 100, effect);
+        let mut rng = ScriptedBattleRandom::new(vec![255, 255]);
+        let mut events = Vec::new();
+
+        apply_damage_hit(
+            &mut state,
+            BattleSide::Player,
+            move_name,
+            &move_data,
+            1,
+            false,
+            false,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &BTreeMap::new(),
+            &mut rng,
+            &mut events,
+        )
+        .expect("substitute hit resolves");
+
+        match effect {
+            "LEECH_HIT" => {
+                assert_eq!(state.player.hp, player_hp_before + 1);
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    BattleEvent::HpDrained {
+                        damage: 0,
+                        amount: 1,
+                        ..
+                    }
+                )));
+            }
+            "RECOIL_HIT" => {
+                assert_eq!(state.player.hp, player_hp_before - 1);
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    BattleEvent::RecoilDamage {
+                        damage_dealt: 0,
+                        recoil_damage: 1,
+                        ..
+                    }
+                )));
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn drain_executes_before_the_surviving_targets_rage_builds() {
+    let mut player = pokemon("ODDISH", 50, pokemon_type("GRASS"), "ABSORB");
+    player.hp -= 10;
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "RAGE");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_rage_active = true;
+    let absorb = move_data_with_effect("ABSORB", pokemon_type("GRASS"), 20, 100, "LEECH_HIT");
+    let mut rng = ScriptedBattleRandom::new(vec![255, 255]);
+    let mut events = Vec::new();
+
+    apply_damage_hit(
+        &mut state,
+        BattleSide::Player,
+        "ABSORB",
+        &absorb,
+        1,
+        false,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BTreeMap::new(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("draining Rage target resolves");
+
+    let drain_index = events
+        .iter()
+        .position(|event| matches!(event, BattleEvent::HpDrained { .. }))
+        .expect("drain event");
+    let rage_index = events
+        .iter()
+        .position(|event| matches!(event, BattleEvent::RageBuilding { .. }))
+        .expect("Rage event");
+    assert!(drain_index < rage_index);
 }
 
 #[test]
@@ -9314,6 +12609,282 @@ fn false_swipe_damage_cannot_faint_target_above_one_hp() {
 }
 
 #[test]
+fn false_swipe_at_one_hp_applies_zero_damage_without_hiding_a_critical() {
+    let player = pokemon("SCYTHER", 50, pokemon_type("BUG"), "FALSE_SWIPE");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    enemy.hp = 1;
+    let moves = BTreeMap::from([
+        (
+            "FALSE_SWIPE".to_string(),
+            move_data_with_effect(
+                "FALSE_SWIPE",
+                pokemon_type("NORMAL"),
+                200,
+                100,
+                "FALSE_SWIPE",
+            ),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    // False Swipe critical, False Swipe variation, then the target's
+    // critical/variation reads after it survives and takes its turn.
+    let mut rng = ScriptedBattleRandom::new(vec![0, u8::MAX, u8::MAX, u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("one-HP False Swipe turn resolves");
+
+    assert_eq!(outcome.state.enemy.hp, 1);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Damage {
+            side: BattleSide::Player,
+            move_name,
+            damage: 0,
+            defender_hp_before: 1,
+            defender_hp_after: 1,
+            critical: true,
+            ..
+        } if move_name == "FALSE_SWIPE"
+    )));
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Fainted {
+            side: BattleSide::Enemy
+        }
+    )));
+}
+
+#[test]
+fn false_swipe_clamps_before_applydamage_reaches_a_substitute() {
+    let player = pokemon("SCYTHER", 50, pokemon_type("BUG"), "FALSE_SWIPE");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    enemy.hp = 1;
+    let moves = BTreeMap::from([
+        (
+            "FALSE_SWIPE".to_string(),
+            move_data_with_effect(
+                "FALSE_SWIPE",
+                pokemon_type("NORMAL"),
+                200,
+                100,
+                "FALSE_SWIPE",
+            ),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    set_substitute_hp(&mut state, BattleSide::Enemy, 10);
+    let mut rng = ScriptedBattleRandom::new(vec![0, u8::MAX, u8::MAX, u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("False Swipe into a Substitute resolves");
+
+    assert_eq!(outcome.state.enemy.hp, 1);
+    assert_eq!(substitute_hp(&outcome.state, BattleSide::Enemy), 10);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::SubstituteDamaged {
+            side: BattleSide::Player,
+            move_name,
+            damage: 0,
+            substitute_hp_before: 10,
+            substitute_hp_after: 10,
+            ..
+        } if move_name == "FALSE_SWIPE"
+    )));
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Damage {
+            side: BattleSide::Player,
+            move_name,
+            ..
+        } if move_name == "FALSE_SWIPE"
+    )));
+}
+
+#[test]
+fn endure_clamps_lethal_damage_before_it_reaches_a_substitute() {
+    let player = pokemon("TAUROS", 50, pokemon_type("NORMAL"), "TACKLE");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.hp = 2;
+    let mut state = battle_state(player, enemy, 0);
+    set_endure_active(&mut state, BattleSide::Enemy, true);
+    set_substitute_hp(&mut state, BattleSide::Enemy, 10);
+    let move_data = move_data("TACKLE", pokemon_type("NORMAL"), 200, 100);
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX]);
+    let mut events = Vec::new();
+
+    apply_damage_hit(
+        &mut state,
+        BattleSide::Player,
+        "TACKLE",
+        &move_data,
+        1,
+        false,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BTreeMap::new(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("Endure Substitute hit resolves");
+
+    assert_eq!(state.enemy.hp, 2);
+    assert_eq!(substitute_hp(&state, BattleSide::Enemy), 9);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        BattleEvent::EnduredHit {
+            target: BattleSide::Enemy,
+            raw_damage,
+            held_item: None,
+            ..
+        } if *raw_damage > 1
+    )));
+}
+
+#[test]
+fn focus_band_rolls_and_clamps_before_damage_reaches_a_substitute() {
+    let player = pokemon("TAUROS", 50, pokemon_type("NORMAL"), "TACKLE");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.hp = 2;
+    enemy.item = Some("FOCUS_BAND".to_string());
+    let mut state = battle_state(player, enemy, 0);
+    set_substitute_hp(&mut state, BattleSide::Enemy, 10);
+    let move_data = move_data("TACKLE", pokemon_type("NORMAL"), 200, 100);
+    let mut focus_band = held_boost_item("FOCUS_BAND", "HELD_FOCUS_BAND");
+    focus_band.parameter = 255;
+    let items = BTreeMap::from([("FOCUS_BAND".to_string(), focus_band)]);
+    // Critical, variation, then Focus Band. ApplyDamage rolls the held item
+    // before DoSubstituteDamage inspects the doll.
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX, 0]);
+    let mut events = Vec::new();
+
+    apply_damage_hit(
+        &mut state,
+        BattleSide::Player,
+        "TACKLE",
+        &move_data,
+        1,
+        false,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &items,
+        &mut rng,
+        &mut events,
+    )
+    .expect("Focus Band Substitute hit resolves");
+
+    assert_eq!(rng.calls, 3);
+    assert_eq!(state.enemy.hp, 2);
+    assert_eq!(substitute_hp(&state, BattleSide::Enemy), 9);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        BattleEvent::EnduredHit {
+            target: BattleSide::Enemy,
+            raw_damage,
+            held_item: Some(item),
+            ..
+        } if *raw_damage > 1 && item == "FOCUS_BAND"
+    )));
+}
+
+#[test]
+fn focus_band_samples_on_a_nonlethal_successful_hit() {
+    let player = pokemon("TAUROS", 50, pokemon_type("NORMAL"), "TACKLE");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    enemy.item = Some("FOCUS_BAND".to_string());
+    let mut state = battle_state(player, enemy, 0);
+    let move_data = move_data("TACKLE", pokemon_type("NORMAL"), 1, 100);
+    let mut focus_band = held_boost_item("FOCUS_BAND", "HELD_FOCUS_BAND");
+    focus_band.parameter = 255;
+    let items = BTreeMap::from([("FOCUS_BAND".to_string(), focus_band)]);
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX, 0]);
+    let mut events = Vec::new();
+
+    apply_damage_hit(
+        &mut state,
+        BattleSide::Player,
+        "TACKLE",
+        &move_data,
+        1,
+        false,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &items,
+        &mut rng,
+        &mut events,
+    )
+    .expect("nonlethal Focus Band hit resolves");
+
+    assert_eq!(rng.calls, 3);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::EnduredHit { .. }))
+    );
+}
+
+fn future_sight_landing_moves() -> BTreeMap<String, Move> {
+    BTreeMap::from([
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+        (
+            "FUTURE_SIGHT".to_string(),
+            move_data_with_effect(
+                "FUTURE_SIGHT",
+                pokemon_type("PSYCHIC_TYPE"),
+                80,
+                90,
+                "FUTURE_SIGHT",
+            ),
+        ),
+    ])
+}
+
+#[test]
 fn future_sight_queues_stored_damage_on_attacking_side() {
     let player = pokemon("XATU", 70, pokemon_type("PSYCHIC_TYPE"), "FUTURE_SIGHT");
     let enemy = pokemon("RATTATA", 60, pokemon_type("NORMAL"), "SPLASH");
@@ -9358,7 +12929,7 @@ fn future_sight_queues_stored_damage_on_attacking_side() {
         .expect("future sight queued on player side");
     assert_eq!(queued.source, BattleSide::Player);
     assert_eq!(queued.move_name, "FUTURE_SIGHT");
-    assert_eq!(queued.turns_remaining, 2);
+    assert_eq!(queued.turns_remaining, 3);
     assert!(queued.damage > 0);
     assert!(outcome.events.iter().any(|event| matches!(
         event,
@@ -9376,9 +12947,105 @@ fn future_sight_queues_stored_damage_on_attacking_side() {
             side: BattleSide::Enemy,
             source: BattleSide::Player,
             move_name,
-            turns_remaining: 2,
+            turns_remaining: 3,
         } if move_name == "FUTURE_SIGHT"
     )));
+}
+
+#[test]
+fn future_sight_setup_ends_before_accuracy_and_consumes_no_rng() {
+    let player = pokemon("XATU", 70, pokemon_type("PSYCHIC_TYPE"), "FUTURE_SIGHT");
+    let enemy = pokemon("RATTATA", 60, pokemon_type("NORMAL"), "SPLASH");
+    let moves = BTreeMap::from([
+        (
+            "FUTURE_SIGHT".to_string(),
+            move_data_with_effect(
+                "FUTURE_SIGHT",
+                pokemon_type("PSYCHIC_TYPE"),
+                80,
+                1,
+                "FUTURE_SIGHT",
+            ),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Future Sight setup bypasses CheckHit");
+
+    assert!(outcome.state.player_future_sight.is_some());
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed { move_name, .. } if move_name == "FUTURE_SIGHT"
+    )));
+    assert_eq!(rng.calls, 0);
+}
+
+#[test]
+fn future_sight_setup_queues_through_protect_before_its_unreached_checkhit() {
+    let mut player = pokemon("CHIKORITA", 100, pokemon_type("GRASS"), "PROTECT");
+    player.speed = 1_000;
+    let mut enemy = pokemon("XATU", 70, pokemon_type("PSYCHIC_TYPE"), "FUTURE_SIGHT");
+    enemy.speed = 1;
+    let moves = BTreeMap::from([
+        (
+            "PROTECT".to_string(),
+            move_data_with_effect("PROTECT", pokemon_type("NORMAL"), 0, 100, "PROTECT"),
+        ),
+        (
+            "FUTURE_SIGHT".to_string(),
+            move_data_with_effect(
+                "FUTURE_SIGHT",
+                pokemon_type("PSYCHIC_TYPE"),
+                80,
+                1,
+                "FUTURE_SIGHT",
+            ),
+        ),
+    ]);
+    // Protect's success roll is the only byte. Future Sight stores damage and
+    // reaches EndMoveEffect before the later CheckHit can observe Protect.
+    let mut rng = ScriptedBattleRandom::new(vec![1]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Future Sight queues through Protect");
+
+    assert!(outcome.state.enemy_future_sight.is_some());
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::MoveProtected { move_name, .. } if move_name == "FUTURE_SIGHT"
+    )));
+    assert_eq!(rng.calls, 1);
 }
 
 #[test]
@@ -9443,6 +13110,96 @@ fn future_sight_stores_damage_with_the_matching_held_type_parameter() {
 }
 
 #[test]
+fn future_sight_queue_uses_the_effective_transformed_special_stats() {
+    let mut player = pokemon("DITTO", 50, pokemon_type("NORMAL"), "FUTURE_SIGHT");
+    player.special_attack = 50;
+    let mut enemy = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "SPLASH");
+    enemy.special_defense = 100;
+    let mut transformed = battle_state(player, enemy, 0);
+    transformed.player_transform = Some(BattleTransformState {
+        species: species("MEW", 90, pokemon_type("PSYCHIC_TYPE")),
+        dvs: Dv::from_non_hp(10, 10, 10, 10),
+        moves: vec![],
+        stat_boosts: transformed.player.stat_boosts.clone(),
+        attack: 100,
+        defense: 100,
+        speed: 100,
+        special_attack: 200,
+        special_defense: 100,
+    });
+    transformed.player_loaded_stats = BattleLoadedStats {
+        attack: 100,
+        defense: 100,
+        speed: 100,
+        special_attack: 200,
+        special_defense: 100,
+    };
+    let untransformed = {
+        let mut state = transformed.clone();
+        state.player_transform = None;
+        state.player_loaded_stats = BattleLoadedStats::from_raw(&state.player);
+        state
+    };
+    let move_data = move_data_with_effect(
+        "FUTURE_SIGHT",
+        pokemon_type("PSYCHIC_TYPE"),
+        80,
+        90,
+        "FUTURE_SIGHT",
+    );
+    let calculate = |state: &BattleCombatState| {
+        calculate_future_sight_damage(
+            state,
+            BattleSide::Player,
+            &move_data,
+            &stat_multipliers(),
+            &BTreeMap::new(),
+            &mut Vec::new(),
+        )
+        .expect("Future Sight queue damage")
+    };
+
+    assert!(calculate(&transformed) > calculate(&untransformed));
+}
+
+#[test]
+fn future_sight_queue_includes_the_players_special_attack_badge_boost() {
+    let mut player = pokemon("MEW", 50, pokemon_type("PSYCHIC_TYPE"), "FUTURE_SIGHT");
+    player.special_attack = 100;
+    let mut enemy = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "SPLASH");
+    enemy.special_defense = 100;
+    let mut badge_state = battle_state(player, enemy, 0);
+    badge_state.badge_boosts_enabled = true;
+    badge_state.obedience_badges[6] = true;
+    let mut no_badge_state = badge_state.clone();
+    no_badge_state.badge_boosts_enabled = false;
+    recalculate_loaded_stats(&mut badge_state, BattleSide::Player, &stat_multipliers())
+        .expect("badge stats recalculate");
+    recalculate_loaded_stats(&mut no_badge_state, BattleSide::Player, &stat_multipliers())
+        .expect("unbadged stats recalculate");
+    let move_data = move_data_with_effect(
+        "FUTURE_SIGHT",
+        pokemon_type("PSYCHIC_TYPE"),
+        80,
+        90,
+        "FUTURE_SIGHT",
+    );
+    let calculate = |state: &BattleCombatState| {
+        calculate_future_sight_damage(
+            state,
+            BattleSide::Player,
+            &move_data,
+            &stat_multipliers(),
+            &BTreeMap::new(),
+            &mut Vec::new(),
+        )
+        .expect("Future Sight badge damage")
+    };
+
+    assert!(calculate(&badge_state) > calculate(&no_badge_state));
+}
+
+#[test]
 fn future_sight_fails_when_attacking_side_already_has_queued_attack() {
     let player = pokemon("XATU", 70, pokemon_type("PSYCHIC_TYPE"), "FUTURE_SIGHT");
     let enemy = pokemon("RATTATA", 60, pokemon_type("NORMAL"), "SPLASH");
@@ -9504,22 +13261,20 @@ fn future_sight_fails_when_attacking_side_already_has_queued_attack() {
 }
 
 #[test]
-fn future_sight_hits_when_countdown_reaches_zero() {
+fn future_sight_hits_when_countdown_reaches_one() {
     let player = pokemon("XATU", 70, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
     let mut enemy = pokemon("RATTATA", 60, pokemon_type("NORMAL"), "SPLASH");
     enemy.hp = 20;
-    let moves = BTreeMap::from([(
-        "SPLASH".to_string(),
-        move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
-    )]);
+    let moves = future_sight_landing_moves();
     let mut rng = Random::new(130);
     let mut state = battle_state(player, enemy, rng.seed());
     state.player_future_sight = Some(BattleFutureSightState {
         source: BattleSide::Player,
         move_name: "FUTURE_SIGHT".to_string(),
-        turns_remaining: 1,
+        turns_remaining: 2,
         damage: 17,
     });
+    state.critical_hit_register = 1;
 
     let outcome = resolve_battle_turn(
         state,
@@ -9561,28 +13316,201 @@ fn future_sight_hits_when_countdown_reaches_zero() {
     assert!((14..=17).contains(&damage));
     assert_eq!(hp_after, 20 - damage);
     assert_eq!(outcome.state.enemy.hp, hp_after);
+    assert_eq!(outcome.state.critical_hit_register, 1);
 }
 
 #[test]
-fn future_sight_countdowns_are_owned_and_resolved_by_the_attacking_side() {
+fn future_sight_count_one_decrements_to_inactive_without_landing() {
     let player = pokemon("XATU", 70, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
-    let enemy = pokemon("NATU", 60, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
-    let moves = BTreeMap::from([(
-        "SPLASH".to_string(),
-        move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
-    )]);
+    let enemy = pokemon("RATTATA", 60, pokemon_type("NORMAL"), "SPLASH");
+    let enemy_hp = enemy.hp;
+    let moves = future_sight_landing_moves();
     let mut rng = Random::new(130);
     let mut state = battle_state(player, enemy, rng.seed());
     state.player_future_sight = Some(BattleFutureSightState {
         source: BattleSide::Player,
         move_name: "FUTURE_SIGHT".to_string(),
         turns_remaining: 1,
+        damage: 17,
+    });
+
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("count-one Future Sight state resolves");
+
+    assert_eq!(outcome.state.player_future_sight, None);
+    assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::FutureSightLanded { .. } | BattleEvent::FutureSightDamage { .. }
+    )));
+}
+
+#[test]
+fn future_sight_landing_samples_variation_before_accuracy_and_can_miss() {
+    let player = pokemon("XATU", 70, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
+    let mut enemy = pokemon("RATTATA", 60, pokemon_type("NORMAL"), "SPLASH");
+    enemy.hp = 20;
+    let moves = BTreeMap::from([
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+        (
+            "FUTURE_SIGHT".to_string(),
+            move_data_with_effect(
+                "FUTURE_SIGHT",
+                pokemon_type("PSYCHIC_TYPE"),
+                80,
+                1,
+                "FUTURE_SIGHT",
+            ),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.player_future_sight = Some(BattleFutureSightState {
+        source: BattleSide::Player,
+        move_name: "FUTURE_SIGHT".to_string(),
+        turns_remaining: 2,
+        damage: 17,
+    });
+    state.critical_hit_register = 1;
+    // The resumed script starts after FutureSight: variation first, then the
+    // delayed CheckHit accuracy byte. The stored attack is discarded on miss.
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Future Sight landing miss resolves");
+
+    assert_eq!(outcome.state.enemy.hp, 20);
+    assert_eq!(outcome.state.player_future_sight, None);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            roll: u8::MAX,
+            ..
+        } if move_name == "FUTURE_SIGHT"
+    )));
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::FutureSightDamage { .. } | BattleEvent::SubstituteDamaged { .. }
+    )));
+    assert_eq!(rng.calls, 2);
+    assert_eq!(outcome.state.critical_hit_register, 0);
+}
+
+#[test]
+fn future_sight_full_accuracy_landing_still_checks_brightpowder() {
+    let player = pokemon("XATU", 70, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
+    let mut enemy = pokemon("RATTATA", 60, pokemon_type("NORMAL"), "SPLASH");
+    enemy.item = Some("BRIGHTPOWDER".to_string());
+    let moves = BTreeMap::from([
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+        (
+            "FUTURE_SIGHT".to_string(),
+            move_data_with_effect(
+                "FUTURE_SIGHT",
+                pokemon_type("PSYCHIC_TYPE"),
+                80,
+                100,
+                "FUTURE_SIGHT",
+            ),
+        ),
+    ]);
+    let mut brightpowder = held_boost_item("BRIGHTPOWDER", "HELD_BRIGHTPOWDER");
+    brightpowder.parameter = 20;
+    let items = BTreeMap::from([("BRIGHTPOWDER".to_string(), brightpowder)]);
+    let mut state = battle_state(player, enemy, 0);
+    state.player_future_sight = Some(BattleFutureSightState {
+        source: BattleSide::Player,
+        move_name: "FUTURE_SIGHT".to_string(),
+        turns_remaining: 2,
+        damage: 17,
+    });
+    // CheckFutureSight resumes at variation, then enters the ordinary
+    // CheckHit item lookup. The roll equal to 255 - 20 must miss.
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, 235]);
+
+    let outcome = resolve_battle_turn_with_items(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Future Sight BrightPowder boundary resolves");
+
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            accuracy: 235,
+            roll: 235,
+        } if move_name == "FUTURE_SIGHT"
+    )));
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::FutureSightDamage { .. } | BattleEvent::SubstituteDamaged { .. }
+    )));
+    assert_eq!(rng.calls, 2);
+}
+
+#[test]
+fn future_sight_countdowns_are_owned_and_resolved_by_the_attacking_side() {
+    let player = pokemon("XATU", 70, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
+    let enemy = pokemon("NATU", 60, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
+    let moves = future_sight_landing_moves();
+    let mut rng = Random::new(130);
+    let mut state = battle_state(player, enemy, rng.seed());
+    state.player_future_sight = Some(BattleFutureSightState {
+        source: BattleSide::Player,
+        move_name: "FUTURE_SIGHT".to_string(),
+        turns_remaining: 2,
         damage: 1,
     });
     state.enemy_future_sight = Some(BattleFutureSightState {
         source: BattleSide::Enemy,
         move_name: "FUTURE_SIGHT".to_string(),
-        turns_remaining: 1,
+        turns_remaining: 2,
         damage: 1,
     });
 
@@ -9626,10 +13554,7 @@ fn future_sight_does_not_trigger_hp_berry_before_later_sandstorm_ko() {
     enemy.max_hp = 100;
     enemy.hp = 20;
     enemy.item = Some("BERRY".to_string());
-    let moves = BTreeMap::from([(
-        "SPLASH".to_string(),
-        move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
-    )]);
+    let moves = future_sight_landing_moves();
     let mut berry = held_boost_item("BERRY", "HELD_BERRY");
     berry.parameter = 10;
     let items = BTreeMap::from([("BERRY".to_string(), berry)]);
@@ -9638,7 +13563,7 @@ fn future_sight_does_not_trigger_hp_berry_before_later_sandstorm_ko() {
     state.player_future_sight = Some(BattleFutureSightState {
         source: BattleSide::Player,
         move_name: "FUTURE_SIGHT".to_string(),
-        turns_remaining: 1,
+        turns_remaining: 2,
         damage: 10,
     });
     state.weather = Weather::Sandstorm;
@@ -9693,17 +13618,14 @@ fn future_sight_landing_damages_substitute_before_real_hp() {
     let player = pokemon("XATU", 70, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
     let mut enemy = pokemon("RATTATA", 60, pokemon_type("NORMAL"), "SPLASH");
     enemy.hp = 20;
-    let moves = BTreeMap::from([(
-        "SPLASH".to_string(),
-        move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
-    )]);
+    let moves = future_sight_landing_moves();
     let mut rng = Random::new(131);
     let mut state = battle_state(player, enemy, rng.seed());
     state.enemy_substitute_hp = 20;
     state.player_future_sight = Some(BattleFutureSightState {
         source: BattleSide::Player,
         move_name: "FUTURE_SIGHT".to_string(),
-        turns_remaining: 1,
+        turns_remaining: 2,
         damage: 17,
     });
 
@@ -9761,17 +13683,14 @@ fn future_sight_lands_after_the_turns_endure_state_has_cleared() {
     let player = pokemon("XATU", 70, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
     let mut enemy = pokemon("RATTATA", 60, pokemon_type("NORMAL"), "SPLASH");
     enemy.hp = 10;
-    let moves = BTreeMap::from([(
-        "SPLASH".to_string(),
-        move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
-    )]);
+    let moves = future_sight_landing_moves();
     let mut rng = Random::new(132);
     let mut state = battle_state(player, enemy, rng.seed());
     state.enemy_endure_active = true;
     state.player_future_sight = Some(BattleFutureSightState {
         source: BattleSide::Player,
         move_name: "FUTURE_SIGHT".to_string(),
-        turns_remaining: 1,
+        turns_remaining: 2,
         damage: 17,
     });
 
@@ -10226,6 +14145,7 @@ fn counter_fails_after_special_damage() {
             .iter()
             .any(|event| matches!(event, BattleEvent::CounterDamage { .. }))
     );
+    assert_eq!(outcome.state.critical_hit_register, 0);
 }
 
 #[test]
@@ -10305,6 +14225,729 @@ fn mirror_coat_reflects_special_damage_after_opponent_moves() {
     assert_eq!(reflected.0, source_damage);
     assert_eq!(reflected.1, source_damage * 2);
     assert_eq!(reflected.2 - reflected.3, reflected.1);
+}
+
+#[test]
+fn enemy_counter_uses_ai_damage_scratch_after_player_uses_an_item() {
+    let mut player = pokemon("RATTATA", 90, pokemon_type("NORMAL"), "TACKLE");
+    player.hp -= 20;
+    let player_hp_before = player.hp;
+    let enemy = pokemon("MACHOP", 40, pokemon_type("FIGHTING"), "COUNTER");
+    let moves = BTreeMap::from([
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+        (
+            "COUNTER".to_string(),
+            move_data_with_effect("COUNTER", pokemon_type("FIGHTING"), 1, 100, "COUNTER"),
+        ),
+    ]);
+    let items = BTreeMap::from([("POTION".to_string(), battle_item("POTION", 20, true))]);
+    let mut state = battle_state(player, enemy, 0);
+    state.player_last_counter_move = Some("TACKLE".to_string());
+    let mut select_enemy_move = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| {
+        Ok(EnemyMoveSelection {
+            slot: 0,
+            ai_damage_register: 12,
+        })
+    };
+    let mut select_enemy_action =
+        |_: &BattleCombatState, _: &mut dyn BattleRandomSource| Ok(BattleAction::Move { slot: 0 });
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_battle_turn_with_enemy_ai_actions(
+        state,
+        BattleAction::Item {
+            item_id: "POTION".to_string(),
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+        &mut select_enemy_move,
+        &mut select_enemy_action,
+    )
+    .expect("Counter after player item resolves");
+
+    assert!(outcome.events.contains(&BattleEvent::CounterDamage {
+        side: BattleSide::Enemy,
+        move_name: "COUNTER".to_string(),
+        target: BattleSide::Player,
+        countered_move: "TACKLE".to_string(),
+        category: BattleDamageCategory::Physical,
+        source_damage: 12,
+        damage: 24,
+        defender_hp_before: player_hp_before + 20,
+        defender_hp_after: player_hp_before - 4,
+    }));
+}
+
+#[test]
+fn ai_damage_scratch_does_not_bypass_counter_went_first_check() {
+    let player = pokemon("MACHOP", 100, pokemon_type("FIGHTING"), "COUNTER");
+    let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "VITAL_THROW");
+    enemy.hp -= 20;
+    let moves = BTreeMap::from([
+        (
+            "COUNTER".to_string(),
+            move_data_with_effect("COUNTER", pokemon_type("FIGHTING"), 1, 100, "COUNTER"),
+        ),
+        (
+            "VITAL_THROW".to_string(),
+            move_data_with_effect(
+                "VITAL_THROW",
+                pokemon_type("FIGHTING"),
+                70,
+                100,
+                "ALWAYS_HIT",
+            ),
+        ),
+    ]);
+    let items = BTreeMap::from([("POTION".to_string(), battle_item("POTION", 20, true))]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("VITAL_THROW".to_string());
+    let mut select_enemy_move = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| {
+        Ok(EnemyMoveSelection {
+            slot: 0,
+            ai_damage_register: 12,
+        })
+    };
+    let mut select_enemy_action = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| {
+        Ok(BattleAction::TrainerItem {
+            selected_move_slot: 0,
+            item_id: "POTION".to_string(),
+        })
+    };
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_battle_turn_with_enemy_ai_actions(
+        state,
+        BattleAction::Move { slot: 0 },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+        &mut select_enemy_move,
+        &mut select_enemy_action,
+    )
+    .expect("faster Counter before trainer item ordering resolves");
+
+    assert_eq!(outcome.order, vec![BattleSide::Player, BattleSide::Enemy]);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::NoEffect {
+            side: BattleSide::Player,
+            move_name,
+        } if move_name == "COUNTER"
+    )));
+    assert!(
+        !outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::CounterDamage { .. }))
+    );
+}
+
+#[test]
+fn trainer_item_clears_enemy_counter_move_before_player_counter() {
+    let player = pokemon("MACHOP", 100, pokemon_type("FIGHTING"), "COUNTER");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    enemy.hp = enemy.hp.saturating_sub(20);
+    let moves = BTreeMap::from([
+        (
+            "COUNTER".to_string(),
+            move_data_with_effect("COUNTER", pokemon_type("FIGHTING"), 1, 100, "COUNTER"),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    let items = BTreeMap::from([("POTION".to_string(), battle_item("POTION", 20, true))]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("TACKLE".to_string());
+    let mut select_enemy_move = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| {
+        Ok(EnemyMoveSelection {
+            slot: 0,
+            ai_damage_register: 12,
+        })
+    };
+    let mut select_enemy_action = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| {
+        Ok(BattleAction::TrainerItem {
+            selected_move_slot: 0,
+            item_id: "POTION".to_string(),
+        })
+    };
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_battle_turn_with_enemy_ai_actions(
+        state,
+        BattleAction::Move { slot: 0 },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+        &mut select_enemy_move,
+        &mut select_enemy_action,
+    )
+    .expect("trainer item before player Counter resolves");
+
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::ItemUsed {
+            side: BattleSide::Enemy,
+            item_id,
+            ..
+        } if item_id == "POTION"
+    )));
+    assert_no_player_counter_damage(&outcome, "COUNTER");
+    assert_eq!(outcome.state.enemy_last_counter_move, None);
+}
+
+#[test]
+fn ordinary_switch_clears_both_counter_histories_but_only_actor_last_move() {
+    for side in [BattleSide::Player, BattleSide::Enemy] {
+        let player = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+        let enemy = pokemon("PIDGEY", 30, pokemon_type("FLYING"), "GUST");
+        let mut state = battle_state(player, enemy, 0);
+        state.player_last_move = Some("TACKLE".to_string());
+        state.enemy_last_move = Some("GUST".to_string());
+        state.player_last_counter_move = Some("TACKLE".to_string());
+        state.enemy_last_counter_move = Some("GUST".to_string());
+
+        clear_side_volatile_conditions(&mut state, side);
+
+        assert_eq!(state.player_last_counter_move, None, "{side:?}");
+        assert_eq!(state.enemy_last_counter_move, None, "{side:?}");
+        match side {
+            BattleSide::Player => {
+                assert_eq!(state.player_last_move, None);
+                assert_eq!(state.enemy_last_move.as_deref(), Some("GUST"));
+            }
+            BattleSide::Enemy => {
+                assert_eq!(state.player_last_move.as_deref(), Some("TACKLE"));
+                assert_eq!(state.enemy_last_move, None);
+            }
+        }
+    }
+}
+
+#[test]
+fn missed_damage_resets_ai_scratch_before_counter() {
+    let player = pokemon("MACHOP", 40, pokemon_type("FIGHTING"), "COUNTER");
+    let enemy = pokemon("RATTATA", 100, pokemon_type("NORMAL"), "TACKLE");
+    let moves = BTreeMap::from([
+        (
+            "COUNTER".to_string(),
+            move_data_with_effect("COUNTER", pokemon_type("FIGHTING"), 1, 100, "COUNTER"),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 1),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("TACKLE".to_string());
+    let mut select_enemy_move = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| {
+        Ok(EnemyMoveSelection {
+            slot: 0,
+            ai_damage_register: 12,
+        })
+    };
+    let mut select_enemy_action =
+        |_: &BattleCombatState, _: &mut dyn BattleRandomSource| Ok(BattleAction::Move { slot: 0 });
+    let mut rng = ScriptedBattleRandom::new(vec![255, 255, 255]);
+
+    let outcome = resolve_battle_turn_with_enemy_ai_actions(
+        state,
+        BattleAction::Move { slot: 0 },
+        &moves,
+        &BTreeMap::new(),
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+        &mut select_enemy_move,
+        &mut select_enemy_action,
+    )
+    .expect("miss before Counter resolves");
+
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Enemy,
+            move_name,
+            ..
+        } if move_name == "TACKLE"
+    )));
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::NoEffect {
+            side: BattleSide::Player,
+            move_name,
+        } if move_name == "COUNTER"
+    )));
+    assert!(
+        !outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::CounterDamage { .. }))
+    );
+}
+
+#[test]
+fn jump_kick_crash_replaces_ai_scratch_before_counter() {
+    let player = pokemon("MACHOP", 40, pokemon_type("FIGHTING"), "COUNTER");
+    let enemy = pokemon("HITMONLEE", 100, pokemon_type("FIGHTING"), "JUMP_KICK");
+    let moves = BTreeMap::from([
+        (
+            "COUNTER".to_string(),
+            move_data_with_effect("COUNTER", pokemon_type("FIGHTING"), 1, 100, "COUNTER"),
+        ),
+        (
+            "JUMP_KICK".to_string(),
+            move_data_with_effect("JUMP_KICK", pokemon_type("FIGHTING"), 70, 1, "JUMP_KICK"),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("JUMP_KICK".to_string());
+    let mut select_enemy_move = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| {
+        Ok(EnemyMoveSelection {
+            slot: 0,
+            ai_damage_register: 12,
+        })
+    };
+    let mut select_enemy_action =
+        |_: &BattleCombatState, _: &mut dyn BattleRandomSource| Ok(BattleAction::Move { slot: 0 });
+    let mut rng = ScriptedBattleRandom::new(vec![255, 255, 255]);
+
+    let outcome = resolve_battle_turn_with_enemy_ai_actions(
+        state,
+        BattleAction::Move { slot: 0 },
+        &moves,
+        &BTreeMap::new(),
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+        &mut select_enemy_move,
+        &mut select_enemy_action,
+    )
+    .expect("Jump Kick crash before Counter resolves");
+
+    let crash_damage = outcome
+        .events
+        .iter()
+        .find_map(|event| match event {
+            BattleEvent::JumpKickCrash {
+                side: BattleSide::Enemy,
+                crash_damage,
+                ..
+            } => Some(*crash_damage),
+            _ => None,
+        })
+        .expect("enemy crashes");
+    let counter_source = outcome
+        .events
+        .iter()
+        .find_map(|event| match event {
+            BattleEvent::CounterDamage {
+                side: BattleSide::Player,
+                source_damage,
+                ..
+            } => Some(*source_damage),
+            _ => None,
+        })
+        .expect("player reflects retained crash register");
+    assert_ne!(
+        crash_damage, 12,
+        "fixture must distinguish crash from AI scratch"
+    );
+    assert_eq!(counter_source, crash_damage);
+}
+
+fn assert_no_player_counter_damage(outcome: &BattleTurnOutcome, move_name: &str) {
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::NoEffect {
+            side: BattleSide::Player,
+            move_name: failed_move,
+        } if failed_move == move_name
+    )));
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::CounterDamage {
+            side: BattleSide::Player,
+            ..
+        }
+    )));
+}
+
+fn resolve_enemy_move_before_player_counter(
+    state: BattleCombatState,
+    moves: &BTreeMap<String, Move>,
+    rng: &mut dyn BattleRandomSource,
+) -> BattleTurnOutcome {
+    let mut select_enemy_move = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| {
+        Ok(EnemyMoveSelection {
+            slot: 0,
+            ai_damage_register: 12,
+        })
+    };
+    let mut select_enemy_action =
+        |_: &BattleCombatState, _: &mut dyn BattleRandomSource| Ok(BattleAction::Move { slot: 0 });
+    resolve_battle_turn_with_enemy_ai_actions(
+        state,
+        BattleAction::Move { slot: 0 },
+        moves,
+        &BTreeMap::new(),
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        rng,
+        &mut select_enemy_move,
+        &mut select_enemy_action,
+    )
+    .expect("enemy move before player counter resolves")
+}
+
+#[test]
+fn invalid_snore_resets_ai_damage_scratch_before_counter() {
+    let player = pokemon("MACHOP", 40, pokemon_type("FIGHTING"), "COUNTER");
+    let enemy = pokemon("RATTATA", 100, pokemon_type("NORMAL"), "SNORE");
+    let moves = BTreeMap::from([
+        (
+            "COUNTER".to_string(),
+            move_data_with_effect("COUNTER", pokemon_type("FIGHTING"), 1, 100, "COUNTER"),
+        ),
+        (
+            "SNORE".to_string(),
+            move_data_with_effect("SNORE", pokemon_type("NORMAL"), 40, 100, "SNORE"),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("SNORE".to_string());
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_enemy_move_before_player_counter(state, &moves, &mut rng);
+
+    assert_no_player_counter_damage(&outcome, "COUNTER");
+}
+
+#[test]
+fn duplicate_future_sight_resets_ai_damage_scratch_before_mirror_coat() {
+    let player = pokemon("WOBBUFFET", 40, pokemon_type("PSYCHIC_TYPE"), "MIRROR_COAT");
+    let enemy = pokemon("XATU", 100, pokemon_type("PSYCHIC_TYPE"), "FUTURE_SIGHT");
+    let moves = BTreeMap::from([
+        (
+            "MIRROR_COAT".to_string(),
+            move_data_with_effect(
+                "MIRROR_COAT",
+                pokemon_type("PSYCHIC_TYPE"),
+                1,
+                100,
+                "MIRROR_COAT",
+            ),
+        ),
+        (
+            "FUTURE_SIGHT".to_string(),
+            move_data_with_effect(
+                "FUTURE_SIGHT",
+                pokemon_type("PSYCHIC_TYPE"),
+                80,
+                100,
+                "FUTURE_SIGHT",
+            ),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("FUTURE_SIGHT".to_string());
+    state.enemy_future_sight = Some(BattleFutureSightState {
+        source: BattleSide::Enemy,
+        move_name: "FUTURE_SIGHT".to_string(),
+        turns_remaining: 3,
+        damage: 11,
+    });
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_enemy_move_before_player_counter(state, &moves, &mut rng);
+
+    assert_no_player_counter_damage(&outcome, "MIRROR_COAT");
+}
+
+#[test]
+fn queued_future_sight_zeros_copied_damage_before_mirror_coat() {
+    let player = pokemon("WOBBUFFET", 40, pokemon_type("PSYCHIC_TYPE"), "MIRROR_COAT");
+    let enemy = pokemon("XATU", 100, pokemon_type("PSYCHIC_TYPE"), "FUTURE_SIGHT");
+    let moves = BTreeMap::from([
+        (
+            "MIRROR_COAT".to_string(),
+            move_data_with_effect(
+                "MIRROR_COAT",
+                pokemon_type("PSYCHIC_TYPE"),
+                1,
+                100,
+                "MIRROR_COAT",
+            ),
+        ),
+        (
+            "FUTURE_SIGHT".to_string(),
+            move_data_with_effect(
+                "FUTURE_SIGHT",
+                pokemon_type("PSYCHIC_TYPE"),
+                80,
+                100,
+                "FUTURE_SIGHT",
+            ),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("FUTURE_SIGHT".to_string());
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_enemy_move_before_player_counter(state, &moves, &mut rng);
+
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::FutureSightQueued {
+            side: BattleSide::Enemy,
+            ..
+        }
+    )));
+    assert_no_player_counter_damage(&outcome, "MIRROR_COAT");
+}
+
+#[test]
+fn present_heal_damage_stats_reset_ai_scratch_before_counter() {
+    let mut player = pokemon("MACHOP", 40, pokemon_type("FIGHTING"), "COUNTER");
+    player.hp = player.hp.saturating_sub(20);
+    let enemy = pokemon("DELIBIRD", 100, pokemon_type("ICE"), "PRESENT");
+    let moves = BTreeMap::from([
+        (
+            "COUNTER".to_string(),
+            move_data_with_effect("COUNTER", pokemon_type("FIGHTING"), 1, 100, "COUNTER"),
+        ),
+        (
+            "PRESENT".to_string(),
+            move_data_with_effect("PRESENT", pokemon_type("NORMAL"), 1, 100, "PRESENT"),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("PRESENT".to_string());
+    let mut rng = ScriptedBattleRandom::new(vec![255, 205]);
+
+    let outcome = resolve_enemy_move_before_player_counter(state, &moves, &mut rng);
+
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::PresentHeal {
+            side: BattleSide::Enemy,
+            ..
+        }
+    )));
+    assert_no_player_counter_damage(&outcome, "COUNTER");
+}
+
+#[test]
+fn successful_pain_split_resets_shared_damage_scratch() {
+    let mut player = pokemon("MACHOP", 40, pokemon_type("FIGHTING"), "COUNTER");
+    player.hp = player.hp.saturating_sub(20);
+    let enemy = pokemon("MISDREAVUS", 100, pokemon_type("GHOST"), "PAIN_SPLIT");
+    let mut state = battle_state(player, enemy, 0);
+    state.player_last_damage = Some(BattleLastDamageState {
+        source: BattleSide::Enemy,
+        move_name: "TACKLE".to_string(),
+        category: BattleDamageCategory::Physical,
+        damage: 12,
+    });
+    state.enemy_last_damage = state.player_last_damage.clone();
+    let mut events = Vec::new();
+
+    apply_pain_split_effect(&mut state, BattleSide::Enemy, "PAIN_SPLIT", &mut events);
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        BattleEvent::PainSplitApplied {
+            side: BattleSide::Enemy,
+            ..
+        }
+    )));
+    assert_eq!(state.player_last_damage, None);
+    assert_eq!(state.enemy_last_damage, None);
+}
+
+#[test]
+fn failed_ohko_resets_ai_damage_scratch_before_counter() {
+    let mut player = pokemon("PIDGEY", 40, pokemon_type("FLYING"), "COUNTER");
+    player.level = 21;
+    let enemy = pokemon("DIGLETT", 100, pokemon_type("GROUND"), "FISSURE");
+    let moves = BTreeMap::from([
+        (
+            "COUNTER".to_string(),
+            move_data_with_effect("COUNTER", pokemon_type("FIGHTING"), 1, 100, "COUNTER"),
+        ),
+        (
+            "FISSURE".to_string(),
+            move_data_with_effect("FISSURE", pokemon_type("GROUND"), 1, 30, "OHKO"),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("FISSURE".to_string());
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_enemy_move_before_player_counter(state, &moves, &mut rng);
+
+    assert_no_player_counter_damage(&outcome, "COUNTER");
+}
+
+#[test]
+fn trailing_ineligible_beat_up_member_resets_damage_before_counter() {
+    let player = pokemon("WOBBUFFET", 40, pokemon_type("PSYCHIC_TYPE"), "MIRROR_COAT");
+    let enemy = pokemon("SNEASEL", 100, pokemon_type("NORMAL"), "BEAT_UP");
+    let moves = BTreeMap::from([
+        (
+            "MIRROR_COAT".to_string(),
+            move_data_with_effect(
+                "MIRROR_COAT",
+                pokemon_type("PSYCHIC_TYPE"),
+                1,
+                100,
+                "MIRROR_COAT",
+            ),
+        ),
+        (
+            "BEAT_UP".to_string(),
+            move_data_with_effect("BEAT_UP", pokemon_type("DARK"), 10, 100, "BEAT_UP"),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("BEAT_UP".to_string());
+    state.enemy_party[1].hp = 0;
+    let mut rng = ScriptedBattleRandom::new(vec![255, 255, 255, 255]);
+
+    let outcome = resolve_enemy_move_before_player_counter(state, &moves, &mut rng);
+
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::BeatUpParticipant {
+            side: BattleSide::Enemy,
+            party_index: 0,
+            ..
+        }
+    )));
+    assert_no_player_counter_damage(&outcome, "MIRROR_COAT");
+}
+
+#[test]
+fn fast_asleep_end_turn_resets_ai_damage_scratch_before_counter() {
+    let player = pokemon("MACHOP", 40, pokemon_type("FIGHTING"), "COUNTER");
+    let mut enemy = pokemon("RATTATA", 100, pokemon_type("NORMAL"), "TACKLE");
+    enemy.status = Some("SLEEP".to_string());
+    enemy.sleep_turns = 2;
+    let moves = BTreeMap::from([
+        (
+            "COUNTER".to_string(),
+            move_data_with_effect("COUNTER", pokemon_type("FIGHTING"), 1, 100, "COUNTER"),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("TACKLE".to_string());
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_enemy_move_before_player_counter(state, &moves, &mut rng);
+
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::SleepTurn {
+            side: BattleSide::Enemy,
+            ..
+        }
+    )));
+    assert_no_player_counter_damage(&outcome, "COUNTER");
+}
+
+#[test]
+fn recharge_end_turn_resets_ai_damage_scratch_before_counter() {
+    let player = pokemon("MACHOP", 40, pokemon_type("FIGHTING"), "COUNTER");
+    let enemy = pokemon("RATTATA", 100, pokemon_type("NORMAL"), "TACKLE");
+    let moves = BTreeMap::from([
+        (
+            "COUNTER".to_string(),
+            move_data_with_effect("COUNTER", pokemon_type("FIGHTING"), 1, 100, "COUNTER"),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("TACKLE".to_string());
+    state.enemy_recharge_move = Some("HYPER_BEAM".to_string());
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_enemy_move_before_player_counter(state, &moves, &mut rng);
+
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::RechargeTurn {
+            side: BattleSide::Enemy,
+            ..
+        }
+    )));
+    assert_no_player_counter_damage(&outcome, "COUNTER");
+}
+
+#[test]
+fn starting_charge_resets_ai_damage_scratch_before_counter() {
+    let player = pokemon("MACHOP", 40, pokemon_type("FIGHTING"), "COUNTER");
+    let enemy = pokemon("PIDGEY", 100, pokemon_type("FLYING"), "FLY");
+    let moves = BTreeMap::from([
+        (
+            "COUNTER".to_string(),
+            move_data_with_effect("COUNTER", pokemon_type("FIGHTING"), 1, 100, "COUNTER"),
+        ),
+        (
+            "FLY".to_string(),
+            move_data_with_effect("FLY", pokemon_type("FLYING"), 70, 95, "FLY"),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("FLY".to_string());
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_enemy_move_before_player_counter(state, &moves, &mut rng);
+
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::AirborneStarted {
+            side: BattleSide::Enemy,
+            move_name,
+        } if move_name == "FLY"
+    )));
+    assert_no_player_counter_damage(&outcome, "COUNTER");
 }
 
 #[test]
@@ -10719,10 +15362,11 @@ fn recoil_hit_can_faint_user_after_damage() {
 }
 
 #[test]
-fn selfdestruct_effect_faints_user_after_successful_damage() {
+fn selfdestruct_effect_faints_user_after_successful_damage_regardless_of_ability() {
     let player = pokemon("VOLTORB", 90, pokemon_type("ELECTRIC"), "SELFDESTRUCT");
     let player_hp = player.hp;
-    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    enemy.species.ability = "DAMP".to_string();
     let moves = BTreeMap::from([
         (
             "SELFDESTRUCT".to_string(),
@@ -10745,7 +15389,7 @@ fn selfdestruct_effect_faints_user_after_successful_damage() {
         battle_state(player, enemy, rng.seed()),
         BattleTurnInput {
             player: BattleAction::Move { slot: 0 },
-            enemy: BattleAction::Switch { party_index: 1 },
+            enemy: BattleAction::Move { slot: 0 },
         },
         &moves,
         &move_priorities(),
@@ -10829,7 +15473,7 @@ fn direct_stat_stage_move_uses_pack_stat_and_amount_fields() {
                 "SAND_ATTACK",
                 pokemon_type("GROUND"),
                 0,
-                0,
+                100,
                 "ACCURACY_DOWN",
                 0,
                 Stat::Accuracy,
@@ -11288,7 +15932,7 @@ fn stat_stage_move_reports_unchanged_at_stage_boundary() {
                 "SAND_ATTACK",
                 pokemon_type("GROUND"),
                 0,
-                0,
+                100,
                 "ACCURACY_DOWN",
                 0,
                 Stat::Accuracy,
@@ -11972,6 +16616,32 @@ fn light_screen_reduces_special_damage_inside_the_damage_formula() {
 }
 
 #[test]
+fn simultaneous_screen_expiry_reports_light_screen_before_reflect() {
+    let player = pokemon("MEGANIUM", 50, pokemon_type("GRASS"), "SPLASH");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    state.player_light_screen_turns = 1;
+    state.player_reflect_turns = 1;
+    let mut events = Vec::new();
+
+    apply_end_turn_screens(&mut state, &mut events);
+
+    assert_eq!(
+        events,
+        vec![
+            BattleEvent::LightScreenCount {
+                side: BattleSide::Player,
+                turns_remaining: 0,
+            },
+            BattleEvent::ReflectCount {
+                side: BattleSide::Player,
+                turns_remaining: 0,
+            },
+        ]
+    );
+}
+
+#[test]
 fn destiny_bond_lasts_through_the_opposing_action_then_clears() {
     let player = pokemon("GASTLY", 120, pokemon_type("GHOST"), "DESTINY_BOND");
     let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
@@ -12257,6 +16927,123 @@ fn leech_seed_fails_when_target_already_seeded() {
         move_name: "LEECH_SEED".to_string(),
         target: BattleSide::Enemy,
     }));
+}
+
+#[test]
+fn protected_leech_seed_reaches_its_evaded_text_after_protecting_text() {
+    let player = pokemon("BULBASAUR", 50, pokemon_type("GRASS"), "LEECH_SEED");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "PROTECT");
+    let moves = BTreeMap::from([
+        (
+            "LEECH_SEED".to_string(),
+            move_data_with_effect("LEECH_SEED", pokemon_type("GRASS"), 0, 100, "LEECH_SEED"),
+        ),
+        (
+            "PROTECT".to_string(),
+            move_data_with_effect("PROTECT", pokemon_type("NORMAL"), 0, 100, "PROTECT"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![1]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("protected Leech Seed turn resolves");
+
+    assert_eq!(outcome.state.enemy_leech_seed_source, None);
+    assert!(outcome.events.contains(&BattleEvent::MoveProtected {
+        side: BattleSide::Player,
+        move_name: "LEECH_SEED".to_string(),
+        target: BattleSide::Enemy,
+    }));
+    assert!(outcome.events.contains(&BattleEvent::LeechSeedFailed {
+        side: BattleSide::Player,
+        move_name: "LEECH_SEED".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
+fn missed_leech_seed_routes_the_accuracy_result_to_evaded_text() {
+    let player = pokemon("BULBASAUR", 50, pokemon_type("GRASS"), "LEECH_SEED");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let moves = BTreeMap::from([
+        (
+            "LEECH_SEED".to_string(),
+            move_data_with_effect("LEECH_SEED", pokemon_type("GRASS"), 0, 1, "LEECH_SEED"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("missed Leech Seed turn resolves");
+
+    assert_eq!(rng.calls, 1);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            roll: u8::MAX,
+            ..
+        } if move_name == "LEECH_SEED"
+    )));
+    assert!(outcome.events.contains(&BattleEvent::LeechSeedFailed {
+        side: BattleSide::Player,
+        move_name: "LEECH_SEED".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
+fn substitute_blocked_leech_seed_uses_the_same_evaded_outcome() {
+    let player = pokemon("BULBASAUR", 50, pokemon_type("GRASS"), "LEECH_SEED");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_substitute_hp = 10;
+    let mut events = Vec::new();
+
+    apply_leech_seed_effect(&mut state, BattleSide::Player, "LEECH_SEED", &mut events);
+
+    assert_eq!(state.enemy_leech_seed_source, None);
+    assert!(events.contains(&BattleEvent::LeechSeedFailed {
+        side: BattleSide::Player,
+        move_name: "LEECH_SEED".to_string(),
+        target: BattleSide::Enemy,
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::SubstituteBlocked { .. }))
+    );
 }
 
 #[test]
@@ -12612,6 +17399,96 @@ fn trap_target_applies_after_successful_damage() {
 }
 
 #[test]
+fn trap_target_applies_when_its_damage_breaks_substitute() {
+    let player = pokemon("ONIX", 50, pokemon_type("ROCK"), "BIND");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let enemy_hp = enemy.hp;
+    let bind = move_data_with_effect("BIND", pokemon_type("NORMAL"), 15, 100, "TRAP_TARGET");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_substitute_hp = 1;
+    // critical -> variation -> TrapTarget duration
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX, 2]);
+    let mut events = Vec::new();
+
+    let result = apply_damage_hit(
+        &mut state,
+        BattleSide::Player,
+        "BIND",
+        &bind,
+        1,
+        false,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BTreeMap::new(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("Bind damage resolves");
+
+    assert_eq!(result, DamageHitResult::Continue);
+    assert_eq!(state.enemy_substitute_hp, 0);
+    assert_eq!(state.enemy.hp, enemy_hp);
+    assert_eq!(
+        state.enemy_trap,
+        Some(BattleTrapState {
+            source: BattleSide::Player,
+            move_name: "BIND".to_string(),
+            turns_remaining: 5,
+        })
+    );
+    assert!(events.contains(&BattleEvent::TrapApplied {
+        side: BattleSide::Player,
+        move_name: "BIND".to_string(),
+        target: BattleSide::Enemy,
+        turns: 5,
+        roll: 2,
+    }));
+    assert_eq!(rng.calls, 3);
+}
+
+#[test]
+fn trap_target_does_not_sample_duration_while_substitute_survives() {
+    let player = pokemon("ONIX", 50, pokemon_type("ROCK"), "BIND");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let bind = move_data_with_effect("BIND", pokemon_type("NORMAL"), 15, 100, "TRAP_TARGET");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_substitute_hp = 1_000;
+    // critical -> variation; the blocked TrapTarget command must not sample.
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX]);
+    let mut events = Vec::new();
+
+    apply_damage_hit(
+        &mut state,
+        BattleSide::Player,
+        "BIND",
+        &bind,
+        1,
+        false,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BTreeMap::new(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("Bind damage resolves");
+
+    assert!(state.enemy_substitute_hp > 0);
+    assert_eq!(state.enemy_trap, None);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::TrapApplied { .. }))
+    );
+    assert_eq!(rng.calls, 2);
+}
+
+#[test]
 fn trapped_side_can_act_before_residual_damage_ticks() {
     let player = pokemon("ONIX", 50, pokemon_type("ROCK"), "SPLASH");
     let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
@@ -12736,6 +17613,26 @@ fn trap_ends_when_residual_turns_expire() {
             ..
         }
     )));
+}
+
+#[test]
+fn inactive_zero_trap_count_returns_without_release_text() {
+    let player = pokemon("ONIX", 50, pokemon_type("ROCK"), "SPLASH");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    let enemy_hp = enemy.hp;
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_trap = Some(BattleTrapState {
+        source: BattleSide::Player,
+        move_name: "WRAP".to_string(),
+        turns_remaining: 0,
+    });
+    let mut events = Vec::new();
+
+    apply_end_turn_trap(&mut state, &mut events);
+
+    assert_eq!(state.enemy.hp, enemy_hp);
+    assert_eq!(state.enemy_trap, None);
+    assert!(events.is_empty());
 }
 
 #[test]
@@ -12922,6 +17819,414 @@ fn encore_fails_without_target_last_move() {
 }
 
 #[test]
+fn missed_encore_and_spite_reach_their_command_owned_failures() {
+    for (move_name, effect) in [("ENCORE", "ENCORE"), ("SPITE", "SPITE")] {
+        let player = pokemon("CLEFAIRY", 90, pokemon_type("NORMAL"), move_name);
+        let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "TACKLE");
+        let moves = BTreeMap::from([
+            (
+                move_name.to_string(),
+                move_data_with_effect(move_name, pokemon_type("NORMAL"), 0, 1, effect),
+            ),
+            (
+                "TACKLE".to_string(),
+                move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+            ),
+        ]);
+        let mut rng = ScriptedBattleRandom::new(vec![u8::MAX]);
+
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, 0),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Switch { party_index: 1 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("missed command resolves");
+
+        assert_eq!(rng.calls, 1, "{move_name}");
+        assert!(outcome.events.iter().any(|event| matches!(
+            event,
+            BattleEvent::Missed {
+                side: BattleSide::Player,
+                move_name: missed_move,
+                roll: u8::MAX,
+                ..
+            } if missed_move == move_name
+        )));
+        assert!(
+            outcome.events.iter().any(|event| match event {
+                BattleEvent::EncoreFailed {
+                    side: BattleSide::Player,
+                    move_name: failed_move,
+                    target: BattleSide::Enemy,
+                } if move_name == "ENCORE" => failed_move == move_name,
+                BattleEvent::SpiteFailed {
+                    side: BattleSide::Player,
+                    move_name: failed_move,
+                    target: BattleSide::Enemy,
+                } if move_name == "SPITE" => failed_move == move_name,
+                _ => false,
+            }),
+            "{move_name}"
+        );
+    }
+}
+
+#[test]
+fn protected_encore_and_spite_follow_protect_with_their_own_failure() {
+    for (move_name, effect) in [("ENCORE", "ENCORE"), ("SPITE", "SPITE")] {
+        let player = pokemon("CLEFAIRY", 90, pokemon_type("NORMAL"), move_name);
+        let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "PROTECT");
+        let moves = BTreeMap::from([
+            (
+                move_name.to_string(),
+                move_data_with_effect(move_name, pokemon_type("NORMAL"), 0, 100, effect),
+            ),
+            (
+                "PROTECT".to_string(),
+                move_data_with_effect("PROTECT", pokemon_type("NORMAL"), 0, 100, "PROTECT"),
+            ),
+        ]);
+        let mut rng = ScriptedBattleRandom::new(vec![1]);
+
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, 0),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("protected command resolves");
+
+        assert_eq!(rng.calls, 1, "{move_name}");
+        assert!(outcome.events.contains(&BattleEvent::MoveProtected {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+        }));
+        assert!(
+            outcome.events.iter().any(|event| match event {
+                BattleEvent::EncoreFailed {
+                    side: BattleSide::Player,
+                    move_name: failed_move,
+                    target: BattleSide::Enemy,
+                } if move_name == "ENCORE" => failed_move == move_name,
+                BattleEvent::SpiteFailed {
+                    side: BattleSide::Player,
+                    move_name: failed_move,
+                    target: BattleSide::Enemy,
+                } if move_name == "SPITE" => failed_move == move_name,
+                _ => false,
+            }),
+            "{move_name}"
+        );
+    }
+}
+
+#[test]
+fn airborne_target_encore_and_spite_skip_accuracy_but_reach_their_commands() {
+    for (move_name, effect) in [("ENCORE", "ENCORE"), ("SPITE", "SPITE")] {
+        let player = pokemon("CLEFAIRY", 90, pokemon_type("NORMAL"), move_name);
+        let enemy = pokemon("PIDGEY", 10, pokemon_type("FLYING"), "SPLASH");
+        let moves = BTreeMap::from([
+            (
+                move_name.to_string(),
+                move_data_with_effect(move_name, pokemon_type("NORMAL"), 0, 50, effect),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+            (
+                "FLY".to_string(),
+                move_data_with_effect("FLY", pokemon_type("FLYING"), 70, 95, "FLY"),
+            ),
+        ]);
+        let mut rng = ScriptedBattleRandom::new(vec![]);
+        let mut state = battle_state(player, enemy, 0);
+        state.enemy_airborne_move = Some("FLY".to_string());
+
+        let outcome = resolve_battle_turn(
+            state,
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("hidden-target command resolves");
+
+        assert_eq!(rng.calls, 0, "{move_name}");
+        assert!(outcome.events.contains(&BattleEvent::AirborneAvoided {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+            airborne_move: "FLY".to_string(),
+        }));
+        assert!(
+            outcome.events.iter().any(|event| match event {
+                BattleEvent::EncoreFailed {
+                    side: BattleSide::Player,
+                    move_name: failed_move,
+                    target: BattleSide::Enemy,
+                } if move_name == "ENCORE" => failed_move == move_name,
+                BattleEvent::SpiteFailed {
+                    side: BattleSide::Player,
+                    move_name: failed_move,
+                    target: BattleSide::Enemy,
+                } if move_name == "SPITE" => failed_move == move_name,
+                _ => false,
+            }),
+            "{move_name}"
+        );
+    }
+}
+
+#[test]
+fn missed_fail_move_family_reaches_each_command_owned_failure() {
+    for (move_name, effect) in [
+        ("CONVERSION2", "CONVERSION2"),
+        ("ATTRACT", "ATTRACT"),
+        ("DISABLE", "DISABLE"),
+        ("FORESIGHT", "FORESIGHT"),
+        ("ROAR", "FORCE_SWITCH"),
+    ] {
+        let player = pokemon("SMEARGLE", 90, pokemon_type("NORMAL"), move_name);
+        let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+        let moves = BTreeMap::from([
+            (
+                move_name.to_string(),
+                move_data_with_effect(move_name, pokemon_type("NORMAL"), 0, 1, effect),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
+        let mut rng = ScriptedBattleRandom::new(vec![u8::MAX]);
+
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, 0),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Switch { party_index: 1 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("missed command resolves");
+
+        assert_eq!(rng.calls, 1, "{effect}");
+        assert!(outcome.events.iter().any(|event| matches!(
+            event,
+            BattleEvent::Missed {
+                side: BattleSide::Player,
+                move_name: missed_move,
+                roll: u8::MAX,
+                ..
+            } if missed_move == move_name
+        )));
+        assert!(
+            has_post_check_hit_failure(&outcome.events, effect, move_name),
+            "{move_name}"
+        );
+    }
+}
+
+#[test]
+fn protected_fail_move_family_reaches_each_command_owned_failure() {
+    for (move_name, effect) in [
+        ("CONVERSION2", "CONVERSION2"),
+        ("ATTRACT", "ATTRACT"),
+        ("DISABLE", "DISABLE"),
+        ("FORESIGHT", "FORESIGHT"),
+        ("ROAR", "FORCE_SWITCH"),
+    ] {
+        let player = pokemon("SMEARGLE", 90, pokemon_type("NORMAL"), move_name);
+        let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "PROTECT");
+        let moves = BTreeMap::from([
+            (
+                move_name.to_string(),
+                move_data_with_effect(move_name, pokemon_type("NORMAL"), 0, 100, effect),
+            ),
+            (
+                "PROTECT".to_string(),
+                move_data_with_effect("PROTECT", pokemon_type("NORMAL"), 0, 100, "PROTECT"),
+            ),
+        ]);
+        let mut rng = ScriptedBattleRandom::new(vec![1]);
+
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, 0),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("protected command resolves");
+
+        assert_eq!(rng.calls, 1, "{effect}");
+        assert!(outcome.events.contains(&BattleEvent::MoveProtected {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+        }));
+        assert!(
+            has_post_check_hit_failure(&outcome.events, effect, move_name),
+            "{move_name}"
+        );
+    }
+}
+
+#[test]
+fn airborne_target_fail_move_family_skips_accuracy_then_reaches_each_command() {
+    for (move_name, effect) in [
+        ("CONVERSION2", "CONVERSION2"),
+        ("ATTRACT", "ATTRACT"),
+        ("DISABLE", "DISABLE"),
+        ("FORESIGHT", "FORESIGHT"),
+    ] {
+        let player = pokemon("SMEARGLE", 90, pokemon_type("NORMAL"), move_name);
+        let enemy = pokemon("PIDGEY", 10, pokemon_type("FLYING"), "SPLASH");
+        let moves = BTreeMap::from([
+            (
+                move_name.to_string(),
+                move_data_with_effect(move_name, pokemon_type("NORMAL"), 0, 50, effect),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+            (
+                "FLY".to_string(),
+                move_data_with_effect("FLY", pokemon_type("FLYING"), 70, 95, "FLY"),
+            ),
+        ]);
+        let mut rng = ScriptedBattleRandom::new(vec![]);
+        let mut state = battle_state(player, enemy, 0);
+        state.enemy_airborne_move = Some("FLY".to_string());
+
+        let outcome = resolve_battle_turn(
+            state,
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("hidden-target command resolves");
+
+        assert_eq!(rng.calls, 0, "{effect}");
+        assert!(outcome.events.contains(&BattleEvent::AirborneAvoided {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+            airborne_move: "FLY".to_string(),
+        }));
+        assert!(
+            has_post_check_hit_failure(&outcome.events, effect, move_name),
+            "{move_name}"
+        );
+    }
+}
+
+#[test]
+fn airborne_target_roar_reaches_force_switch_failure_before_accuracy() {
+    let player = pokemon("SMEARGLE", 90, pokemon_type("NORMAL"), "ROAR");
+    let enemy = pokemon("PIDGEY", 10, pokemon_type("FLYING"), "SPLASH");
+    let roar = move_data_with_effect("ROAR", pokemon_type("NORMAL"), 0, 50, "FORCE_SWITCH");
+    let moves = BTreeMap::from([
+        ("ROAR".to_string(), roar.clone()),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+        (
+            "FLY".to_string(),
+            move_data_with_effect("FLY", pokemon_type("FLYING"), 70, 95, "FLY"),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_airborne_move = Some("FLY".to_string());
+    let mut events = Vec::new();
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+
+    execute_move_effect(
+        &mut state,
+        BattleSide::Player,
+        Some(0),
+        "ROAR",
+        &roar,
+        None,
+        None,
+        false,
+        &moves,
+        &BTreeMap::new(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+        &[],
+        false,
+        &mut events,
+    )
+    .expect("Roar against Fly resolves");
+
+    assert_eq!(rng.calls, 0);
+    assert!(events.contains(&BattleEvent::AirborneAvoided {
+        side: BattleSide::Player,
+        move_name: "ROAR".to_string(),
+        target: BattleSide::Enemy,
+        airborne_move: "FLY".to_string(),
+    }));
+    assert!(events.contains(&BattleEvent::ForceSwitchFailed {
+        side: BattleSide::Player,
+        move_name: "ROAR".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
 fn encore_refuses_forbidden_or_exhausted_last_moves_before_rng() {
     for last_move in ["STRUGGLE", "ENCORE", "MIRROR_MOVE", "TACKLE"] {
         let player = pokemon("CLEFAIRY", 50, pokemon_type("NORMAL"), "ENCORE");
@@ -13013,6 +18318,29 @@ fn encore_final_forced_turn_executes_and_then_clears() {
             turns_remaining: 1,
         } if requested_move == "SPLASH" && encored_move == "TACKLE"
     )));
+}
+
+#[test]
+fn active_encore_count_zero_wraps_to_full_byte() {
+    let player = pokemon("CLEFAIRY", 20, pokemon_type("NORMAL"), "SPLASH");
+    let enemy = pokemon("RATTATA", 90, pokemon_type("NORMAL"), "TACKLE");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_encore = Some(BattleEncoreState {
+        move_name: "TACKLE".to_string(),
+        turns_remaining: 0,
+    });
+    let mut events = Vec::new();
+
+    apply_end_turn_encore(&mut state, &mut events);
+
+    assert_eq!(
+        state.enemy_encore,
+        Some(BattleEncoreState {
+            move_name: "TACKLE".to_string(),
+            turns_remaining: u8::MAX,
+        })
+    );
+    assert!(events.is_empty());
 }
 
 #[test]
@@ -13288,6 +18616,23 @@ fn disable_counts_down_and_ends() {
         side: BattleSide::Enemy,
         move_name: "TACKLE".to_string(),
     }));
+}
+
+#[test]
+fn inactive_zero_disable_count_returns_without_expiry_text() {
+    let player = pokemon("GASTLY", 90, pokemon_type("GHOST"), "NO_DAMAGE");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "NO_DAMAGE");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_disable = Some(BattleDisableState {
+        move_name: "TACKLE".to_string(),
+        turns_remaining: 0,
+    });
+    let mut events = Vec::new();
+
+    tick_disable_before_action(&mut state, BattleSide::Enemy, &mut events);
+
+    assert_eq!(state.enemy_disable, None);
+    assert!(events.is_empty());
 }
 
 #[test]
@@ -13692,6 +19037,38 @@ fn spite_reduces_targets_last_move_pp() {
 }
 
 #[test]
+fn spite_reports_remaining_pp_when_sampled_reduction_is_larger() {
+    let player = pokemon("GASTLY", 90, pokemon_type("GHOST"), "SPITE");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    enemy.moves[0].current_pp = 1;
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("TACKLE".to_string());
+    let mut rng = ScriptedBattleRandom::new(vec![3]);
+    let mut events = Vec::new();
+
+    apply_spite_effect(
+        &mut state,
+        BattleSide::Player,
+        "SPITE",
+        &mut rng,
+        &mut events,
+    );
+
+    assert_eq!(state.enemy.moves[0].current_pp, 0);
+    assert!(events.contains(&BattleEvent::SpiteApplied {
+        side: BattleSide::Player,
+        move_name: "SPITE".to_string(),
+        target: BattleSide::Enemy,
+        target_move: "TACKLE".to_string(),
+        pp_before: 1,
+        pp_after: 0,
+        reduction: 1,
+        roll: 3,
+    }));
+    assert_eq!(rng.calls, 1);
+}
+
+#[test]
 fn spite_reduces_a_transformed_targets_effective_move_pp_only() {
     let player = pokemon("GASTLY", 90, pokemon_type("GHOST"), "SPITE");
     let enemy = pokemon("DITTO", 40, pokemon_type("NORMAL"), "SPLASH");
@@ -13961,6 +19338,56 @@ fn psych_up_copies_targets_stat_stages() {
 }
 
 #[test]
+fn psych_up_fails_without_erasing_the_user_when_target_stages_are_unmodified() {
+    let mut player = pokemon("ESPEON", 90, pokemon_type("PSYCHIC_TYPE"), "PSYCH_UP");
+    player.stat_boosts.insert(Stat::Attack, -3);
+    player.stat_boosts.insert(Stat::Defense, 2);
+    let expected = player.stat_boosts.clone();
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "NO_DAMAGE");
+    let moves = BTreeMap::from([
+        (
+            "PSYCH_UP".to_string(),
+            move_data_with_effect("PSYCH_UP", pokemon_type("NORMAL"), 0, 100, "PSYCH_UP"),
+        ),
+        (
+            "NO_DAMAGE".to_string(),
+            move_data_with_effect("NO_DAMAGE", pokemon_type("NORMAL"), 0, 100, "NORMAL_HIT"),
+        ),
+    ]);
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, rng.seed()),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("failed Psych Up turn resolves");
+
+    assert_eq!(outcome.state.player.stat_boosts, expected);
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::PsychUpApplied {
+            side: BattleSide::Player,
+            ..
+        }
+    )));
+    assert!(outcome.events.contains(&BattleEvent::PsychUpFailed {
+        side: BattleSide::Player,
+        move_name: "PSYCH_UP".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
 fn rain_dance_sets_weather_and_counts_down() {
     let player = pokemon("POLIWAG", 90, pokemon_type("WATER"), "RAIN_DANCE");
     let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "NO_DAMAGE");
@@ -14046,6 +19473,43 @@ fn weather_expires_at_end_turn() {
             .iter()
             .any(|event| matches!(event, BattleEvent::WeatherContinues { .. }))
     );
+}
+
+#[test]
+fn zero_weather_count_wraps_to_255_before_continuing() {
+    let player = pokemon("POLIWAG", 90, pokemon_type("WATER"), "NO_DAMAGE");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "NO_DAMAGE");
+    let moves = BTreeMap::from([(
+        "NO_DAMAGE".to_string(),
+        move_data_with_effect("NO_DAMAGE", pokemon_type("NORMAL"), 0, 100, "NORMAL_HIT"),
+    )]);
+    let mut rng = Random::new(1);
+    let mut state = battle_state(player, enemy, rng.seed());
+    state.weather = Weather::Rain;
+    state.weather_turns = 0;
+
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("zero-count weather turn resolves");
+
+    assert_eq!(outcome.state.weather, Weather::Rain);
+    assert_eq!(outcome.state.weather_turns, u8::MAX);
+    assert!(outcome.events.contains(&BattleEvent::WeatherContinues {
+        weather: Weather::Rain,
+        turns_remaining: u8::MAX,
+    }));
 }
 
 #[test]
@@ -14145,6 +19609,97 @@ fn sandstorm_sets_weather_and_damages_non_immune_pokemon() {
         weather: Weather::Sandstorm,
         turns_remaining: 4,
     }));
+}
+
+#[test]
+fn sandstorm_fails_instead_of_refreshing_an_existing_sandstorm() {
+    let player = pokemon("GEODUDE", 90, pokemon_type("ROCK"), "SANDSTORM");
+    let enemy = pokemon("ONIX", 40, pokemon_type("ROCK"), "NO_DAMAGE");
+    let moves = BTreeMap::from([
+        (
+            "SANDSTORM".to_string(),
+            move_data_with_effect("SANDSTORM", pokemon_type("ROCK"), 0, 100, "SANDSTORM"),
+        ),
+        (
+            "NO_DAMAGE".to_string(),
+            move_data_with_effect("NO_DAMAGE", pokemon_type("NORMAL"), 0, 100, "NORMAL_HIT"),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 1);
+    state.weather = Weather::Sandstorm;
+    state.weather_turns = 2;
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("repeated Sandstorm turn resolves");
+
+    assert_eq!(outcome.state.weather, Weather::Sandstorm);
+    assert_eq!(outcome.state.weather_turns, 1);
+    assert!(!outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::WeatherApplied {
+            side: BattleSide::Player,
+            ..
+        }
+    )));
+    assert!(outcome.events.contains(&BattleEvent::WeatherFailed {
+        side: BattleSide::Player,
+        move_name: "SANDSTORM".to_string(),
+        weather: Weather::Sandstorm,
+    }));
+    assert!(outcome.events.contains(&BattleEvent::WeatherContinues {
+        weather: Weather::Sandstorm,
+        turns_remaining: 1,
+    }));
+}
+
+#[test]
+fn rain_dance_and_sunny_day_refresh_their_existing_weather() {
+    for (weather, move_name) in [(Weather::Rain, "RAIN_DANCE"), (Weather::Sun, "SUNNY_DAY")] {
+        let player = pokemon("CASTFORM", 90, pokemon_type("NORMAL"), move_name);
+        let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+        let mut state = battle_state(player, enemy, 1);
+        state.weather = weather;
+        state.weather_turns = 2;
+        let mut events = Vec::new();
+
+        apply_weather_effect(
+            &mut state,
+            BattleSide::Player,
+            move_name,
+            weather,
+            &mut events,
+        );
+
+        assert_eq!(state.weather, weather);
+        assert_eq!(state.weather_turns, 5);
+        assert!(events.contains(&BattleEvent::WeatherApplied {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            weather,
+            turns: 5,
+        }));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            BattleEvent::WeatherFailed {
+                side: BattleSide::Player,
+                ..
+            }
+        )));
+    }
 }
 
 #[test]
@@ -15082,6 +20637,8 @@ fn sleep_talk_selects_existing_move_without_extra_pp_spend() {
     assert_eq!(outcome.state.player.moves[1].current_pp, 5);
     assert_eq!(outcome.state.player.status.as_deref(), Some("SLEEP"));
     assert_eq!(outcome.state.player.sleep_turns, 1);
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
     assert!(outcome.state.enemy.hp < enemy_hp);
     assert!(outcome.events.iter().any(|event| matches!(
         event,
@@ -15146,6 +20703,8 @@ fn sleep_talk_fails_without_sleep_status() {
     .expect("awake sleep talk turn resolves");
 
     assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
     assert!(outcome.events.contains(&BattleEvent::SleepTalkFailed {
         side: BattleSide::Player,
         move_name: "SLEEP_TALK".to_string(),
@@ -15250,12 +20809,295 @@ fn mimic_replaces_user_slot_with_targets_last_move() {
     assert_eq!(outcome.state.player.moves[0].name, "TACKLE");
     assert_eq!(outcome.state.player.moves[0].current_pp, 5);
     assert_eq!(outcome.state.player.moves[0].pp_ups, 0);
+    assert_eq!(outcome.state.player_party[0].moves[0].name, "MIMIC");
+    assert_eq!(outcome.state.player_party[0].moves[0].current_pp, 4);
+    assert_eq!(outcome.state.player_party[0].moves[0].pp_ups, 0);
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
     assert!(outcome.events.contains(&BattleEvent::MimicApplied {
         side: BattleSide::Player,
         move_name: "MIMIC".to_string(),
         slot: 0,
         replaced_move: "MIMIC".to_string(),
         copied_move: "TACKLE".to_string(),
+    }));
+
+    let copied_move_outcome = resolve_battle_turn(
+        outcome.state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("copied move turn resolves");
+
+    assert_eq!(copied_move_outcome.state.player.moves[0].name, "TACKLE");
+    assert_eq!(copied_move_outcome.state.player.moves[0].current_pp, 4);
+    assert_eq!(
+        copied_move_outcome.state.player_party[0].moves[0].name,
+        "MIMIC"
+    );
+    assert_eq!(
+        copied_move_outcome.state.player_party[0].moves[0].current_pp,
+        4
+    );
+}
+
+#[test]
+fn switching_out_after_mimic_preserves_the_permanent_mimic_slot() {
+    let player = pokemon("MR_MIME", 90, pokemon_type("PSYCHIC_TYPE"), "MIMIC");
+    let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "TACKLE");
+    let moves = BTreeMap::from([
+        (
+            "MIMIC".to_string(),
+            move_data_with_effect("MIMIC", pokemon_type("NORMAL"), 0, 100, "MIMIC"),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    let mut rng = Random::new(18);
+    let mut state = battle_state(player, enemy, rng.seed());
+    state.enemy_last_counter_move = Some("TACKLE".to_string());
+
+    let mimic_outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("mimic turn resolves");
+
+    let switch_outcome = resolve_battle_turn(
+        mimic_outcome.state,
+        BattleTurnInput {
+            player: BattleAction::Switch { party_index: 1 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("switch after mimic resolves");
+
+    assert_eq!(switch_outcome.state.player_party[0].moves[0].name, "MIMIC");
+    assert_eq!(switch_outcome.state.player_party[0].moves[0].current_pp, 4);
+}
+
+#[test]
+fn mimic_rejects_a_target_move_the_user_already_knows() {
+    let mut player = pokemon("MR_MIME", 90, pokemon_type("PSYCHIC_TYPE"), "MIMIC");
+    player.moves.push(LearnedMove {
+        name: "TACKLE".to_string(),
+        current_pp: 5,
+        pp_ups: 0,
+    });
+    let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "TACKLE");
+    let mut state = battle_state(player, enemy, 0);
+    state.player_last_move = Some("MIMIC".to_string());
+    state.player_last_counter_move = Some("MIMIC".to_string());
+    state.enemy_last_counter_move = Some("TACKLE".to_string());
+    let moves = BTreeMap::from([
+        (
+            "MIMIC".to_string(),
+            move_data_with_effect("MIMIC", pokemon_type("NORMAL"), 0, 100, "MIMIC"),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    let mut events = Vec::new();
+
+    apply_mimic_effect(
+        &mut state,
+        BattleSide::Player,
+        Some(0),
+        "MIMIC",
+        &moves,
+        &mut events,
+    );
+
+    assert_eq!(state.player.moves[0].name, "MIMIC");
+    assert_eq!(state.player.moves[1].name, "TACKLE");
+    assert_eq!(state.player_last_move, None);
+    assert_eq!(state.player_last_counter_move, None);
+    assert!(events.contains(&BattleEvent::MimicFailed {
+        side: BattleSide::Player,
+        move_name: "MIMIC".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
+fn missed_mimic_still_clears_both_used_move_registers() {
+    let player = pokemon("MR_MIME", 90, pokemon_type("PSYCHIC_TYPE"), "MIMIC");
+    let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    let moves = BTreeMap::from([
+        (
+            "MIMIC".to_string(),
+            move_data_with_effect("MIMIC", pokemon_type("NORMAL"), 0, 1, "MIMIC"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("missed Mimic resolves");
+
+    assert_eq!(rng.calls, 1);
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            roll: u8::MAX,
+            ..
+        } if move_name == "MIMIC"
+    )));
+    assert!(outcome.events.contains(&BattleEvent::MimicFailed {
+        side: BattleSide::Player,
+        move_name: "MIMIC".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
+fn protected_mimic_clears_history_before_its_protect_specific_failure() {
+    let player = pokemon("MR_MIME", 90, pokemon_type("PSYCHIC_TYPE"), "MIMIC");
+    let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "PROTECT");
+    let moves = BTreeMap::from([
+        (
+            "MIMIC".to_string(),
+            move_data_with_effect("MIMIC", pokemon_type("NORMAL"), 0, 100, "MIMIC"),
+        ),
+        (
+            "PROTECT".to_string(),
+            move_data_with_effect("PROTECT", pokemon_type("NORMAL"), 0, 100, "PROTECT"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![1]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("protected Mimic resolves");
+
+    assert_eq!(rng.calls, 1);
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
+    assert!(outcome.events.contains(&BattleEvent::MoveProtected {
+        side: BattleSide::Player,
+        move_name: "MIMIC".to_string(),
+        target: BattleSide::Enemy,
+    }));
+    assert!(outcome.events.contains(&BattleEvent::MimicFailed {
+        side: BattleSide::Player,
+        move_name: "MIMIC".to_string(),
+        target: BattleSide::Enemy,
+    }));
+}
+
+#[test]
+fn airborne_target_mimic_still_reaches_clear_last_move() {
+    let player = pokemon("MR_MIME", 90, pokemon_type("PSYCHIC_TYPE"), "MIMIC");
+    let enemy = pokemon("PIDGEY", 10, pokemon_type("FLYING"), "SPLASH");
+    let moves = BTreeMap::from([
+        (
+            "MIMIC".to_string(),
+            move_data_with_effect("MIMIC", pokemon_type("NORMAL"), 0, 100, "MIMIC"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+        (
+            "FLY".to_string(),
+            move_data_with_effect("FLY", pokemon_type("FLYING"), 70, 95, "FLY"),
+        ),
+    ]);
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_airborne_move = Some("FLY".to_string());
+
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Mimic against Fly resolves");
+
+    assert_eq!(rng.calls, 0);
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
+    assert!(outcome.events.contains(&BattleEvent::AirborneAvoided {
+        side: BattleSide::Player,
+        move_name: "MIMIC".to_string(),
+        target: BattleSide::Enemy,
+        airborne_move: "FLY".to_string(),
+    }));
+    assert!(outcome.events.contains(&BattleEvent::MimicFailed {
+        side: BattleSide::Player,
+        move_name: "MIMIC".to_string(),
+        target: BattleSide::Enemy,
     }));
 }
 
@@ -15359,6 +21201,8 @@ fn mimic_fails_without_targets_last_move() {
     .expect("mimic failure turn resolves");
 
     assert_eq!(outcome.state.player.moves[0].name, "MIMIC");
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
     assert!(outcome.events.contains(&BattleEvent::MimicFailed {
         side: BattleSide::Player,
         move_name: "MIMIC".to_string(),
@@ -15404,6 +21248,9 @@ fn sketch_permanently_replaces_user_slot_with_targets_last_move() {
     assert_eq!(outcome.state.player.moves[0].name, "TACKLE");
     assert_eq!(outcome.state.player.moves[0].current_pp, 35);
     assert_eq!(outcome.state.player.moves[0].pp_ups, 0);
+    assert_eq!(outcome.state.player_party[0].moves[0].name, "TACKLE");
+    assert_eq!(outcome.state.player_party[0].moves[0].current_pp, 35);
+    assert_eq!(outcome.state.player_party[0].moves[0].pp_ups, 0);
     assert!(outcome.events.contains(&BattleEvent::SketchApplied {
         side: BattleSide::Player,
         move_name: "SKETCH".to_string(),
@@ -15501,6 +21348,8 @@ fn transform_copies_target_battle_state_without_mutating_base_pokemon() {
     assert_eq!(outcome.state.player.species.id, "DITTO");
     assert_eq!(outcome.state.player.moves[0].name, "TRANSFORM");
     assert_eq!(outcome.state.player.moves[0].current_pp, 4);
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
     let transform = outcome
         .state
         .player_transform
@@ -15523,6 +21372,482 @@ fn transform_copies_target_battle_state_without_mutating_base_pokemon() {
         target: BattleSide::Enemy,
         species: "MEW".to_string(),
     }));
+}
+
+#[test]
+fn transform_copies_the_targets_loaded_speed_without_reapplying_the_users_paralysis() {
+    let mut player = pokemon("DITTO", 50, pokemon_type("NORMAL"), "TRANSFORM");
+    player.status = Some("PARALYSIS".to_string());
+    let mut enemy = pokemon("MEW", 50, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
+    enemy.stat_boosts.insert(Stat::Speed, 1);
+    let mut state = battle_state(player, enemy, 0);
+    let target_speed =
+        battle_speed(&state, BattleSide::Enemy, &stat_multipliers()).expect("target speed loads");
+
+    apply_transform_effect(
+        &mut state,
+        BattleSide::Player,
+        "TRANSFORM",
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("Transform resolves");
+
+    assert_eq!(
+        battle_speed(&state, BattleSide::Player, &stat_multipliers())
+            .expect("transformed speed loads"),
+        target_speed,
+    );
+}
+
+#[test]
+fn transform_copies_the_targets_loaded_attack_without_reapplying_the_users_burn() {
+    let enemy = pokemon("MEW", 50, pokemon_type("PSYCHIC_TYPE"), "TACKLE");
+    let moves = BTreeMap::from([(
+        "TACKLE".to_string(),
+        move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+    )]);
+    let resolve = |status: Option<&str>| {
+        let mut player = pokemon("DITTO", 50, pokemon_type("NORMAL"), "TRANSFORM");
+        player.status = status.map(str::to_string);
+        let mut state = battle_state(player, enemy.clone(), 0);
+        apply_transform_effect(
+            &mut state,
+            BattleSide::Player,
+            "TRANSFORM",
+            &stat_multipliers(),
+            &mut Vec::new(),
+        )
+        .expect("Transform resolves");
+        let mut rng = Random::new(29);
+        resolve_battle_turn(
+            state,
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Switch { party_index: 1 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("copied attack resolves")
+    };
+
+    assert_eq!(
+        player_damage_amount(&resolve(Some("BURN")).events),
+        player_damage_amount(&resolve(None).events),
+    );
+}
+
+#[test]
+fn stat_commands_after_transform_mutate_only_the_live_copied_stages() {
+    let player = pokemon("DITTO", 50, pokemon_type("NORMAL"), "TRANSFORM");
+    let mut enemy = pokemon("MACHOP", 40, pokemon_type("FIGHTING"), "SPLASH");
+    enemy.stat_boosts.insert(Stat::Attack, 2);
+    let mut state = battle_state(player, enemy, 0);
+    apply_transform_effect(
+        &mut state,
+        BattleSide::Player,
+        "TRANSFORM",
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("Transform resolves");
+    let mut events = Vec::new();
+
+    apply_stat_stage_delta_to_target(
+        &mut state,
+        BattleSide::Player,
+        "SWORDS_DANCE",
+        BattleSide::Player,
+        Stat::Attack,
+        2,
+        &stat_multipliers(),
+        &mut events,
+    )
+    .expect("post-Transform stat command resolves");
+
+    assert_eq!(state.player.stat_boosts[&Stat::Attack], 0);
+    assert_eq!(
+        state
+            .player_transform
+            .as_ref()
+            .expect("Transform remains active")
+            .stat_boosts[&Stat::Attack],
+        4
+    );
+    assert!(events.contains(&BattleEvent::StatStageChanged {
+        side: BattleSide::Player,
+        move_name: "SWORDS_DANCE".to_string(),
+        target: BattleSide::Player,
+        stat: Stat::Attack,
+        amount: 2,
+        stage_before: 2,
+        stage_after: 4,
+    }));
+}
+
+#[test]
+fn x_item_after_transform_mutates_only_the_live_copied_stage() {
+    let player = pokemon("DITTO", 50, pokemon_type("NORMAL"), "TRANSFORM");
+    let mut enemy = pokemon("MACHOP", 40, pokemon_type("FIGHTING"), "SPLASH");
+    enemy.stat_boosts.insert(Stat::Attack, 2);
+    let mut state = battle_state(player, enemy, 0);
+    apply_transform_effect(
+        &mut state,
+        BattleSide::Player,
+        "TRANSFORM",
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("Transform resolves");
+    let mut x_attack = battle_item("X_ATTACK", 0, true);
+    x_attack.effect = "X_ITEM".to_string();
+    x_attack.battle_stat_boost_stat = Some("ATTACK".to_string());
+    x_attack.battle_stat_boost_stages = Some(1);
+    let items = BTreeMap::from([("X_ATTACK".to_string(), x_attack)]);
+    let mut events = Vec::new();
+
+    execute_item(
+        &mut state,
+        BattleSide::Player,
+        "X_ATTACK",
+        &items,
+        &stat_multipliers(),
+        &mut events,
+    )
+    .expect("post-Transform X Attack resolves");
+
+    assert_eq!(state.player.stat_boosts[&Stat::Attack], 0);
+    assert_eq!(
+        state
+            .player_transform
+            .as_ref()
+            .expect("Transform remains active")
+            .stat_boosts[&Stat::Attack],
+        3
+    );
+    assert_eq!(
+        state.player_loaded_stats,
+        loaded_battle_stats(&state, BattleSide::Player, &stat_multipliers())
+            .expect("X Attack rebuilds the loaded copied stats")
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        BattleEvent::BattleItemEffect {
+            side: BattleSide::Player,
+            outcome,
+        } if outcome.battle_stat_stage_changes == vec![BattleItemStageChange {
+            stat: "ATTACK".to_string(),
+            stage_before: 2,
+            stage_after: 3,
+        }]
+    )));
+}
+
+#[test]
+fn x_item_preserves_raise_stat_raw_maximum_rollback() {
+    let mut player = pokemon("MEW", 50, pokemon_type("PSYCHIC"), "SPLASH");
+    player.attack = 999;
+    let enemy = pokemon("RATTATA", 20, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    let loaded_attack_before = state.player_loaded_stats.attack;
+    let mut x_attack = battle_item("X_ATTACK", 0, true);
+    x_attack.effect = "X_ITEM".to_string();
+    x_attack.battle_stat_boost_stat = Some("ATTACK".to_string());
+    x_attack.battle_stat_boost_stages = Some(1);
+    let items = BTreeMap::from([("X_ATTACK".to_string(), x_attack)]);
+    let mut events = Vec::new();
+
+    execute_item(
+        &mut state,
+        BattleSide::Player,
+        "X_ATTACK",
+        &items,
+        &stat_multipliers(),
+        &mut events,
+    )
+    .expect("raw-maximum X Attack is still consumed by its caller");
+
+    assert_eq!(state.player.stat_boosts[&Stat::Attack], 0);
+    assert_eq!(state.player_loaded_stats.attack, loaded_attack_before);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        BattleEvent::BattleItemEffect { outcome, .. }
+            if outcome.battle_stat_stage_changes.is_empty()
+    )));
+}
+
+#[test]
+fn stat_command_after_transform_recalculates_copied_raw_speed_with_users_status() {
+    let mut player = pokemon("DITTO", 50, pokemon_type("NORMAL"), "TRANSFORM");
+    player.status = Some("PARALYSIS".to_string());
+    let mut enemy = pokemon("MEW", 50, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
+    enemy.stat_boosts.insert(Stat::Speed, 1);
+    let raw_speed = enemy.speed;
+    let mut state = battle_state(player, enemy, 0);
+    apply_transform_effect(
+        &mut state,
+        BattleSide::Player,
+        "TRANSFORM",
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("Transform resolves");
+    apply_stat_stage_delta_to_target(
+        &mut state,
+        BattleSide::Player,
+        "AGILITY",
+        BattleSide::Player,
+        Stat::Speed,
+        2,
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("post-Transform Speed command resolves");
+    let staged = apply_stage(&stat_multipliers(), raw_speed, 3).expect("stage exists");
+
+    assert_eq!(
+        battle_speed(&state, BattleSide::Player, &stat_multipliers())
+            .expect("recalculated transformed speed"),
+        (staged / 4).max(1),
+    );
+}
+
+#[test]
+fn paralysis_after_transform_quarters_the_copied_loaded_speed_in_place() {
+    let player = pokemon("DITTO", 50, pokemon_type("NORMAL"), "TRANSFORM");
+    let enemy = pokemon("MEW", 50, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    apply_transform_effect(
+        &mut state,
+        BattleSide::Player,
+        "TRANSFORM",
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("Transform resolves");
+    let copied_speed =
+        battle_speed(&state, BattleSide::Player, &stat_multipliers()).expect("copied speed loads");
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+
+    assert!(apply_status_to_target(
+        &mut state,
+        &[pokemon_type("NORMAL")],
+        BattleSide::Enemy,
+        "THUNDER_WAVE",
+        BattleSide::Player,
+        "PARALYSIS",
+        0x07,
+        &mut rng,
+        &mut Vec::new(),
+    ));
+    assert_eq!(
+        battle_speed(&state, BattleSide::Player, &stat_multipliers())
+            .expect("paralyzed copied speed loads"),
+        (copied_speed / 4).max(1),
+    );
+}
+
+#[test]
+fn held_paralysis_cure_recalculates_transformed_speed_from_copied_raw_stats() {
+    let mut player = pokemon("DITTO", 50, pokemon_type("NORMAL"), "TRANSFORM");
+    player.item = Some("PRZCURE_BERRY".to_string());
+    let enemy = pokemon("MEW", 50, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    apply_transform_effect(
+        &mut state,
+        BattleSide::Player,
+        "TRANSFORM",
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("Transform resolves");
+    let copied_speed =
+        battle_speed(&state, BattleSide::Player, &stat_multipliers()).expect("copied speed loads");
+    let mut rng = ScriptedBattleRandom::new(vec![]);
+    assert!(apply_status_to_target(
+        &mut state,
+        &[pokemon_type("NORMAL")],
+        BattleSide::Enemy,
+        "THUNDER_WAVE",
+        BattleSide::Player,
+        "PARALYSIS",
+        0x07,
+        &mut rng,
+        &mut Vec::new(),
+    ));
+    let items = BTreeMap::from([(
+        "PRZCURE_BERRY".to_string(),
+        held_status_item("PRZCURE_BERRY", "HELD_HEAL_PARALYZE"),
+    )]);
+
+    apply_held_status_healing(
+        &mut state,
+        BattleSide::Player,
+        &items,
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("held cure resolves");
+
+    assert_eq!(state.player.status, None);
+    assert_eq!(
+        battle_speed(&state, BattleSide::Player, &stat_multipliers())
+            .expect("cured transformed speed loads"),
+        copied_speed,
+    );
+}
+
+#[test]
+fn player_stat_command_applies_badge_before_the_burn_penalty() {
+    let mut player = pokemon("CYNDAQUIL", 50, pokemon_type("FIRE"), "TACKLE");
+    player.attack = 23;
+    player.status = Some("BURN".to_string());
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    state.badge_boosts_enabled = true;
+    state.obedience_badges[0] = true;
+
+    apply_stat_stage_delta_to_target(
+        &mut state,
+        BattleSide::Enemy,
+        "GROWL",
+        BattleSide::Player,
+        Stat::Attack,
+        -1,
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("Attack drop resolves");
+
+    assert_eq!(
+        loaded_battle_stats(&state, BattleSide::Player, &stat_multipliers())
+            .expect("player stats recalculate")
+            .attack,
+        8,
+    );
+}
+
+#[test]
+fn stat_commands_reject_raw_maximum_and_minimum_stats_before_recalculation() {
+    let mut player = pokemon("MEW", 50, pokemon_type("PSYCHIC_TYPE"), "HOWL");
+    player.attack = 999;
+    let mut enemy = pokemon("SHUCKLE", 40, pokemon_type("BUG"), "GROWL");
+    enemy.attack = 1;
+    let mut state = battle_state(player, enemy, 0);
+    let mut events = Vec::new();
+
+    apply_stat_stage_delta_to_target(
+        &mut state,
+        BattleSide::Player,
+        "HOWL",
+        BattleSide::Player,
+        Stat::Attack,
+        1,
+        &stat_multipliers(),
+        &mut events,
+    )
+    .expect("maximum-stat raise resolves");
+    apply_stat_stage_delta_to_target(
+        &mut state,
+        BattleSide::Player,
+        "GROWL",
+        BattleSide::Enemy,
+        Stat::Attack,
+        -1,
+        &stat_multipliers(),
+        &mut events,
+    )
+    .expect("minimum-stat drop resolves");
+
+    assert_eq!(
+        battle_stat_boosts(&state, BattleSide::Player)[&Stat::Attack],
+        0
+    );
+    assert_eq!(
+        battle_stat_boosts(&state, BattleSide::Enemy)[&Stat::Attack],
+        0
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, BattleEvent::StatStageUnchanged { .. }))
+            .count(),
+        2,
+    );
+}
+
+#[test]
+fn sharp_stat_commands_at_raw_limits_undo_only_one_stage_and_keep_loaded_stats() {
+    let player = pokemon("DITTO", 50, pokemon_type("NORMAL"), "TRANSFORM");
+    let mut enemy = pokemon("MEW", 50, pokemon_type("PSYCHIC_TYPE"), "SPLASH");
+    enemy.attack = 999;
+    let mut state = battle_state(player, enemy, 0);
+    apply_transform_effect(
+        &mut state,
+        BattleSide::Player,
+        "TRANSFORM",
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("Transform resolves");
+    let loaded_attack_before = state.player_loaded_stats.attack;
+    let mut events = Vec::new();
+
+    apply_stat_stage_delta_to_target(
+        &mut state,
+        BattleSide::Player,
+        "SWORDS_DANCE",
+        BattleSide::Player,
+        Stat::Attack,
+        2,
+        &stat_multipliers(),
+        &mut events,
+    )
+    .expect("maximum-stat sharp raise resolves");
+
+    assert_eq!(
+        battle_stat_boosts(&state, BattleSide::Player)[&Stat::Attack],
+        1
+    );
+    assert_eq!(state.player_loaded_stats.attack, loaded_attack_before,);
+    assert_eq!(
+        events,
+        vec![BattleEvent::StatStageUnchanged {
+            side: BattleSide::Player,
+            move_name: "SWORDS_DANCE".to_string(),
+            target: BattleSide::Player,
+            stat: Stat::Attack,
+            amount: 2,
+            stage: 1,
+        }]
+    );
+
+    let player = pokemon("CHIKORITA", 50, pokemon_type("GRASS"), "SCREECH");
+    let mut enemy = pokemon("SHUCKLE", 40, pokemon_type("BUG"), "SPLASH");
+    enemy.defense = 1;
+    let mut state = battle_state(player, enemy, 0);
+    apply_stat_stage_delta_to_target(
+        &mut state,
+        BattleSide::Player,
+        "SCREECH",
+        BattleSide::Enemy,
+        Stat::Defense,
+        -2,
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("minimum-stat sharp drop resolves");
+
+    assert_eq!(
+        battle_stat_boosts(&state, BattleSide::Enemy)[&Stat::Defense],
+        -1
+    );
 }
 
 #[test]
@@ -15582,6 +21907,71 @@ fn transformed_pokemon_uses_copied_move_slots_without_mutating_base_moves() {
         side: BattleSide::Player,
         move_name: "TACKLE".to_string(),
     }));
+}
+
+#[test]
+fn transformed_species_cannot_activate_light_ball_for_a_non_pikachu_user() {
+    let mut held = pokemon("DITTO", 50, pokemon_type("NORMAL"), "TRANSFORM");
+    held.item = Some("LIGHT_BALL".to_string());
+    let mut plain = held.clone();
+    plain.item = None;
+    let enemy = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "SPLASH");
+    let moves = BTreeMap::from([
+        (
+            "WATER_GUN".to_string(),
+            move_data("WATER_GUN", pokemon_type("WATER"), 40, 100),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let items = BTreeMap::from([(
+        "LIGHT_BALL".to_string(),
+        held_boost_item("LIGHT_BALL", "HELD_NONE"),
+    )]);
+    let resolve = |player: Pokemon| {
+        let mut state = battle_state(player, enemy.clone(), 0);
+        state.player_transform = Some(BattleTransformState {
+            species: species("PIKACHU", 90, pokemon_type("ELECTRIC")),
+            dvs: Dv::from_non_hp(10, 10, 10, 10),
+            moves: vec![LearnedMove {
+                name: "WATER_GUN".to_string(),
+                current_pp: 5,
+                pp_ups: 0,
+            }],
+            stat_boosts: state.player.stat_boosts.clone(),
+            attack: 100,
+            defense: 100,
+            speed: 100,
+            special_attack: 100,
+            special_defense: 100,
+        });
+        let mut rng = Random::new(23);
+        resolve_battle_turn_with_items(
+            state,
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Switch { party_index: 1 },
+            },
+            &moves,
+            &items,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("transformed Light Ball comparison resolves")
+    };
+    let held = resolve(held);
+    let plain = resolve(plain);
+
+    assert_eq!(
+        player_damage_amount(&held.events),
+        player_damage_amount(&plain.events)
+    );
 }
 
 #[test]
@@ -15645,7 +22035,14 @@ fn sketch_checks_the_opponents_transform_state_instead_of_the_users() {
     let player = pokemon("SMEARGLE", 50, pokemon_type("NORMAL"), "SKETCH");
     let enemy = pokemon("DITTO", 40, pokemon_type("NORMAL"), "TRANSFORM");
     let mut state = battle_state(player, enemy, 0);
-    apply_transform_effect(&mut state, BattleSide::Enemy, "TRANSFORM", &mut Vec::new());
+    apply_transform_effect(
+        &mut state,
+        BattleSide::Enemy,
+        "TRANSFORM",
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("Transform resolves");
     set_last_move(&mut state, BattleSide::Enemy, Some("TACKLE".to_string()));
     let moves = BTreeMap::from([(
         "TACKLE".to_string(),
@@ -15902,6 +22299,50 @@ fn conversion2_numeric_slots_match_crystal_type_constants() {
 }
 
 #[test]
+fn conversion2_uses_persistent_last_counter_move_without_same_turn_damage() {
+    let player = pokemon("PORYGON", 90, pokemon_type("NORMAL"), "CONVERSION2");
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("TACKLE".to_string());
+    assert_eq!(state.player_last_damage, None);
+    let moves = BTreeMap::from([(
+        "TACKLE".to_string(),
+        move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+    )]);
+    // Numeric type slot 8 is GHOST, which is immune to NORMAL.
+    let mut rng = ScriptedBattleRandom::new(vec![8]);
+    let mut events = Vec::new();
+
+    apply_conversion2_effect(
+        &mut state,
+        BattleSide::Player,
+        "CONVERSION2",
+        &moves,
+        &type_effectiveness_table(),
+        &mut rng,
+        &mut events,
+    )
+    .expect("Conversion2 resolves");
+
+    assert_eq!(
+        state.player_type_override,
+        Some(BattleTypeOverride {
+            type1: pokemon_type("GHOST"),
+            type2: pokemon_type("GHOST"),
+        })
+    );
+    assert!(events.contains(&BattleEvent::Conversion2Applied {
+        side: BattleSide::Player,
+        move_name: "CONVERSION2".to_string(),
+        source_move: "TACKLE".to_string(),
+        source_type: pokemon_type("NORMAL"),
+        new_type: pokemon_type("GHOST"),
+        roll: 8,
+    }));
+    assert_eq!(rng.calls, 1);
+}
+
+#[test]
 fn conversion2_changes_user_to_type_that_resists_last_damaging_move() {
     let player = pokemon("PORYGON", 5, pokemon_type("NORMAL"), "CONVERSION2");
     let enemy = pokemon("MAGMAR", 90, pokemon_type("FIRE"), "EMBER");
@@ -15920,60 +22361,18 @@ fn conversion2_changes_user_to_type_that_resists_last_damaging_move() {
         special: vec!["FIRE".to_string(), "WATER".to_string()],
     };
     let conversion2_type_effectiveness = TypeEffectivenessTable {
-        matchups: BTreeMap::from([
-            (
-                "FIRE".to_string(),
-                BTreeMap::from([
-                    (
-                        "NORMAL".to_string(),
-                        crate::battle::damage::TypeMultiplier::one(),
-                    ),
-                    (
-                        "FIRE".to_string(),
-                        crate::battle::damage::TypeMultiplier {
-                            numerator: 1,
-                            denominator: 2,
-                        },
-                    ),
-                    (
-                        "WATER".to_string(),
-                        crate::battle::damage::TypeMultiplier {
-                            numerator: 1,
-                            denominator: 2,
-                        },
-                    ),
-                    (
-                        "ROCK".to_string(),
-                        crate::battle::damage::TypeMultiplier {
-                            numerator: 1,
-                            denominator: 2,
-                        },
-                    ),
-                ]),
-            ),
-            (
-                "NORMAL".to_string(),
-                BTreeMap::from([
-                    (
-                        "NORMAL".to_string(),
-                        crate::battle::damage::TypeMultiplier::one(),
-                    ),
-                    (
-                        "FIRE".to_string(),
-                        crate::battle::damage::TypeMultiplier::one(),
-                    ),
-                    (
-                        "WATER".to_string(),
-                        crate::battle::damage::TypeMultiplier::one(),
-                    ),
-                    (
-                        "ROCK".to_string(),
-                        crate::battle::damage::TypeMultiplier::one(),
-                    ),
-                ]),
-            ),
-        ]),
-        foresight_matchups: BTreeMap::new(),
+        matchups: ["FIRE", "WATER", "ROCK"]
+            .into_iter()
+            .map(|defender| TypeEffectivenessEntry {
+                attacker: pokemon_type("FIRE"),
+                defender: pokemon_type(defender),
+                multiplier: TypeMultiplier {
+                    numerator: 1,
+                    denominator: 2,
+                },
+            })
+            .collect(),
+        foresight_matchups: Vec::new(),
     };
     let mut rng = Random::new(22);
 
@@ -16025,7 +22424,7 @@ fn conversion2_changes_user_to_type_that_resists_last_damaging_move() {
 }
 
 #[test]
-fn conversion2_fails_without_prior_damage() {
+fn conversion2_fails_without_opponent_last_counter_move() {
     let player = pokemon("PORYGON", 90, pokemon_type("NORMAL"), "CONVERSION2");
     let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
     let moves = BTreeMap::from([
@@ -16065,12 +22464,7 @@ fn conversion2_fails_without_prior_damage() {
 
 #[test]
 fn mirror_move_copies_targets_last_move_without_extra_pp_spend() {
-    let mut player = pokemon("PIDGEY", 90, pokemon_type("FLYING"), "MIRROR_MOVE");
-    player.moves.push(LearnedMove {
-        name: "TACKLE".to_string(),
-        current_pp: 5,
-        pp_ups: 0,
-    });
+    let player = pokemon("PIDGEY", 90, pokemon_type("FLYING"), "MIRROR_MOVE");
     let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
     let enemy_hp = enemy.hp;
     let moves = BTreeMap::from([
@@ -16109,7 +22503,8 @@ fn mirror_move_copies_targets_last_move_without_extra_pp_spend() {
     .expect("mirror move copied move resolves");
 
     assert_eq!(outcome.state.player.moves[0].current_pp, 4);
-    assert_eq!(outcome.state.player.moves[1].current_pp, 5);
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
     assert!(outcome.state.enemy.hp < enemy_hp);
     assert!(outcome.events.contains(&BattleEvent::MirrorMoveSelected {
         side: BattleSide::Player,
@@ -16124,6 +22519,64 @@ fn mirror_move_copies_targets_last_move_without_extra_pp_spend() {
             ..
         } if move_name == "TACKLE"
     )));
+}
+
+#[test]
+fn mirror_move_rejects_a_target_move_the_user_already_knows() {
+    let mut player = pokemon("PIDGEY", 90, pokemon_type("FLYING"), "MIRROR_MOVE");
+    player.moves.push(LearnedMove {
+        name: "TACKLE".to_string(),
+        current_pp: 5,
+        pp_ups: 0,
+    });
+    let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    let moves = BTreeMap::from([
+        (
+            "MIRROR_MOVE".to_string(),
+            move_data_with_effect("MIRROR_MOVE", pokemon_type("FLYING"), 0, 100, "MIRROR_MOVE"),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_last_counter_move = Some("TACKLE".to_string());
+    let mut rng = Random::new(18);
+
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("duplicate Mirror Move resolves");
+
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
+    assert!(outcome.events.contains(&BattleEvent::MirrorMoveFailed {
+        side: BattleSide::Player,
+        move_name: "MIRROR_MOVE".to_string(),
+        target: BattleSide::Enemy,
+    }));
+    assert!(
+        !outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::MirrorMoveSelected { .. }))
+    );
 }
 
 #[test]
@@ -16160,6 +22613,8 @@ fn mirror_move_fails_without_targets_last_move() {
     .expect("mirror move failure resolves");
 
     assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
     assert!(outcome.events.contains(&BattleEvent::MirrorMoveFailed {
         side: BattleSide::Player,
         move_name: "MIRROR_MOVE".to_string(),
@@ -16226,6 +22681,8 @@ fn metronome_selects_pack_move_deterministically_without_extra_pp_spend() {
 
     assert_eq!(outcome.state.player.moves[0].current_pp, 4);
     assert_eq!(outcome.state.player.moves[1].current_pp, 5);
+    assert_eq!(outcome.state.player_last_move, None);
+    assert_eq!(outcome.state.player_last_counter_move, None);
     assert!(outcome.state.enemy.hp < enemy_hp);
     assert!(outcome.events.contains(&BattleEvent::MetronomeSelected {
         side: BattleSide::Player,
@@ -16407,9 +22864,29 @@ fn paralysis_can_prevent_attempted_move_deterministically() {
         BattleEvent::FullyParalyzed {
             side: BattleSide::Player,
             move_name,
-            roll: 0..=63,
+            roll: 0..=62,
         } if move_name == "TACKLE"
     )));
+}
+
+#[test]
+fn paralysis_roll_at_asm_threshold_allows_the_move() {
+    let mut player = pokemon("HOOTHOOT", 50, pokemon_type("NORMAL"), "TACKLE");
+    player.status = Some("PARALYSIS".to_string());
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
+    let state = battle_state(player, enemy, 0);
+    let mut rng = ScriptedBattleRandom::new(vec![63]);
+    let mut events = Vec::new();
+
+    assert!(!move_blocked_by_paralysis(
+        &state,
+        BattleSide::Player,
+        "TACKLE",
+        &mut rng,
+        &mut events,
+    ));
+    assert!(events.is_empty());
+    assert_eq!(rng.calls, 1);
 }
 
 #[test]
@@ -16420,7 +22897,7 @@ fn confusion_precedes_attract_at_the_asm_action_boundary() {
     let mut state = battle_state(player, enemy, 0);
     state.player_attracted_by = Some(BattleSide::Enemy);
     let selected_move = move_data("TACKLE", pokemon_type("NORMAL"), 35, 100);
-    let mut rng = ScriptedBattleRandom::new(vec![1, 0]);
+    let mut rng = ScriptedBattleRandom::new(vec![128, 128]);
     let mut events = Vec::new();
 
     assert!(
@@ -16903,6 +23380,88 @@ fn newly_frozen_battler_cannot_naturally_defrost_on_the_same_turn() {
 }
 
 #[test]
+fn mystery_berry_adds_raw_five_pp_without_a_max_pp_clamp() {
+    let mut player = pokemon("SMEARGLE", 50, pokemon_type("NORMAL"), "MOD_MOVE");
+    player.moves[0].current_pp = 0;
+    player.item = Some("MYSTERY_BERRY".to_string());
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    let mut mod_move = move_data("MOD_MOVE", pokemon_type("NORMAL"), 0, 100);
+    mod_move.pp = 3;
+    let moves = BTreeMap::from([("MOD_MOVE".to_string(), mod_move)]);
+    let items = BTreeMap::from([(
+        "MYSTERY_BERRY".to_string(),
+        held_boost_item("MYSTERY_BERRY", "HELD_RESTORE_PP"),
+    )]);
+    let mut events = Vec::new();
+
+    apply_end_turn_mystery_berry(&mut state, &moves, &items, &mut events)
+        .expect("Mystery Berry resolves");
+
+    assert_eq!(state.player.moves[0].current_pp, 5);
+    assert_eq!(state.player.item, None);
+}
+
+#[test]
+fn transformed_mystery_berry_restores_original_party_move_only() {
+    let mut player = pokemon("DITTO", 50, pokemon_type("NORMAL"), "SKETCH");
+    player.moves[0].current_pp = 0;
+    player.item = Some("MYSTERY_BERRY".to_string());
+    let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    state.player_transform = Some(BattleTransformState {
+        species: species("SMEARGLE", 50, pokemon_type("NORMAL")),
+        dvs: Dv::from_non_hp(10, 10, 10, 10),
+        moves: vec![LearnedMove {
+            name: "TACKLE".to_string(),
+            current_pp: 0,
+            pp_ups: 0,
+        }],
+        stat_boosts: state.player.stat_boosts.clone(),
+        attack: state.player.attack,
+        defense: state.player.defense,
+        speed: state.player.speed,
+        special_attack: state.player.special_attack,
+        special_defense: state.player.special_defense,
+    });
+    let moves = BTreeMap::from([
+        (
+            "SKETCH".to_string(),
+            move_data("SKETCH", pokemon_type("NORMAL"), 0, 100),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+    ]);
+    let items = BTreeMap::from([(
+        "MYSTERY_BERRY".to_string(),
+        held_boost_item("MYSTERY_BERRY", "HELD_RESTORE_PP"),
+    )]);
+    let mut events = Vec::new();
+
+    apply_end_turn_mystery_berry(&mut state, &moves, &items, &mut events)
+        .expect("transformed Mystery Berry resolves");
+
+    assert_eq!(state.player.moves[0].current_pp, 1);
+    assert_eq!(state.player_party[0].moves[0].current_pp, 1);
+    assert_eq!(
+        state.player_transform.as_ref().expect("transform").moves[0].current_pp,
+        0
+    );
+    assert_eq!(state.player.item, None);
+    assert!(events.contains(&BattleEvent::HeldItemPpRestored {
+        side: BattleSide::Player,
+        item_id: "MYSTERY_BERRY".to_string(),
+        move_name: "SKETCH".to_string(),
+        slot: 0,
+        pp_before: 0,
+        pp_after: 1,
+        amount: 1,
+    }));
+}
+
+#[test]
 fn held_hp_berry_requires_strictly_less_than_half_hp() {
     let mut player = pokemon("HOOTHOOT", 50, pokemon_type("NORMAL"), "TACKLE");
     player.hp = player.max_hp / 2;
@@ -17127,7 +23686,10 @@ fn ordinary_hit_executes_the_kings_rock_command_once() {
     );
 }
 
-fn source_effect_command_inventory(command: &str) -> Vec<(String, String, bool)> {
+fn source_effect_command_inventory(
+    command: &str,
+    used_effects_only: bool,
+) -> Vec<(String, String, bool)> {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let constants = std::fs::read_to_string(
         repo_root.join("vendor/pokecrystal/constants/move_effect_constants.asm"),
@@ -17213,7 +23775,7 @@ fn source_effect_command_inventory(command: &str) -> Vec<(String, String, bool)>
     effect_ids
         .into_iter()
         .zip(pointer_labels)
-        .filter(|(effect_id, _)| used_effects.contains(effect_id))
+        .filter(|(effect_id, _)| !used_effects_only || used_effects.contains(effect_id))
         .map(|(effect_id, pointer_label)| {
             let has_command = *label_has_command
                 .get(&pointer_label)
@@ -17228,7 +23790,7 @@ fn source_effect_command_inventory(command: &str) -> Vec<(String, String, bool)>
 
 #[test]
 fn kings_rock_eligibility_matches_every_used_source_effect_script() {
-    for (effect_id, pointer_label, expected) in source_effect_command_inventory("kingsrock") {
+    for (effect_id, pointer_label, expected) in source_effect_command_inventory("kingsrock", true) {
         let move_data =
             move_data_with_effect("SOURCE_EFFECT", pokemon_type("NORMAL"), 40, 100, &effect_id);
         assert_eq!(
@@ -17240,11 +23802,14 @@ fn kings_rock_eligibility_matches_every_used_source_effect_script() {
 }
 
 #[test]
-fn shared_check_hit_eligibility_matches_every_used_source_effect_script() {
-    for (effect_id, pointer_label, expected) in source_effect_command_inventory("checkhit") {
+fn shared_check_hit_eligibility_matches_reachable_source_effect_commands() {
+    for (effect_id, pointer_label, expected) in source_effect_command_inventory("checkhit", true) {
         // Bide reaches the shared check-hit implementation only on its release
         // turn, after its direct setup/storage state machine has completed.
+        // Future Sight has the inverse split: setup ends at `futuresight`, and
+        // only CheckFutureSight's delayed resume reaches the later `checkhit`.
         let reaches_check_hit = move_effect_uses_check_hit(&effect_id) || effect_id == "BIDE";
+        let expected = expected && effect_id != "FUTURE_SIGHT";
         assert_eq!(
             reaches_check_hit, expected,
             "EFFECT_{effect_id} -> {pointer_label}"
@@ -17253,8 +23818,36 @@ fn shared_check_hit_eligibility_matches_every_used_source_effect_script() {
 }
 
 #[test]
+fn failure_text_eligibility_matches_every_source_effect_script() {
+    for (effect_id, pointer_label, expected) in
+        source_effect_command_inventory("failuretext", false)
+    {
+        assert_eq!(
+            move_effect_has_failure_text(&effect_id),
+            expected,
+            "EFFECT_{effect_id} -> {pointer_label}"
+        );
+    }
+}
+
+#[test]
+fn critical_text_eligibility_matches_every_source_effect_script() {
+    for (effect_id, pointer_label, expected) in
+        source_effect_command_inventory("criticaltext", false)
+    {
+        assert_eq!(
+            move_effect_has_critical_text(&effect_id),
+            expected,
+            "EFFECT_{effect_id} -> {pointer_label}"
+        );
+    }
+}
+
+#[test]
 fn pre_damage_effect_chance_eligibility_matches_every_used_source_effect_script() {
-    for (effect_id, pointer_label, expected) in source_effect_command_inventory("effectchance") {
+    for (effect_id, pointer_label, expected) in
+        source_effect_command_inventory("effectchance", true)
+    {
         let move_data = move_data_with_effect_chance(
             "SOURCE_EFFECT",
             pokemon_type("NORMAL"),
@@ -17295,6 +23888,58 @@ fn brightpowder_subtracts_its_asm_accuracy_penalty() {
 }
 
 #[test]
+fn brightpowder_can_make_an_ordinary_full_accuracy_move_miss() {
+    let player = pokemon("RATTATA", 90, pokemon_type("NORMAL"), "TACKLE");
+    let mut enemy = pokemon("PIDGEY", 10, pokemon_type("NORMAL"), "SPLASH");
+    enemy.item = Some("BRIGHTPOWDER".to_string());
+    let moves = BTreeMap::from([
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut brightpowder = held_boost_item("BRIGHTPOWDER", "HELD_BRIGHTPOWDER");
+    brightpowder.parameter = 20;
+    let items = BTreeMap::from([("BRIGHTPOWDER".to_string(), brightpowder)]);
+    // Normal Hit calculates critical damage and variation before CheckHit.
+    // $db rotates to an accepted $ed variation byte; the following $eb roll
+    // equals the BrightPowder-reduced accuracy and therefore misses.
+    let mut rng = ScriptedBattleRandom::new(vec![200, 0xdb, 235]);
+
+    let outcome = resolve_battle_turn_with_items(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("BrightPowder full-accuracy boundary resolves");
+
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            accuracy: 235,
+            roll: 235,
+        } if move_name == "TACKLE"
+    )));
+    assert_eq!(rng.calls, 3);
+}
+
+#[test]
 fn x_accuracy_sets_persistent_sure_hit_substatus_instead_of_accuracy_stage() {
     let player = pokemon("RATTATA", 90, pokemon_type("NORMAL"), "TACKLE");
     let enemy = pokemon("PIDGEY", 10, pokemon_type("NORMAL"), "SPLASH");
@@ -17311,6 +23956,7 @@ fn x_accuracy_sets_persistent_sure_hit_substatus_instead_of_accuracy_stage() {
         BattleSide::Player,
         "X_ACCURACY",
         &items,
+        &stat_multipliers(),
         &mut events,
     )
     .expect("X Accuracy applies");
@@ -17334,12 +23980,87 @@ fn x_accuracy_sets_persistent_sure_hit_substatus_instead_of_accuracy_stage() {
             BattleSide::Player,
             "X_ACCURACY",
             &items,
+            &stat_multipliers(),
             &mut Vec::new(),
         ),
         Err(BattleTurnError::BattleItem { .. })
     ));
     clear_side_volatile_conditions(&mut state, BattleSide::Player);
     assert!(!state.player_x_accuracy);
+}
+
+#[test]
+fn guard_spec_sets_persistent_mist_rejects_repeat_use_and_clears_on_switch() {
+    let player = pokemon("RATTATA", 90, pokemon_type("NORMAL"), "TACKLE");
+    let enemy = pokemon("PIDGEY", 10, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    let mut item = battle_item("GUARD_SPEC", 0, true);
+    item.battle_stat_drop_guard = Some(true);
+    let items = BTreeMap::from([("GUARD_SPEC".to_string(), item)]);
+
+    execute_item(
+        &mut state,
+        BattleSide::Player,
+        "GUARD_SPEC",
+        &items,
+        &stat_multipliers(),
+        &mut Vec::new(),
+    )
+    .expect("Guard Spec applies");
+
+    assert!(state.player_mist_active);
+    assert!(matches!(
+        execute_item(
+            &mut state,
+            BattleSide::Player,
+            "GUARD_SPEC",
+            &items,
+            &stat_multipliers(),
+            &mut Vec::new(),
+        ),
+        Err(BattleTurnError::BattleItem { .. })
+    ));
+    clear_side_volatile_conditions(&mut state, BattleSide::Player);
+    assert!(!state.player_mist_active);
+}
+
+#[test]
+fn enemy_trainer_substatus_items_do_not_reject_already_set_bits() {
+    let player = pokemon("RATTATA", 90, pokemon_type("NORMAL"), "TACKLE");
+    let enemy = pokemon("PIDGEY", 10, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_x_accuracy = true;
+    state.enemy_mist_active = true;
+    state.enemy.focus_energy = true;
+
+    let mut x_accuracy = battle_item("X_ACCURACY", 0, true);
+    x_accuracy.battle_stat_boost_stat = Some("ACCURACY".to_string());
+    x_accuracy.battle_stat_boost_stages = Some(1);
+    let mut guard_spec = battle_item("GUARD_SPEC", 0, true);
+    guard_spec.battle_stat_drop_guard = Some(true);
+    let mut dire_hit = battle_item("DIRE_HIT", 0, true);
+    dire_hit.battle_focus_energy = Some(true);
+    let items = BTreeMap::from([
+        ("X_ACCURACY".to_string(), x_accuracy),
+        ("GUARD_SPEC".to_string(), guard_spec),
+        ("DIRE_HIT".to_string(), dire_hit),
+    ]);
+
+    for item_id in ["X_ACCURACY", "GUARD_SPEC", "DIRE_HIT"] {
+        execute_item(
+            &mut state,
+            BattleSide::Enemy,
+            item_id,
+            &items,
+            &stat_multipliers(),
+            &mut Vec::new(),
+        )
+        .unwrap_or_else(|error| panic!("redundant enemy {item_id} must still apply: {error:?}"));
+    }
+
+    assert!(state.enemy_x_accuracy);
+    assert!(state.enemy_mist_active);
+    assert!(state.enemy.focus_energy);
 }
 
 #[test]
@@ -18300,7 +25021,10 @@ fn trainer_post_order_selector_runs_after_equal_speed_order_rng() {
     let mut observed_decision_roll = None;
     let mut select_enemy_move = |_: &BattleCombatState, rng: &mut dyn BattleRandomSource| {
         observed_move_roll = Some(rng.battle_random_byte());
-        Ok(0usize)
+        Ok(EnemyMoveSelection {
+            slot: 0,
+            ai_damage_register: 0,
+        })
     };
     let mut select_enemy_action = |_: &BattleCombatState,
                                    rng: &mut dyn BattleRandomSource|
@@ -18354,7 +25078,10 @@ fn enemy_move_selector_observes_berserk_gene_start_of_turn_state() {
             state.enemy.stat_boosts.get(&Stat::Attack).copied(),
             state.enemy.confusion_turns,
         ));
-        Ok(0usize)
+        Ok(EnemyMoveSelection {
+            slot: 0,
+            ai_damage_register: 0,
+        })
     };
     let mut select_enemy_action =
         |_: &BattleCombatState, _: &mut dyn BattleRandomSource| Ok(BattleAction::Move { slot: 0 });
@@ -18402,7 +25129,10 @@ fn failed_wild_run_keeps_berserk_ai_escape_and_enemy_flee_rng_in_source_order() 
             state.enemy.confusion_turns,
             rng.battle_random_byte(),
         ));
-        Ok(0usize)
+        Ok(EnemyMoveSelection {
+            slot: 0,
+            ai_damage_register: 0,
+        })
     };
     let mut select_enemy_action =
         |_: &BattleCombatState, _: &mut dyn BattleRandomSource| Ok(BattleAction::Move { slot: 0 });
@@ -18528,7 +25258,12 @@ fn trainer_post_order_action_executes_before_the_nominally_first_move() {
         ),
     ]);
     let mut rng = Random::new(1);
-    let mut select_enemy_move = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| Ok(0usize);
+    let mut select_enemy_move = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| {
+        Ok(EnemyMoveSelection {
+            slot: 0,
+            ai_damage_register: 0,
+        })
+    };
     let mut select_enemy_action = |_: &BattleCombatState,
                                    _: &mut dyn BattleRandomSource|
      -> Result<BattleAction, BattleTurnError> {
@@ -18599,7 +25334,12 @@ fn pursuit_intercepts_a_post_order_trainer_switch_without_changing_move_order() 
         ),
     ]);
     let mut rng = Random::new(1);
-    let mut select_enemy_move = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| Ok(0usize);
+    let mut select_enemy_move = |_: &BattleCombatState, _: &mut dyn BattleRandomSource| {
+        Ok(EnemyMoveSelection {
+            slot: 0,
+            ai_damage_register: 0,
+        })
+    };
     let mut select_enemy_action = |_: &BattleCombatState,
                                    _: &mut dyn BattleRandomSource|
      -> Result<BattleAction, BattleTurnError> {
@@ -19029,7 +25769,7 @@ fn switch_action_records_explicit_event_without_silent_noop() {
 }
 
 #[test]
-fn berserk_gene_activates_at_the_next_turn_start_with_exact_held_effect() {
+fn switched_in_berserk_gene_uses_generic_stat_effect_before_next_turn() {
     let player = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "TACKLE");
     let enemy = pokemon("PIDGEY", 90, pokemon_type("NORMAL"), "TACKLE");
     let moves = [(
@@ -19065,45 +25805,22 @@ fn berserk_gene_activates_at_the_next_turn_start_with_exact_held_effect() {
     )
     .expect("Berserk Gene switch turn resolves");
 
-    assert_eq!(outcome.state.player.item.as_deref(), Some("BERSERK_GENE"));
+    assert_eq!(outcome.state.player.item, None);
+    assert_eq!(outcome.state.player.stat_boosts[&Stat::Attack], 1);
     assert_eq!(outcome.state.player.confusion_turns, 0);
-    assert!(!outcome.events.iter().any(|event| matches!(
-        event,
-        BattleEvent::HeldItemActivated { item_id, .. } if item_id == "BERSERK_GENE"
-    )));
-
-    let mut next_turn_state = outcome.state;
-    let mut start_events = Vec::new();
-    apply_berserk_gene_start_of_turn(
-        &mut next_turn_state,
-        BattleSide::Player,
-        &items,
-        &mut start_events,
-    )
-    .expect("Berserk Gene next-turn boundary resolves");
-    assert_eq!(next_turn_state.player.item, None);
-    assert_eq!(
-        next_turn_state
-            .player
-            .stat_boosts
-            .get(&Stat::Attack)
-            .copied(),
-        Some(2)
-    );
-    assert_eq!(next_turn_state.player.confusion_turns, 256);
-    assert!(start_events.contains(&BattleEvent::HeldItemActivated {
+    assert!(outcome.events.contains(&BattleEvent::HeldItemActivated {
         side: BattleSide::Player,
         item_id: "BERSERK_GENE".to_string(),
         held_effect: "HELD_ATTACK_UP".to_string(),
     }));
-    assert!(start_events.contains(&BattleEvent::StatStageChanged {
+    assert!(outcome.events.contains(&BattleEvent::StatStageChanged {
         side: BattleSide::Player,
         move_name: "HELD_ATTACK_UP".to_string(),
         target: BattleSide::Player,
         stat: Stat::Attack,
-        amount: 2,
+        amount: 1,
         stage_before: 0,
-        stage_after: 2,
+        stage_after: 1,
     }));
 }
 
@@ -19248,6 +25965,100 @@ fn party_revive_item_is_one_turn_action_and_player_residual_precedes_enemy_respo
         })
         .expect("enemy response");
     assert!(item_index < residual_index && residual_index < enemy_move_index);
+}
+
+#[test]
+fn party_item_action_rejects_an_itemmenu_close_reserve_target() {
+    let player = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "TACKLE");
+    let reserve = pokemon("PIDGEY", 30, pokemon_type("NORMAL"), "TACKLE");
+    let enemy = pokemon("SENTRET", 30, pokemon_type("NORMAL"), "TACKLE");
+    let mut state = battle_state(player, enemy, 1);
+    state.player_party = vec![state.player.clone(), reserve];
+    let moves = BTreeMap::from([(
+        "TACKLE".to_string(),
+        move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+    )]);
+    let mut x_attack = battle_item("X_ATTACK", 0, true);
+    x_attack.effect = "X_ITEM".to_string();
+    x_attack.battle_menu = "ITEMMENU_CLOSE".to_string();
+    x_attack.battle_stat_boost_stat = Some("ATTACK".to_string());
+    x_attack.battle_stat_boost_stages = Some(1);
+    let items = BTreeMap::from([("X_ATTACK".to_string(), x_attack)]);
+    let mut rng = Random::new(1);
+
+    let error = resolve_battle_turn_with_items(
+        state,
+        BattleTurnInput {
+            player: BattleAction::PartyItem {
+                item_id: "X_ATTACK".to_string(),
+                party_index: 1,
+                move_slot: None,
+            },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect_err("ITEMMENU_CLOSE has no selectable party target");
+
+    assert_eq!(
+        error,
+        BattleTurnError::BattleItemTargetNotSelectable {
+            side: BattleSide::Player,
+            item_id: "X_ATTACK".to_string(),
+            party_index: 1,
+        }
+    );
+    assert_eq!(rng.seed(), 1);
+}
+
+#[test]
+fn direct_item_action_rejects_an_itemmenu_party_item() {
+    let mut player = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "SPLASH");
+    player.hp = player.max_hp - 1;
+    let enemy = pokemon("PIDGEY", 30, pokemon_type("NORMAL"), "SPLASH");
+    let state = battle_state(player, enemy, 1);
+    let moves = BTreeMap::from([(
+        "SPLASH".to_string(),
+        move_data("SPLASH", pokemon_type("NORMAL"), 0, 100),
+    )]);
+    let mut potion = battle_item("POTION", 20, true);
+    potion.battle_menu = "ITEMMENU_PARTY".to_string();
+    let items = BTreeMap::from([("POTION".to_string(), potion)]);
+    let mut rng = Random::new(1);
+
+    let error = resolve_battle_turn_with_items(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Item {
+                item_id: "POTION".to_string(),
+            },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect_err("ITEMMENU_PARTY requires a selected party target");
+    assert_eq!(
+        error,
+        BattleTurnError::BattleItemRequiresPartyTarget {
+            side: BattleSide::Player,
+            item_id: "POTION".to_string(),
+        }
+    );
+    assert_eq!(rng.seed(), 1);
 }
 
 #[test]
@@ -19783,6 +26594,7 @@ fn enemy_ai_full_heal_preserves_confusion_and_nightmare_like_ai_heal_status() {
         BattleSide::Enemy,
         "FULL_HEAL",
         &items,
+        &stat_multipliers(),
         &mut events,
     )
     .expect("enemy AI Full Heal resolves");
@@ -19819,6 +26631,7 @@ fn enemy_ai_full_restore_explicitly_clears_confusion_but_not_nightmare() {
         BattleSide::Enemy,
         "FULL_RESTORE",
         &items,
+        &stat_multipliers(),
         &mut events,
     )
     .expect("enemy AI Full Restore resolves");
@@ -19846,6 +26659,7 @@ fn enemy_ai_full_heal_retains_the_cached_burn_attack_penalty() {
         BattleSide::Enemy,
         "FULL_HEAL",
         &items,
+        &stat_multipliers(),
         &mut Vec::new(),
     )
     .expect("enemy AI Full Heal resolves");
@@ -19925,6 +26739,7 @@ fn enemy_ai_full_restore_retains_the_cached_paralysis_speed_penalty() {
         BattleSide::Enemy,
         "FULL_RESTORE",
         &items,
+        &stat_multipliers(),
         &mut Vec::new(),
     )
     .expect("enemy AI Full Restore resolves");
@@ -19944,6 +26759,7 @@ fn enemy_ai_full_restore_retains_the_cached_paralysis_speed_penalty() {
         "AGILITY",
         Stat::Speed,
         1,
+        &stat_multipliers(),
         &mut Vec::new(),
     )
     .expect("enemy Speed recalculation resolves");
@@ -20032,6 +26848,7 @@ fn player_full_heal_clears_nightmare_through_heal_status() {
         BattleSide::Player,
         "FULL_HEAL",
         &items,
+        &stat_multipliers(),
         &mut events,
     )
     .expect("player Full Heal resolves");
@@ -20039,6 +26856,57 @@ fn player_full_heal_clears_nightmare_through_heal_status() {
     assert_eq!(state.player.status, None);
     assert_eq!(state.player.sleep_turns, 0);
     assert_eq!(state.player_nightmare_source, None);
+}
+
+#[test]
+fn active_party_status_healer_rebuilds_loaded_stats_and_clears_substatuses() {
+    let mut player = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "SPLASH");
+    player.status = Some("PARALYSIS".to_string());
+    let raw_speed = player.speed;
+    let enemy = pokemon("PIDGEY", 30, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 1);
+    state.player_party[0] = state.player.clone();
+    state.player_nightmare_source = Some(BattleSide::Enemy);
+    state.player_toxic_turns = 4;
+    recalculate_loaded_stats(&mut state, BattleSide::Player, &stat_multipliers())
+        .expect("paralysis penalty loads");
+    assert!(state.player_loaded_stats.speed < raw_speed);
+
+    let moves = BTreeMap::from([(
+        "SPLASH".to_string(),
+        move_data("SPLASH", pokemon_type("NORMAL"), 0, 100),
+    )]);
+    let mut full_heal = full_status_item("FULL_HEAL", false);
+    full_heal.battle_menu = "ITEMMENU_PARTY".to_string();
+    let items = BTreeMap::from([("FULL_HEAL".to_string(), full_heal)]);
+    let mut rng = Random::new(1);
+
+    let outcome = resolve_battle_turn_with_items(
+        state,
+        BattleTurnInput {
+            player: BattleAction::PartyItem {
+                item_id: "FULL_HEAL".to_string(),
+                party_index: 0,
+                move_slot: None,
+            },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &items,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("active party Full Heal resolves");
+
+    assert_eq!(outcome.state.player.status, None);
+    assert_eq!(outcome.state.player_loaded_stats.speed, raw_speed);
+    assert!(outcome.state.player_badge_before_status);
+    assert_eq!(outcome.state.player_toxic_turns, 0);
+    assert_eq!(outcome.state.player_nightmare_source, None);
 }
 
 #[test]
@@ -20700,19 +27568,149 @@ fn jump_kick_hit_resolves_as_exported_damage_move() {
 }
 
 #[test]
-fn jump_kick_miss_crashes_for_half_max_hp() {
+fn normal_hit_miss_samples_critical_and_variation_before_accuracy() {
+    let player = pokemon("RATTATA", 90, pokemon_type("NORMAL"), "TACKLE");
+    let enemy = pokemon("PIDGEY", 40, pokemon_type("NORMAL"), "SPLASH");
+    let enemy_hp = enemy.hp;
+    let moves = BTreeMap::from([(
+        "TACKLE".to_string(),
+        move_data("TACKLE", pokemon_type("NORMAL"), 35, 1),
+    )]);
+    // NormalHit runs critical and damagevariation before checkhit.
+    let mut rng = ScriptedBattleRandom::new(vec![0, u8::MAX, u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("normal hit miss resolves");
+
+    assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            ..
+        } if move_name == "TACKLE"
+    )));
+    assert_eq!(rng.calls, 3);
+    assert_eq!(outcome.state.critical_hit_register, 0);
+}
+
+#[test]
+fn poison_hit_miss_prepares_damage_but_skips_effect_chance() {
+    let player = pokemon("EKANS", 90, pokemon_type("POISON"), "POISON_STING");
+    let enemy = pokemon("PIDGEY", 40, pokemon_type("NORMAL"), "SPLASH");
+    let enemy_hp = enemy.hp;
+    let moves = BTreeMap::from([(
+        "POISON_STING".to_string(),
+        move_data_with_effect("POISON_STING", pokemon_type("POISON"), 15, 1, "POISON_HIT"),
+    )]);
+    // PoisonHit runs critical and variation before checkhit, but its
+    // effectchance command is after checkhit and must be skipped by the miss.
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX, u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Switch { party_index: 1 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("poison hit miss resolves");
+
+    assert_eq!(outcome.state.enemy.hp, enemy_hp);
+    assert_eq!(outcome.state.enemy.status, None);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            ..
+        } if move_name == "POISON_STING"
+    )));
+    assert_eq!(rng.calls, 3);
+}
+
+#[test]
+fn split_power_streams_sample_critical_before_accuracy_but_skip_variation_on_miss() {
+    for (move_name, move_type, effect) in [
+        ("RAGE", "NORMAL", "RAGE"),
+        ("ROLLOUT", "ROCK", "ROLLOUT"),
+        ("FURY_CUTTER", "BUG", "FURY_CUTTER"),
+    ] {
+        let player = pokemon("RATTATA", 90, pokemon_type("NORMAL"), move_name);
+        let enemy = pokemon("PIDGEY", 40, pokemon_type("NORMAL"), "SPLASH");
+        let moves = BTreeMap::from([(
+            move_name.to_string(),
+            move_data_with_effect(move_name, pokemon_type(move_type), 20, 1, effect),
+        )]);
+        // critical -> checkhit; power escalation and variation follow a hit.
+        let mut rng = ScriptedBattleRandom::new(vec![200, u8::MAX]);
+
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, 0),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Switch { party_index: 1 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .unwrap_or_else(|error| panic!("{move_name} miss failed: {error:?}"));
+
+        assert!(outcome.events.iter().any(|event| matches!(
+            event,
+            BattleEvent::Missed {
+                side: BattleSide::Player,
+                move_name: missed_move,
+                ..
+            } if missed_move == move_name
+        )));
+        assert_eq!(rng.calls, 2, "{move_name}");
+    }
+}
+
+#[test]
+fn jump_kick_miss_crashes_for_one_eighth_retained_damage_after_source_rng() {
     let player = pokemon("HITMONLEE", 90, pokemon_type("FIGHTING"), "JUMP_KICK");
     let enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "TACKLE");
     let player_hp = player.hp;
-    let crash_damage = (player.max_hp / 2).max(1);
+    // Non-critical maximum variation produces 48 would-be damage for this
+    // matchup. FailureText shifts the retained wCurDamage right three times.
+    let crash_damage = 6;
     let moves = BTreeMap::from([(
         "JUMP_KICK".to_string(),
         move_data_with_effect("JUMP_KICK", pokemon_type("FIGHTING"), 70, 1, "JUMP_KICK"),
     )]);
-    let mut rng = Random::new(22);
+    // critical -> variation -> accuracy, matching the NormalHit effect script.
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX, u8::MAX]);
 
     let outcome = resolve_battle_turn(
-        battle_state(player, enemy, rng.seed()),
+        battle_state(player, enemy, 0),
         BattleTurnInput {
             player: BattleAction::Move { slot: 0 },
             enemy: BattleAction::Switch { party_index: 1 },
@@ -20743,10 +27741,11 @@ fn jump_kick_miss_crashes_for_half_max_hp() {
         hp_before: player_hp,
         hp_after: player_hp - crash_damage,
     }));
+    assert_eq!(rng.calls, 3);
 }
 
 #[test]
-fn jump_kick_no_effect_crashes_and_can_faint_user() {
+fn jump_kick_type_immunity_does_not_crash_the_user() {
     let mut player = pokemon("HITMONLEE", 90, pokemon_type("FIGHTING"), "JUMP_KICK");
     player.hp = 10;
     player.max_hp = 44;
@@ -20755,10 +27754,10 @@ fn jump_kick_no_effect_crashes_and_can_faint_user() {
         "JUMP_KICK".to_string(),
         move_data_with_effect("JUMP_KICK", pokemon_type("FIGHTING"), 70, 100, "JUMP_KICK"),
     )]);
-    let mut rng = Random::new(22);
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX]);
 
     let outcome = resolve_battle_turn(
-        battle_state(player, enemy, rng.seed()),
+        battle_state(player, enemy, 0),
         BattleTurnInput {
             player: BattleAction::Move { slot: 0 },
             enemy: BattleAction::Switch { party_index: 1 },
@@ -20773,21 +27772,18 @@ fn jump_kick_no_effect_crashes_and_can_faint_user() {
     )
     .expect("jump kick no-effect resolves");
 
-    assert_eq!(outcome.state.player.hp, 0);
+    assert_eq!(outcome.state.player.hp, 10);
     assert!(outcome.events.contains(&BattleEvent::NoEffect {
         side: BattleSide::Player,
         move_name: "JUMP_KICK".to_string(),
     }));
-    assert!(outcome.events.contains(&BattleEvent::JumpKickCrash {
-        side: BattleSide::Player,
-        move_name: "JUMP_KICK".to_string(),
-        crash_damage: 10,
-        hp_before: 10,
-        hp_after: 0,
-    }));
-    assert!(outcome.events.contains(&BattleEvent::Fainted {
-        side: BattleSide::Player,
-    }));
+    assert!(
+        !outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::JumpKickCrash { .. }))
+    );
+    assert_eq!(rng.calls, 2);
 }
 
 #[test]
@@ -20908,7 +27904,9 @@ fn rampage_forced_turn_uses_locked_move_without_extra_pp_and_processes_end_confu
             move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
         ),
     ]);
-    let mut rng = Random::new(22);
+    // Rampage samples confusion duration first; seed zero's next byte is in
+    // the acting half of CheckTurn's full-byte confusion threshold.
+    let mut rng = Random::new(0);
 
     let outcome = resolve_battle_turn(
         state,
@@ -21150,6 +28148,173 @@ fn lock_on_fails_when_user_already_has_target_locked() {
 }
 
 #[test]
+fn missed_lock_on_and_mind_reader_reach_their_command_owned_failure() {
+    for move_name in ["LOCK_ON", "MIND_READER"] {
+        let player = pokemon("MAGNEMITE", 90, pokemon_type("ELECTRIC"), move_name);
+        let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+        let moves = BTreeMap::from([
+            (
+                move_name.to_string(),
+                move_data_with_effect(move_name, pokemon_type("NORMAL"), 0, 1, "LOCK_ON"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+        ]);
+        let mut rng = ScriptedBattleRandom::new(vec![u8::MAX]);
+
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, 0),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Switch { party_index: 1 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("missed aim move resolves");
+
+        assert_eq!(rng.calls, 1, "{move_name}");
+        assert!(!outcome.state.player_lock_on_target, "{move_name}");
+        assert!(outcome.events.contains(&BattleEvent::LockOnFailed {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+        }));
+    }
+}
+
+#[test]
+fn protected_lock_on_and_mind_reader_follow_protect_with_their_failure() {
+    for move_name in ["LOCK_ON", "MIND_READER"] {
+        let player = pokemon("MAGNEMITE", 90, pokemon_type("ELECTRIC"), move_name);
+        let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "PROTECT");
+        let moves = BTreeMap::from([
+            (
+                move_name.to_string(),
+                move_data_with_effect(move_name, pokemon_type("NORMAL"), 0, 100, "LOCK_ON"),
+            ),
+            (
+                "PROTECT".to_string(),
+                move_data_with_effect("PROTECT", pokemon_type("NORMAL"), 0, 100, "PROTECT"),
+            ),
+        ]);
+        let mut rng = ScriptedBattleRandom::new(vec![1]);
+
+        let outcome = resolve_battle_turn(
+            battle_state(player, enemy, 0),
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("protected aim move resolves");
+
+        assert_eq!(rng.calls, 1, "{move_name}");
+        assert!(outcome.events.contains(&BattleEvent::MoveProtected {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+        }));
+        assert!(outcome.events.contains(&BattleEvent::LockOnFailed {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+        }));
+    }
+}
+
+#[test]
+fn airborne_target_lock_on_and_mind_reader_skip_accuracy_then_fail() {
+    for move_name in ["LOCK_ON", "MIND_READER"] {
+        let player = pokemon("MAGNEMITE", 90, pokemon_type("ELECTRIC"), move_name);
+        let enemy = pokemon("PIDGEY", 10, pokemon_type("FLYING"), "SPLASH");
+        let moves = BTreeMap::from([
+            (
+                move_name.to_string(),
+                move_data_with_effect(move_name, pokemon_type("NORMAL"), 0, 50, "LOCK_ON"),
+            ),
+            (
+                "SPLASH".to_string(),
+                move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+            ),
+            (
+                "FLY".to_string(),
+                move_data_with_effect("FLY", pokemon_type("FLYING"), 70, 95, "FLY"),
+            ),
+        ]);
+        let mut rng = ScriptedBattleRandom::new(vec![]);
+        let mut state = battle_state(player, enemy, 0);
+        state.enemy_airborne_move = Some("FLY".to_string());
+
+        let outcome = resolve_battle_turn(
+            state,
+            BattleTurnInput {
+                player: BattleAction::Move { slot: 0 },
+                enemy: BattleAction::Move { slot: 0 },
+            },
+            &moves,
+            &move_priorities(),
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            &mut rng,
+        )
+        .expect("hidden-target aim move resolves");
+
+        assert_eq!(rng.calls, 0, "{move_name}");
+        assert!(outcome.events.contains(&BattleEvent::AirborneAvoided {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+            airborne_move: "FLY".to_string(),
+        }));
+        assert!(outcome.events.contains(&BattleEvent::LockOnFailed {
+            side: BattleSide::Player,
+            move_name: move_name.to_string(),
+            target: BattleSide::Enemy,
+        }));
+    }
+}
+
+#[test]
+fn substitute_blocked_lock_on_uses_its_command_owned_failure() {
+    let player = pokemon("MAGNEMITE", 90, pokemon_type("ELECTRIC"), "LOCK_ON");
+    let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_substitute_hp = 10;
+    let mut events = Vec::new();
+
+    apply_lock_on_effect(&mut state, BattleSide::Player, "LOCK_ON", &mut events);
+
+    assert!(!state.player_lock_on_target);
+    assert!(events.contains(&BattleEvent::LockOnFailed {
+        side: BattleSide::Player,
+        move_name: "LOCK_ON".to_string(),
+        target: BattleSide::Enemy,
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::SubstituteBlocked { .. }))
+    );
+}
+
+#[test]
 fn lock_on_consumes_sure_hit_without_accuracy_stage_table() {
     let player = pokemon("MAGNEMITE", 90, pokemon_type("ELECTRIC"), "TACKLE");
     let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "TACKLE");
@@ -21199,6 +28364,129 @@ fn lock_on_consumes_sure_hit_without_accuracy_stage_table() {
             ..
         } if move_name == "TACKLE"
     )));
+}
+
+#[test]
+fn lock_on_cannot_bypass_stat_downs_private_hidden_check() {
+    let player = pokemon("STANTLER", 90, pokemon_type("NORMAL"), "GROWL");
+    let enemy = pokemon("PIDGEY", 40, pokemon_type("FLYING"), "FLY");
+    let mut state = battle_state(player, enemy, 0);
+    state.player_lock_on_target = true;
+    state.enemy_airborne_move = Some("FLY".to_string());
+    let moves = BTreeMap::from([
+        (
+            "GROWL".to_string(),
+            move_data_with_stat(
+                "GROWL",
+                pokemon_type("NORMAL"),
+                0,
+                100,
+                "ATTACK_DOWN",
+                0,
+                Stat::Attack,
+                -1,
+            ),
+        ),
+        (
+            "FLY".to_string(),
+            move_data_with_effect("FLY", pokemon_type("FLYING"), 70, 95, "FLY"),
+        ),
+    ]);
+    let mut rng = Random::new(24);
+
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("locked-on hidden stat-down turn resolves");
+
+    assert_eq!(outcome.state.enemy.stat_boosts.get(&Stat::Attack), Some(&0));
+    assert!(outcome.events.contains(&BattleEvent::LockOnConsumed {
+        side: BattleSide::Player,
+        move_name: "GROWL".to_string(),
+        target: BattleSide::Enemy,
+    }));
+    assert!(outcome.events.contains(&BattleEvent::StatStageFailed {
+        side: BattleSide::Player,
+        move_name: "GROWL".to_string(),
+        target: BattleSide::Enemy,
+        stat: Stat::Attack,
+    }));
+}
+
+#[test]
+fn enemy_stat_down_random_failure_precedes_the_substitute_check() {
+    let player = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "SPLASH");
+    let enemy = pokemon("STANTLER", 90, pokemon_type("NORMAL"), "GROWL");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_effect_ai_random_fail = true;
+    state.player_substitute_hp = 10;
+    let growl = move_data_with_stat(
+        "GROWL",
+        pokemon_type("NORMAL"),
+        0,
+        100,
+        "ATTACK_DOWN",
+        0,
+        Stat::Attack,
+        -1,
+    );
+
+    let mut successful_ai_roll = ScriptedBattleRandom::new(vec![200]);
+    let mut substitute_events = Vec::new();
+    apply_stat_stage_effect(
+        &mut state,
+        BattleSide::Enemy,
+        "GROWL",
+        &growl,
+        &stat_multipliers(),
+        &mut successful_ai_roll,
+        &mut substitute_events,
+    )
+    .expect("enemy stat-down command resolves");
+    assert_eq!(successful_ai_roll.calls, 1);
+    assert_eq!(state.player.stat_boosts.get(&Stat::Attack), Some(&0));
+    assert!(substitute_events.contains(&BattleEvent::SubstituteBlocked {
+        side: BattleSide::Enemy,
+        move_name: "GROWL".to_string(),
+        target: BattleSide::Player,
+    }));
+
+    let mut failed_state = state;
+    let mut failed_ai_roll = ScriptedBattleRandom::new(vec![0]);
+    let mut failed_events = Vec::new();
+    apply_stat_stage_effect(
+        &mut failed_state,
+        BattleSide::Enemy,
+        "GROWL",
+        &growl,
+        &stat_multipliers(),
+        &mut failed_ai_roll,
+        &mut failed_events,
+    )
+    .expect("randomly failed enemy stat-down command resolves");
+    assert_eq!(failed_ai_roll.calls, 1);
+    assert!(
+        !failed_events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::SubstituteBlocked { .. }))
+    );
+    assert!(failed_events.contains(&BattleEvent::StatStageFailed {
+        side: BattleSide::Enemy,
+        move_name: "GROWL".to_string(),
+        target: BattleSide::Player,
+        stat: Stat::Attack,
+    }));
 }
 
 #[test]
@@ -21282,6 +28570,53 @@ fn attract_applies_to_opposite_gender_target() {
 }
 
 #[test]
+fn attract_ignores_the_target_ability() {
+    let mut player = pokemon("JIGGLYPUFF", 90, pokemon_type("NORMAL"), "ATTRACT");
+    player.species.gender_ratio = 127;
+    player.dvs = Dv::from_non_hp(10, 10, 10, 10);
+    let mut enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    enemy.species.gender_ratio = 127;
+    enemy.dvs = Dv::from_non_hp(2, 10, 10, 10);
+    enemy.species.ability = "OBLIVIOUS".to_string();
+    let moves = BTreeMap::from([
+        (
+            "ATTRACT".to_string(),
+            move_data_with_effect("ATTRACT", pokemon_type("NORMAL"), 0, 100, "ATTRACT"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    let mut rng = Random::new(26);
+
+    let outcome = resolve_battle_turn(
+        battle_state(player, enemy, rng.seed()),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Attract against an ability-bearing target resolves");
+
+    assert_eq!(outcome.state.enemy_attracted_by, Some(BattleSide::Player));
+    assert!(outcome.events.contains(&BattleEvent::AttractApplied {
+        side: BattleSide::Player,
+        move_name: "ATTRACT".to_string(),
+        target: BattleSide::Enemy,
+        user_gender: BattlePokemonGender::Male,
+        target_gender: BattlePokemonGender::Female,
+    }));
+}
+
+#[test]
 fn attract_fails_against_same_gender_target() {
     let mut player = pokemon("JIGGLYPUFF", 90, pokemon_type("NORMAL"), "ATTRACT");
     player.species.gender_ratio = 127;
@@ -21340,7 +28675,9 @@ fn infatuation_can_immobilize_before_accuracy_or_damage() {
         "TACKLE".to_string(),
         move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
     )]);
-    let mut rng = Random::new(1);
+    // The faster enemy checks attraction first; player damage then consumes
+    // critical and variation bytes.
+    let mut rng = ScriptedBattleRandom::new(vec![128, u8::MAX, u8::MAX]);
 
     let outcome = resolve_battle_turn(
         state,
@@ -21364,7 +28701,7 @@ fn infatuation_can_immobilize_before_accuracy_or_damage() {
             side: BattleSide::Enemy,
             move_name,
             source: BattleSide::Player,
-            roll: 0,
+            roll: 128,
         } if move_name == "TACKLE"
     )));
     assert!(!outcome.events.iter().any(|event| matches!(
@@ -21375,6 +28712,31 @@ fn infatuation_can_immobilize_before_accuracy_or_damage() {
             ..
         } if move_name == "TACKLE"
     )));
+}
+
+#[test]
+fn attraction_uses_the_full_random_byte_threshold() {
+    let player = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "TACKLE");
+    let enemy = pokemon("JIGGLYPUFF", 90, pokemon_type("NORMAL"), "TACKLE");
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_attracted_by = Some(BattleSide::Player);
+    // $02 is below `50 percent + 1` ($80), but its low bit is clear.
+    let mut rng = ScriptedBattleRandom::new(vec![2]);
+    let mut events = Vec::new();
+
+    assert!(!move_blocked_by_attract(
+        &state,
+        BattleSide::Enemy,
+        "TACKLE",
+        &mut rng,
+        &mut events,
+    ));
+    assert!(events.contains(&BattleEvent::InfatuatedTurn {
+        side: BattleSide::Enemy,
+        move_name: "TACKLE".to_string(),
+        source: BattleSide::Player,
+        roll: 2,
+    }));
 }
 
 #[test]
@@ -21420,7 +28782,7 @@ fn fly_first_turn_enters_airborne_state_without_damage() {
     let mut rng = Random::new(31);
 
     let outcome = resolve_battle_turn(
-        battle_state(player, enemy, rng.seed()),
+        battle_state(player, enemy, 0),
         BattleTurnInput {
             player: BattleAction::Move { slot: 0 },
             enemy: BattleAction::Switch { party_index: 1 },
@@ -21706,6 +29068,130 @@ fn earthquake_hits_and_doubles_power_against_dig_target() {
 }
 
 #[test]
+fn earthquake_dig_bonus_runs_before_accuracy_on_a_miss() {
+    let mut player = pokemon("DONPHAN", 100, pokemon_type("GROUND"), "EARTHQUAKE");
+    player.speed = 1_000;
+    let mut enemy = pokemon("DIGLETT", 40, pokemon_type("GROUND"), "DIG");
+    enemy.speed = 1;
+    enemy.flinching = true;
+    let moves = BTreeMap::from([
+        (
+            "EARTHQUAKE".to_string(),
+            move_data_with_effect("EARTHQUAKE", pokemon_type("GROUND"), 100, 1, "EARTHQUAKE"),
+        ),
+        (
+            "DIG".to_string(),
+            move_data_with_effect("DIG", pokemon_type("GROUND"), 60, 100, "FLY"),
+        ),
+    ]);
+    let mut state = battle_state(player, enemy, 0);
+    state.enemy_airborne_move = Some("DIG".to_string());
+    // critical -> variation -> checkhit; doubleundergrounddamage has no RNG.
+    let mut rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX, u8::MAX]);
+
+    let outcome = resolve_battle_turn(
+        state,
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &mut rng,
+    )
+    .expect("Earthquake miss against Dig resolves");
+
+    assert!(outcome.events.contains(&BattleEvent::EarthquakePower {
+        side: BattleSide::Player,
+        move_name: "EARTHQUAKE".to_string(),
+        target_move: "DIG".to_string(),
+        power: 200,
+    }));
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        BattleEvent::Missed {
+            side: BattleSide::Player,
+            move_name,
+            ..
+        } if move_name == "EARTHQUAKE"
+    )));
+    assert_eq!(rng.calls, 3);
+}
+
+#[test]
+fn earthquake_doubles_final_rounded_damage_against_dig() {
+    let player = pokemon("DONPHAN", 100, pokemon_type("GROUND"), "EARTHQUAKE");
+    let mut enemy = pokemon("RATTATA", 40, pokemon_type("NORMAL"), "DIG");
+    enemy.hp = 1_000;
+    enemy.max_hp = 1_000;
+    let earthquake =
+        move_data_with_effect("EARTHQUAKE", pokemon_type("GROUND"), 100, 100, "EARTHQUAKE");
+    let mut base_state = battle_state(player, enemy, 0);
+    let mut dig_state = base_state.clone();
+    dig_state.enemy_airborne_move = Some("DIG".to_string());
+    // critical, variation, then Earthquake's post-checkhit effectchance byte.
+    let mut base_rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX, u8::MAX]);
+    let mut dig_rng = ScriptedBattleRandom::new(vec![u8::MAX, u8::MAX, u8::MAX]);
+    let mut base_events = Vec::new();
+    let mut dig_events = Vec::new();
+
+    apply_damage_hit(
+        &mut base_state,
+        BattleSide::Player,
+        "EARTHQUAKE",
+        &earthquake,
+        1,
+        false,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BTreeMap::new(),
+        &mut base_rng,
+        &mut base_events,
+    )
+    .expect("base Earthquake damage resolves");
+    apply_damage_hit(
+        &mut dig_state,
+        BattleSide::Player,
+        "EARTHQUAKE",
+        &earthquake,
+        1,
+        false,
+        false,
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BTreeMap::new(),
+        &mut dig_rng,
+        &mut dig_events,
+    )
+    .expect("underground Earthquake damage resolves");
+
+    let dealt_damage = |events: &[BattleEvent]| {
+        events
+            .iter()
+            .find_map(|event| match event {
+                BattleEvent::Damage {
+                    side: BattleSide::Player,
+                    move_name,
+                    damage,
+                    ..
+                } if move_name == "EARTHQUAKE" => Some(*damage),
+                _ => None,
+            })
+            .expect("Earthquake damage event")
+    };
+    assert_eq!(dealt_damage(&dig_events), dealt_damage(&base_events) * 2);
+}
+
+#[test]
 fn earthquake_still_misses_actual_fly_target() {
     let mut player = pokemon("PIDGEOT", 40, pokemon_type("NORMAL"), "FLY");
     player.speed = 10;
@@ -21793,10 +29279,10 @@ fn solarbeam_first_turn_charges_without_damage_outside_sun() {
     );
     assert_eq!(outcome.state.enemy.hp, enemy_hp);
     assert_eq!(outcome.state.player.moves[0].current_pp, 4);
-    assert_eq!(outcome.state.player_last_move.as_deref(), Some("TACKLE"));
+    assert_eq!(outcome.state.player_last_move.as_deref(), Some("SOLARBEAM"));
     assert_eq!(
         outcome.state.player_last_counter_move.as_deref(),
-        Some("TACKLE")
+        Some("SOLARBEAM")
     );
     assert!(outcome.events.contains(&BattleEvent::ChargeStarted {
         side: BattleSide::Player,
@@ -22673,9 +30159,10 @@ fn partial_trap_and_protected_battle_type_block_wild_run_before_smoke_ball() {
 }
 
 #[test]
-fn force_switch_move_ends_wild_battle() {
+fn force_switch_move_ends_wild_battle_regardless_of_target_ability() {
     let player = pokemon("PIDGEY", 90, pokemon_type("NORMAL"), "WHIRLWIND");
-    let enemy = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "SPLASH");
+    let mut enemy = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "SPLASH");
+    enemy.species.ability = "SUCTION_CUPS".to_string();
     let moves = BTreeMap::from([
         (
             "WHIRLWIND".to_string(),
@@ -22726,6 +30213,65 @@ fn force_switch_move_ends_wild_battle() {
             .iter()
             .any(|event| matches!(event, BattleEvent::Damage { .. }))
     );
+}
+
+#[test]
+fn underleveled_force_switch_compares_roll_with_target_level_quarter() {
+    let mut player = pokemon("PIDGEY", 90, pokemon_type("NORMAL"), "WHIRLWIND");
+    player.level = 20;
+    let mut enemy = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "SPLASH");
+    enemy.level = 40;
+    let moves = BTreeMap::from([
+        (
+            "WHIRLWIND".to_string(),
+            move_data_with_effect("WHIRLWIND", pokemon_type("NORMAL"), 0, 100, "FORCE_SWITCH"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    // CheckHit first consumes 0. The accepted ForceSwitch byte is below
+    // target_level / 4 (10), but above attacker_level / 4 (5). Crystal
+    // therefore fails this attempt.
+    let mut rng = ScriptedBattleRandom::new(vec![0, 6]);
+
+    let outcome = resolve_wild_battle_turn_with_items(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &BTreeMap::new(),
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BattleEscapeRules {
+            player_speed_multiplier: 32,
+            enemy_speed_divisor: 4,
+            failed_attempt_bonus: 30,
+            rng_roll_values: 256,
+        },
+        0,
+        &mut rng,
+    )
+    .expect("underleveled Whirlwind resolves");
+
+    assert!(outcome.events.contains(&BattleEvent::ForceSwitchFailed {
+        side: BattleSide::Player,
+        move_name: "WHIRLWIND".to_string(),
+        target: BattleSide::Enemy,
+    }));
+    assert!(
+        !outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::Fled { .. }))
+    );
+    assert_eq!(rng.calls, 2);
 }
 
 #[test]
@@ -22883,9 +30429,10 @@ fn wild_enemy_teleport_always_succeeds_regardless_of_level_difference() {
             move_data_with_effect("TELEPORT", pokemon_type("PSYCHIC_TYPE"), 0, 100, "TELEPORT"),
         ),
     ]);
-    // If the player's Teleport odds were (incorrectly) reused for the wild
-    // enemy, this accepted roll is below level 20 / 4 and would fail.
-    let mut rng = ScriptedBattleRandom::new(vec![0]);
+    // TryEnemyFlee consumes 0 first. The underleveled enemy Teleport path
+    // then rejection-samples 6, compares it with player_level / 4, and
+    // preserves the source bug by succeeding regardless of that comparison.
+    let mut rng = ScriptedBattleRandom::new(vec![0, 6]);
 
     let outcome = resolve_wild_battle_turn_with_items(
         battle_state(player, enemy, 0),
@@ -22921,6 +30468,65 @@ fn wild_enemy_teleport_always_succeeds_regardless_of_level_difference() {
             ..
         }
     )));
+    assert_eq!(rng.calls, 2);
+}
+
+#[test]
+fn underleveled_player_teleport_compares_roll_with_target_level_quarter() {
+    let mut player = pokemon("ABRA", 90, pokemon_type("PSYCHIC_TYPE"), "TELEPORT");
+    player.level = 20;
+    let mut enemy = pokemon("RATTATA", 30, pokemon_type("NORMAL"), "SPLASH");
+    enemy.level = 40;
+    let moves = BTreeMap::from([
+        (
+            "TELEPORT".to_string(),
+            move_data_with_effect("TELEPORT", pokemon_type("PSYCHIC_TYPE"), 0, 100, "TELEPORT"),
+        ),
+        (
+            "SPLASH".to_string(),
+            move_data_with_effect("SPLASH", pokemon_type("NORMAL"), 0, 100, "SPLASH"),
+        ),
+    ]);
+    // The accepted byte is below target_level / 4 (10), but above
+    // attacker_level / 4 (5). Crystal therefore fails this attempt.
+    // 255 is the subsequent TryEnemyFlee byte after Teleport fails.
+    let mut rng = ScriptedBattleRandom::new(vec![6, u8::MAX]);
+
+    let outcome = resolve_wild_battle_turn_with_items(
+        battle_state(player, enemy, 0),
+        BattleTurnInput {
+            player: BattleAction::Move { slot: 0 },
+            enemy: BattleAction::Move { slot: 0 },
+        },
+        &moves,
+        &BTreeMap::new(),
+        &move_priorities(),
+        &stat_multipliers(),
+        &type_categories(),
+        &type_effectiveness_table(),
+        &weather_modifiers(),
+        &BattleEscapeRules {
+            player_speed_multiplier: 32,
+            enemy_speed_divisor: 4,
+            failed_attempt_bonus: 30,
+            rng_roll_values: 256,
+        },
+        0,
+        &mut rng,
+    )
+    .expect("underleveled Teleport resolves");
+
+    assert!(outcome.events.contains(&BattleEvent::TeleportFailed {
+        side: BattleSide::Player,
+        move_name: "TELEPORT".to_string(),
+    }));
+    assert!(
+        !outcome
+            .events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::Fled { .. }))
+    );
+    assert_eq!(rng.calls, 2);
 }
 
 #[test]

@@ -3397,8 +3397,14 @@ pub struct RuntimeSpawnPointRef {
     pub subtile_y: i16,
 }
 
+pub const CRYSTAL_NUM_SPAWN_POINTS: u16 = 28;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeSpawnPointCatalogIssue {
+    IdentifierOutOfRange {
+        key: String,
+        identifier: u16,
+    },
     IdentifierMismatch {
         key: String,
         identifier: u16,
@@ -3489,6 +3495,12 @@ pub fn runtime_spawn_point_catalog_issues(
         }
         if key.parse::<u16>().ok() != Some(spawn.identifier) {
             issues.push(RuntimeSpawnPointCatalogIssue::IdentifierMismatch {
+                key: key.clone(),
+                identifier: spawn.identifier,
+            });
+        }
+        if spawn.identifier >= CRYSTAL_NUM_SPAWN_POINTS {
+            issues.push(RuntimeSpawnPointCatalogIssue::IdentifierOutOfRange {
                 key: key.clone(),
                 identifier: spawn.identifier,
             });
@@ -4337,6 +4349,23 @@ fn heal_party(
     move_catalog: &BTreeMap<String, Move>,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    for (party_slot, pokemon) in state.storage.party.pokemon.iter().enumerate() {
+        let Some(pokemon) = pokemon.as_ref() else {
+            continue;
+        };
+        if pokemon.is_egg {
+            continue;
+        }
+        for learned in &pokemon.moves {
+            if !move_catalog.contains_key(&learned.name) {
+                return Err(SpecialRoutineError::UnknownMove {
+                    routine: routine.to_string(),
+                    party_slot,
+                    move_id: learned.name.clone(),
+                });
+            }
+        }
+    }
     let mut party = state.storage.party.clone();
     let mut healed_slots = Vec::new();
     for (party_slot, slot) in party.pokemon.iter_mut().enumerate() {
@@ -11670,6 +11699,7 @@ fn battle_tower_battle(
     state.battle_active_party_index = None;
     state.battle_active_enemy_party_index = None;
     state.battle_rewarded_enemy_party_indices.clear();
+    state.battle_evolvable_party_indices.clear();
     heal_battle_tower_party(state, move_catalog);
     state.battle_tower.quick_saved = false;
     if result_code != 0 {
@@ -12181,6 +12211,7 @@ where
     state.battle_active_party_index = Some(active_party_index);
     state.battle_active_enemy_party_index = Some(0);
     state.battle_rewarded_enemy_party_indices.clear();
+    state.battle_evolvable_party_indices.clear();
     state
         .script_runtime
         .variables
@@ -14257,11 +14288,15 @@ fn heal_pokemon(pokemon: &mut Pokemon, move_catalog: &BTreeMap<String, Move>) ->
         pokemon.status = None;
         changed = true;
     }
+    if pokemon.sleep_turns != 0 {
+        pokemon.sleep_turns = 0;
+        changed = true;
+    }
     for learned in &mut pokemon.moves {
         let Some(move_data) = move_catalog.get(&learned.name) else {
             continue;
         };
-        let restored_pp = move_data.pp;
+        let restored_pp = crate::models::max_move_pp(move_data.pp, learned.pp_ups);
         if learned.current_pp != restored_pp {
             learned.current_pp = restored_pp;
             changed = true;

@@ -1817,6 +1817,12 @@ fn insert_fly_destination(
     flypoint_flag: String,
     destination: FlyDestination,
 ) -> Result<()> {
+    anyhow::ensure!(
+        destination.destination_spawn_identifier
+            < crystal_core::systems::special_routines::CRYSTAL_NUM_SPAWN_POINTS,
+        "fly destination '{flypoint_flag}' spawn identifier {} is outside Crystal's SpawnPoints table",
+        destination.destination_spawn_identifier
+    );
     if flypoint_flag != destination.flypoint_flag {
         anyhow::bail!(
             "fly destination key '{flypoint_flag}' does not match record flypoint_flag '{}'",

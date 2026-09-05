@@ -1,4 +1,5 @@
 use super::*;
+use crystal_core::battle::damage::TypeEffectivenessEntry;
 use crystal_core::map::MapConnection;
 use crystal_core::models::{
     BaseStats, Item, MAX_BOX_MONS, PcBox, ability, egg_group, growth_rate, item_pocket,
@@ -334,6 +335,252 @@ fn runtime_phase_machine_executes_exported_title_branches_and_memory() {
 }
 
 #[test]
+fn runtime_phase_machine_executes_exported_value_comparison_branches() {
+    let operation = |value: serde_json::Value| {
+        serde_json::from_value::<RuntimePresentationOperation>(value)
+            .expect("typed presentation operation")
+    };
+    let span = serde_json::to_value(presentation_span()).expect("source span");
+    let program = RuntimePresentationProgram {
+        subprograms: vec![RuntimePresentationSubprogram {
+            id: "crystal_intro".to_string(),
+            phases: vec![RuntimePresentationPhase {
+                id: "scene_dispatch".to_string(),
+                source_span: presentation_span(),
+                labels: [
+                    ("IntroScene2".to_string(), 0),
+                    (".endscene@IntroScene2".to_string(), 8),
+                ]
+                .into_iter()
+                .collect(),
+                operations: vec![
+                    operation(serde_json::json!({
+                        "op": "postincrement_memory_byte",
+                        "target": "wIntroSceneFrameCounter",
+                        "result": "intro_scene_frame",
+                        "delta": 1,
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({
+                        "op": "branch_compare",
+                        "value": "intro_scene_frame",
+                        "predicate": "unsigned_greater_or_equal",
+                        "operand": 128,
+                        "target": ".endscene@IntroScene2",
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({
+                        "op": "sprite_init_group",
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({
+                        "op": "play_audio",
+                        "audio": "SFX_INTRO_UNOWN_1",
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({
+                        "op": "write_memory_byte_from_result",
+                        "target": "wIntroSceneTimer",
+                        "result": "intro_scene_frame",
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({
+                        "op": "set_local",
+                        "name": "accumulator",
+                        "value": 0,
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({
+                        "op": "palette_fade_lookup",
+                        "palette_selector": "accumulator",
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({ "op": "return", "source_span": span })),
+                    operation(serde_json::json!({
+                        "op": "write_memory_byte",
+                        "target": "wIntroSceneTimer",
+                        "value": 2,
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({ "op": "return", "source_span": span })),
+                ],
+            }],
+            ..RuntimePresentationSubprogram::default()
+        }],
+        ..RuntimePresentationProgram::default()
+    };
+    let mut machine =
+        RuntimePresentationPhaseMachine::new(&program, "crystal_intro", "scene_dispatch")
+            .expect("intro phase machine");
+    machine
+        .memory
+        .insert("wIntroSceneFrameCounter".to_string(), 0x7f);
+
+    machine
+        .run_from_label(&program, "IntroScene2", 0)
+        .expect("comparison branch should execute");
+
+    assert_eq!(machine.memory["wIntroSceneFrameCounter"], 0x80);
+    assert_eq!(machine.values["intro_scene_frame"], 0x7f);
+    assert_eq!(machine.memory["wIntroSceneTimer"], 0x7f);
+    assert_eq!(machine.values["accumulator"], 0);
+
+    machine
+        .run_from_label(&program, "IntroScene2", 0)
+        .expect("comparison branch should jump at the source threshold");
+
+    assert_eq!(machine.memory["wIntroSceneFrameCounter"], 0x81);
+    assert_eq!(machine.values["intro_scene_frame"], 0x80);
+    assert_eq!(machine.memory["wIntroSceneTimer"], 2);
+}
+
+#[test]
+fn runtime_phase_machine_executes_exported_memory_reads_before_effect_branches() {
+    let operation = |value: serde_json::Value| {
+        serde_json::from_value::<RuntimePresentationOperation>(value)
+            .expect("typed presentation operation")
+    };
+    let span = serde_json::to_value(presentation_span()).expect("source span");
+    let program = RuntimePresentationProgram {
+        subprograms: vec![RuntimePresentationSubprogram {
+            id: "crystal_intro".to_string(),
+            phases: vec![RuntimePresentationPhase {
+                id: "scene_dispatch".to_string(),
+                source_span: presentation_span(),
+                labels: [
+                    ("IntroScene4".to_string(), 0),
+                    (".endscene@IntroScene4".to_string(), 5),
+                ]
+                .into_iter()
+                .collect(),
+                operations: vec![
+                    operation(serde_json::json!({
+                        "op": "perspective_scroll",
+                        "target": "wLYOverrides",
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({
+                        "op": "read_memory_byte",
+                        "target": "wIntroSceneFrameCounter",
+                        "result": "intro_scene_frame",
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({
+                        "op": "branch_compare",
+                        "value": "intro_scene_frame",
+                        "predicate": "equal",
+                        "operand": 128,
+                        "target": ".endscene@IntroScene4",
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({
+                        "op": "increment_memory_byte",
+                        "target": "wIntroSceneFrameCounter",
+                        "delta": 1,
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({ "op": "return", "source_span": span })),
+                    operation(serde_json::json!({
+                        "op": "increment_memory_byte",
+                        "target": "wJumptableIndex",
+                        "delta": 1,
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({ "op": "return", "source_span": span })),
+                ],
+            }],
+            ..RuntimePresentationSubprogram::default()
+        }],
+        ..RuntimePresentationProgram::default()
+    };
+    let mut machine =
+        RuntimePresentationPhaseMachine::new(&program, "crystal_intro", "scene_dispatch")
+            .expect("intro phase machine");
+    machine
+        .memory
+        .insert("wIntroSceneFrameCounter".to_string(), 0x80);
+    machine.memory.insert("wJumptableIndex".to_string(), 3);
+
+    let run = machine
+        .run_from_label(&program, "IntroScene4", 0)
+        .expect("memory-read branch should execute");
+
+    assert_eq!(machine.values["intro_scene_frame"], 0x80);
+    assert_eq!(machine.memory["wIntroSceneFrameCounter"], 0x80);
+    assert_eq!(machine.memory["wJumptableIndex"], 4);
+    assert_eq!(
+        run.effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["perspective_scroll"]
+    );
+}
+
+#[test]
+fn runtime_phase_machine_executes_wrapping_exported_byte_transforms() {
+    let operation = |value: serde_json::Value| {
+        serde_json::from_value::<RuntimePresentationOperation>(value)
+            .expect("typed presentation operation")
+    };
+    let span = serde_json::to_value(presentation_span()).expect("source span");
+    let program = RuntimePresentationProgram {
+        subprograms: vec![RuntimePresentationSubprogram {
+            id: "crystal_intro".to_string(),
+            phases: vec![RuntimePresentationPhase {
+                id: "scene_dispatch".to_string(),
+                source_span: presentation_span(),
+                labels: [("IntroScene8".to_string(), 0)].into_iter().collect(),
+                operations: vec![
+                    operation(serde_json::json!({
+                        "op": "read_memory_byte",
+                        "target": "wGlobalAnimXOffset",
+                        "result": "global_anim_x",
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({
+                        "op": "transform_memory_byte",
+                        "target": "wGlobalAnimXOffset",
+                        "input": "global_anim_x",
+                        "operator": "subtract",
+                        "operand": 8,
+                        "wrap": "u8",
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({
+                        "op": "deinitialize_all_sprites",
+                        "source_span": span,
+                    })),
+                    operation(serde_json::json!({ "op": "return", "source_span": span })),
+                ],
+            }],
+            ..RuntimePresentationSubprogram::default()
+        }],
+        ..RuntimePresentationProgram::default()
+    };
+    let mut machine =
+        RuntimePresentationPhaseMachine::new(&program, "crystal_intro", "scene_dispatch")
+            .expect("intro phase machine");
+    machine
+        .memory
+        .insert("wGlobalAnimXOffset".to_string(), 3);
+
+    let run = machine
+        .run_from_label(&program, "IntroScene8", 0)
+        .expect("wrapping byte transform should execute");
+
+    assert_eq!(machine.values["global_anim_x"], 3);
+    assert_eq!(machine.memory["wGlobalAnimXOffset"], 251);
+    assert_eq!(
+        run.effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["transform_memory_byte", "deinitialize_all_sprites"]
+    );
+}
+
+#[test]
 fn runtime_phase_machine_rejects_unimplemented_source_operations() {
     let program = RuntimePresentationProgram {
         subprograms: vec![RuntimePresentationSubprogram {
@@ -418,6 +665,320 @@ fn runtime_phase_machine_executes_title_crystal_oam_motion() {
 }
 
 #[test]
+fn runtime_phase_machine_executes_the_source_suicune_iterator_from_its_operation_index() {
+    let operation = |value: serde_json::Value| {
+        serde_json::from_value::<RuntimePresentationOperation>(value)
+            .expect("typed presentation operation")
+    };
+    let program = RuntimePresentationProgram {
+        subprograms: vec![RuntimePresentationSubprogram {
+            id: "start_title_screen".to_string(),
+            phases: vec![RuntimePresentationPhase {
+                id: "title_screen".to_string(),
+                source_span: presentation_span(),
+                labels: Default::default(),
+                operations: vec![
+                    operation(serde_json::json!({
+                        "op": "postincrement_memory_byte",
+                        "target": "wSuicuneFrame",
+                        "result": "title_suicune_frame",
+                        "delta": 1,
+                        "source_span": presentation_span(),
+                    })),
+                    operation(serde_json::json!({
+                        "op": "return_unless_masked_zero",
+                        "value": "title_suicune_frame",
+                        "mask": 7,
+                        "source_span": presentation_span(),
+                    })),
+                    operation(serde_json::json!({
+                        "op": "draw_indexed_title_suicune_frame",
+                        "source_span": presentation_span(),
+                    })),
+                    operation(serde_json::json!({
+                        "op": "wait_frames",
+                        "frames": 1,
+                        "source_span": presentation_span(),
+                    })),
+                    operation(serde_json::json!({
+                        "op": "return_with_carry",
+                        "source_span": presentation_span(),
+                    })),
+                ],
+            }],
+            ..RuntimePresentationSubprogram::default()
+        }],
+        ..RuntimePresentationProgram::default()
+    };
+    let mut machine =
+        RuntimePresentationPhaseMachine::new(&program, "start_title_screen", "title_screen")
+            .expect("title phase machine");
+    machine.memory.insert("wSuicuneFrame".to_string(), 0);
+
+    let first = machine
+        .run_from_operation_index(&program, 0, 0)
+        .expect("first Suicune iterator step");
+    assert_eq!(machine.values["title_suicune_frame"], 0);
+    assert_eq!(machine.memory["wSuicuneFrame"], 1);
+    assert_eq!(
+        first
+            .effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["draw_indexed_title_suicune_frame", "wait_frames"]
+    );
+
+    let second = machine
+        .run_from_operation_index(&program, 0, 0)
+        .expect("second Suicune iterator step");
+    assert_eq!(machine.values["title_suicune_frame"], 1);
+    assert_eq!(machine.memory["wSuicuneFrame"], 2);
+    assert!(second.effects.is_empty());
+
+    machine.memory.insert("wSuicuneFrame".to_string(), 255);
+    machine
+        .run_from_operation_index(&program, 0, 0)
+        .expect("wrapping Suicune iterator step");
+    assert_eq!(machine.values["title_suicune_frame"], 255);
+    assert_eq!(machine.memory["wSuicuneFrame"], 0);
+    assert!(
+        machine
+            .run_from_operation_index(&program, 99, 0)
+            .expect_err("out-of-range operation entry must fail closed")
+            .to_string()
+            .contains("operation index 99 is outside")
+    );
+}
+
+#[test]
+fn runtime_timed_phase_cursor_preserves_exported_wait_boundaries() {
+    let operation = |op: &str, fields: serde_json::Map<String, serde_json::Value>| {
+        RuntimePresentationOperation {
+            op: op.to_string(),
+            source_span: presentation_span(),
+            fields: fields.into_iter().collect(),
+        }
+    };
+    let program = RuntimePresentationProgram {
+        subprograms: vec![RuntimePresentationSubprogram {
+            id: "timed".to_string(),
+            phases: vec![RuntimePresentationPhase {
+                id: "tail".to_string(),
+                source_span: presentation_span(),
+                labels: Default::default(),
+                operations: vec![
+                    operation("clear_tilemap", Default::default()),
+                    operation(
+                        "decompress_lz3_resource",
+                        [
+                            ("decompress_machine_cycles".to_string(), serde_json::json!(12_757)),
+                            (
+                                "decompress_frame_boundaries_crossed".to_string(),
+                                serde_json::json!(1),
+                            ),
+                        ]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    operation(
+                        "wait_frames",
+                        [("frames".to_string(), serde_json::json!(2))]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    operation("apply_palette_layout", Default::default()),
+                ],
+            }],
+            ..RuntimePresentationSubprogram::default()
+        }],
+        ..RuntimePresentationProgram::default()
+    };
+    let mut cursor = RuntimePresentationTimedPhaseCursor::new(&program, "timed", "tail", 0, 3)
+        .expect("timed phase cursor");
+
+    let first = cursor.tick(&program).expect("first timed tick");
+    assert_eq!(
+        first
+            .effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["clear_tilemap", "decompress_lz3_resource"]
+    );
+    assert_eq!(first.cpu_work_machine_cycles, 12_757);
+    assert!(!first.complete);
+    assert_eq!(cursor.wait_frames_remaining, 1);
+
+    let second = cursor.tick(&program).expect("decompression-crossed frame");
+    assert_eq!(
+        second
+            .effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["wait_frames"]
+    );
+    assert_eq!(second.cpu_work_machine_cycles, 0);
+    assert!(!second.complete);
+    assert_eq!(cursor.wait_frames_remaining, 2);
+
+    let third = cursor.tick(&program).expect("first explicit waited frame");
+    assert!(third.effects.is_empty());
+    assert_eq!(third.cpu_work_machine_cycles, 0);
+    assert!(!third.complete);
+    assert_eq!(cursor.wait_frames_remaining, 1);
+
+    let fourth = cursor.tick(&program).expect("second explicit waited frame");
+    assert_eq!(
+        fourth
+            .effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["apply_palette_layout"]
+    );
+    assert_eq!(fourth.cpu_work_machine_cycles, 0);
+    assert!(fourth.complete);
+
+    let mut missing_boundary = program.clone();
+    missing_boundary.subprograms[0].phases[0].operations[1]
+        .fields
+        .remove("decompress_frame_boundaries_crossed");
+    let mut cursor =
+        RuntimePresentationTimedPhaseCursor::new(&missing_boundary, "timed", "tail", 0, 3)
+            .expect("missing-boundary timed phase cursor");
+    assert!(
+        cursor
+            .tick(&missing_boundary)
+            .expect_err("decompression without an exact frame crossing must fail")
+            .to_string()
+            .contains("no exact frame-boundary count")
+    );
+}
+
+#[test]
+fn runtime_timed_phase_cursor_blocks_for_each_exported_2bpp_vblank_chunk() {
+    let operation = |op: &str, fields: BTreeMap<String, serde_json::Value>| {
+        RuntimePresentationOperation {
+            op: op.to_string(),
+            source_span: presentation_span(),
+            fields,
+        }
+    };
+    let program = RuntimePresentationProgram {
+        subprograms: vec![RuntimePresentationSubprogram {
+            id: "crystal_intro".to_string(),
+            phases: vec![RuntimePresentationPhase {
+                id: "scene_dispatch".to_string(),
+                source_span: presentation_span(),
+                labels: Default::default(),
+                operations: vec![
+                    operation(
+                        "request_2bpp_transfer",
+                        [
+                            ("tile_count".to_string(), serde_json::json!(17)),
+                            (
+                                "chunking".to_string(),
+                                serde_json::json!({
+                                    "default_tiles_per_vblank": 8,
+                                    "mobile_tiles_per_vblank": 6,
+                                    "mobile_condition": {
+                                        "wLinkMode": "LINK_MOBILE",
+                                        "hMobile": 0
+                                    }
+                                }),
+                            ),
+                            (
+                                "completion".to_string(),
+                                serde_json::json!({
+                                    "blocking": true,
+                                    "wait": "DelayFrame",
+                                    "until": "wRequested2bppSize == 0"
+                                }),
+                            ),
+                            (
+                                "request_2bpp_frame_boundaries_crossed".to_string(),
+                                serde_json::json!(5),
+                            ),
+                            (
+                                "request_2bpp_timing_oracle".to_string(),
+                                serde_json::json!({
+                                    "start_frame_phase_t_cycles": 10,
+                                    "elapsed_t_cycles_between_hooks": 490
+                                }),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
+                    operation("return", Default::default()),
+                ],
+            }],
+            ..RuntimePresentationSubprogram::default()
+        }],
+        ..RuntimePresentationProgram::default()
+    };
+    let mut unconfigured = RuntimePresentationTimedPhaseCursor::new(
+        &program,
+        "crystal_intro",
+        "scene_dispatch",
+        0,
+        1,
+    )
+    .expect("unconfigured blocking transfer cursor");
+    assert!(
+        unconfigured
+            .tick(&program)
+            .expect_err("blocking transfer mode must be explicit")
+            .to_string()
+            .contains("requires an exact transfer mode")
+    );
+
+    let mut cursor = RuntimePresentationTimedPhaseCursor::new(
+        &program,
+        "crystal_intro",
+        "scene_dispatch",
+        0,
+        1,
+    )
+    .expect("blocking transfer cursor")
+    .with_2bpp_transfer_mode(RuntimePresentation2bppTransferMode::Default)
+    .with_frame_t_cycles(100)
+    .expect("exact frame clock");
+
+    let request = cursor.tick(&program).expect("queue 2bpp request");
+    assert_eq!(
+        request
+            .effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["request_2bpp_transfer"]
+    );
+    assert!(!request.complete);
+    assert_eq!(cursor.wait_frames_remaining, 5);
+
+    for remaining in [4, 3, 2, 1] {
+        let waiting = cursor.tick(&program).expect("wait for transfer VBlank");
+        assert!(waiting.effects.is_empty());
+        assert!(!waiting.complete);
+        assert_eq!(cursor.wait_frames_remaining, remaining);
+    }
+
+    let returned = cursor.tick(&program).expect("resume after transfer");
+    assert_eq!(
+        returned
+            .effects
+            .iter()
+            .map(|operation| operation.op.as_str())
+            .collect::<Vec<_>>(),
+        vec!["return"]
+    );
+    assert!(returned.complete);
+}
+
+#[test]
 fn intro_presentation_parameters_are_read_from_exported_scene_dispatch_labels() {
     let mut program = RuntimePresentationProgram {
         subprograms: vec![RuntimePresentationSubprogram {
@@ -434,12 +995,181 @@ fn intro_presentation_parameters_are_read_from_exported_scene_dispatch_labels() 
                 },
                 "frame_wait": {
                     "source_span": presentation_span()
+                },
+                "scheduler": {
+                    "op": "sprite_scheduler_step",
+                    "rom_frame_crossings": [{
+                        "dispatcher_entry": 1,
+                        "dispatch_tick": 3,
+                        "elapsed_t_cycles_between_hooks": 52020
+                    }],
+                    "timing_oracle": {
+                        "runner": "tools/asm-oracle/intro_trace.py --timing",
+                        "rom_sha1": "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133"
+                    }
+                },
+                "interrupt_timing": {
+                    "unit": "sm83_machine_cycles",
+                    "entry_to_first_input_machine_cycles": 59,
+                    "outer_loop_body": {
+                        "after_input_before_scene_dispatch": 21,
+                        "scene_dispatch_to_sprite_scheduler": 48,
+                        "sprite_scheduler_to_frame_wait": 49
+                    },
+                    "frame_clock": {
+                        "frame_t_cycles": 70224,
+                        "intro_entry_phase_t_cycles": 2980,
+                        "timing_oracle": {
+                            "runner": "tools/asm-oracle/intro_trace.py --timing",
+                            "rom_sha1": "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133"
+                        }
+                    },
+                    "hardware_entry": 5,
+                    "vectors": { "instruction": "jp", "machine_cycles": 4 },
+                    "lcd_stat": {
+                        "handler": "LCD",
+                        "trigger_register": "rSTAT",
+                        "trigger_mask": "STAT_MODE_0",
+                        "trigger": "hblank",
+                        "scanline_t_cycles": 456,
+                        "hblank_request_t_cycles": 250,
+                        "vblank_request_t_cycles": 65664,
+                        "interrupts_per_visible_frame": 144,
+                        "callback_pointer": "hLCDCPointer",
+                        "callback_zero_machine_cycles": 27,
+                        "callback_nonzero_machine_cycles": 49
+                    },
+                    "timer": {
+                        "handler": "MobileTimer",
+                        "enable": "IE_TIMER",
+                        "inactive_guard": { "source": "hMobile", "predicate": "zero" },
+                        "request_period_t_cycles": 262144,
+                        "first_request_after_intro_entry_t_cycles": 258428,
+                        "inactive_machine_cycles": 48
+                    },
+                    "vblank_normal": {
+                        "handler": "VBlank_Normal",
+                        "selector": { "source": "hVBlank", "value": 0 },
+                        "inactive_game_timer_machine_cycles": 47,
+                        "wrapper_epilogue_machine_cycles": 16,
+                        "audio_update": {
+                            "routine": "_UpdateSound",
+                            "cadence": "every_vblank",
+                            "playing_guard": {
+                                "source": "wMusicPlaying",
+                                "predicate": "nonzero"
+                            },
+                            "timing": "state_dependent",
+                            "all_channels_inactive": {
+                                "predicate": "all_SOUND_CHANNEL_ON_flags_clear",
+                                "machine_cycles": 341
+                            },
+                            "helper_inactive_paths": {
+                                "apply_pitch_slide": {
+                                    "guard": "SOUND_PITCH_SLIDE_clear",
+                                    "machine_cycles": 13
+                                },
+                                "handle_track_vibrato": {
+                                    "guard": "SOUND_DUTY_LOOP_SOUND_PITCH_OFFSET_SOUND_VIBRATO_clear",
+                                    "machine_cycles": 37
+                                },
+                                "handle_noise": {
+                                    "guard": "SOUND_NOISE_clear",
+                                    "machine_cycles": 13
+                                },
+                                "play_danger": {
+                                    "guard": "DANGER_ON_clear",
+                                    "machine_cycles": 11
+                                },
+                                "fade_music": {
+                                    "guard": "wMusicFade_zero",
+                                    "machine_cycles": 10
+                                }
+                            },
+                            "active_channel_paths": {
+                                "guard": {
+                                    "sfx_priority": "zero",
+                                    "sustained_note_duration": "at_least_2"
+                                },
+                                "extra_over_inactive_channel_machine_cycles": {
+                                    "music_without_active_sfx": 118,
+                                    "sfx": 109,
+                                    "music_shadowed_by_active_sfx": 98
+                                },
+                                "note_over_extra_before_parse_machine_cycles": 12
+                            },
+                            "helper_cycle_models": {
+                                "handle_track_vibrato": {
+                                    "base_machine_cycles": 37,
+                                    "duty_loop_extra_machine_cycles": 25,
+                                    "pitch_offset_extra_machine_cycles": 31,
+                                    "vibrato_extra_machine_cycles": {
+                                        "delay_count_nonzero": 16,
+                                        "zero_extent": 20,
+                                        "rate_count_nonzero": 37,
+                                        "toggle_up_no_borrow": 83,
+                                        "toggle_up_borrow": 87,
+                                        "toggle_down_no_carry": 84,
+                                        "toggle_down_carry": 85
+                                    }
+                                },
+                                "update_channels_intro_paths": {
+                                    "pulse1": { "unchanged": 71, "noise_sampling": 88 },
+                                    "pulse2": { "unchanged": 49, "vibrato_override": 67 },
+                                    "wave": { "unchanged": 45, "noise_sampling": 201 },
+                                    "noise": { "unchanged": 40, "noise_sampling": 65 }
+                                },
+                                "parse_music_intro_paths": {
+                                    "normal_note_base_machine_cycles": 201,
+                                    "music_noise_note_base_machine_cycles": 220,
+                                    "octave_command_machine_cycles": 145,
+                                    "set_note_duration": {
+                                        "fixed_machine_cycles": 64,
+                                        "multiply_per_bit_machine_cycles": 13,
+                                        "multiply_fixed_machine_cycles": 5,
+                                        "multiply_set_bit_extra_machine_cycles": 1,
+                                        "minimum_multiply_iterations": 1
+                                    },
+                                    "get_frequency": {
+                                        "fixed_machine_cycles": 60,
+                                        "per_right_shift_machine_cycles": 12,
+                                        "target_octave": 7
+                                    }
+                                },
+                                "handle_noise": {
+                                    "inactive_machine_cycles": 13,
+                                    "prefix_to_delay_check_machine_cycles": {
+                                        "sfx_channel": 19,
+                                        "music_channel_with_ch8_off": 27,
+                                        "music_channel_with_non_noise_ch8": 31
+                                    },
+                                    "music_blocked_by_noise_ch8_machine_cycles": 34,
+                                    "delay_machine_cycles": {
+                                        "nonzero_return": 16,
+                                        "zero_to_sample_reader": 8
+                                    },
+                                    "sample_reader_machine_cycles": {
+                                        "empty_address": 18,
+                                        "sound_ret": 26,
+                                        "sample": 71
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }),
             phases: vec![RuntimePresentationPhase {
                 id: "scene_dispatch".to_string(),
                 source_span: presentation_span(),
-                labels: Default::default(),
+                labels: [
+                    ("IntroScene1".to_string(), 0),
+                    ("IntroScene2".to_string(), 2),
+                    ("IntroScene3".to_string(), 5),
+                    (".local@IntroScene2".to_string(), 4),
+                ]
+                .into_iter()
+                .collect(),
                 operations: vec![
                     RuntimePresentationOperation {
                         op: "dispatch_table".to_string(),
@@ -480,7 +1210,21 @@ fn intro_presentation_parameters_are_read_from_exported_scene_dispatch_labels() 
                         .into_iter()
                         .collect(),
                     },
-                    RuntimePresentationOperation::default(),
+                    RuntimePresentationOperation {
+                        op: "branch_compare".to_string(),
+                        source_span: presentation_span(),
+                        fields: [
+                            ("value".to_string(), serde_json::json!("intro_scene_frame")),
+                            ("predicate".to_string(), serde_json::json!("equal")),
+                            ("operand".to_string(), serde_json::json!(0)),
+                            (
+                                "target".to_string(),
+                                serde_json::json!(".local@IntroScene2"),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
                     RuntimePresentationOperation {
                         op: "scheduled_audio".to_string(),
                         source_span: presentation_span(),
@@ -514,6 +1258,19 @@ fn intro_presentation_parameters_are_read_from_exported_scene_dispatch_labels() 
         }],
         ..RuntimePresentationProgram::default()
     };
+    program.subprograms[0].loop_["interrupt_timing"]["joy_text_delay"] =
+        serde_json::json!({
+            "pressed_repeat_reset_machine_cycles": 101,
+            "repeat_suppressed_machine_cycles": 107,
+            "repeat_restart_machine_cycles": 110,
+            "common_instruction_machine_cycles": [
+                6, 4, 4, 4, 4, 4, 2, 2, 3, 1, 3, 1, 1, 1, 1, 3, 1, 1,
+                3, 1, 1, 3, 3, 3, 3, 3, 4, 3, 1, 3, 2, 3, 3, 3, 1
+            ],
+            "pressed_repeat_reset_tail_machine_cycles": [2, 2, 4, 4],
+            "repeat_suppressed_tail_machine_cycles": [3, 4, 1, 2, 1, 3, 4],
+            "repeat_restart_tail_machine_cycles": [3, 4, 1, 3, 2, 4, 4]
+        });
 
     assert_eq!(
         RuntimeIntroPresentationParameters::from_program(&program)
@@ -525,8 +1282,536 @@ fn intro_presentation_parameters_are_read_from_exported_scene_dispatch_labels() 
                 .to_vec(),
             scene_operation_offsets: vec![0, 2, 5],
             completion_wait_frames: vec![0, 0, 0],
+            sprite_scheduler_frame_crossings: vec![
+                RuntimeIntroSpriteSchedulerFrameCrossing {
+                    dispatcher_entry: 1,
+                    dispatch_tick: 3,
+                    elapsed_t_cycles_between_hooks: 52_020,
+                },
+            ],
+            interrupt_timing: RuntimeIntroInterruptTiming {
+                frame_t_cycles: 70_224,
+                intro_entry_phase_t_cycles: 2_980,
+                entry_to_first_input_machine_cycles: 59,
+                joy_text_delay_pressed_repeat_reset_machine_cycles: 101,
+                joy_text_delay_repeat_suppressed_machine_cycles: 107,
+                joy_text_delay_repeat_restart_machine_cycles: 110,
+                joy_text_delay_common_instruction_machine_cycles: vec![
+                    6, 4, 4, 4, 4, 4, 2, 2, 3, 1, 3, 1, 1, 1, 1, 3, 1, 1, 3, 1, 1, 3, 3, 3,
+                    3, 3, 4, 3, 1, 3, 2, 3, 3, 3, 1,
+                ],
+                joy_text_delay_pressed_repeat_reset_tail_machine_cycles: vec![2, 2, 4, 4],
+                joy_text_delay_repeat_suppressed_tail_machine_cycles: vec![
+                    3, 4, 1, 2, 1, 3, 4,
+                ],
+                joy_text_delay_repeat_restart_tail_machine_cycles: vec![3, 4, 1, 3, 2, 4, 4],
+                after_input_before_scene_dispatch_machine_cycles: 21,
+                scene_dispatch_to_sprite_scheduler_machine_cycles: 48,
+                sprite_scheduler_to_frame_wait_machine_cycles: 49,
+                hardware_entry_machine_cycles: 5,
+                vector_jump_machine_cycles: 4,
+                lcd_interrupts_per_visible_frame: 144,
+                lcd_scanline_t_cycles: 456,
+                lcd_hblank_request_t_cycles: 250,
+                vblank_request_t_cycles: 65_664,
+                lcd_callback_zero_machine_cycles: 27,
+                lcd_callback_nonzero_machine_cycles: 49,
+                timer_request_period_t_cycles: 262_144,
+                first_timer_request_after_intro_entry_t_cycles: 258_428,
+                inactive_timer_machine_cycles: 48,
+                inactive_game_timer_machine_cycles: 47,
+                vblank_wrapper_epilogue_machine_cycles: 16,
+                sound_update_is_state_dependent: true,
+                inactive_channels_sound_update_machine_cycles: 341,
+                inactive_pitch_slide_machine_cycles: 13,
+                inactive_track_vibrato_machine_cycles: 37,
+                inactive_noise_machine_cycles: 13,
+                inactive_danger_machine_cycles: 11,
+                inactive_music_fade_machine_cycles: 10,
+                active_music_channel_extra_machine_cycles: 118,
+                active_sfx_channel_extra_machine_cycles: 109,
+                shadowed_music_channel_extra_machine_cycles: 98,
+                note_over_extra_before_parse_machine_cycles: 12,
+                track_vibrato: RuntimeIntroTrackVibratoTiming {
+                    base_machine_cycles: 37,
+                    duty_loop_extra_machine_cycles: 25,
+                    pitch_offset_extra_machine_cycles: 31,
+                    delay_count_nonzero_extra_machine_cycles: 16,
+                    zero_extent_extra_machine_cycles: 20,
+                    rate_count_nonzero_extra_machine_cycles: 37,
+                    toggle_up_no_borrow_extra_machine_cycles: 83,
+                    toggle_up_borrow_extra_machine_cycles: 87,
+                    toggle_down_no_carry_extra_machine_cycles: 84,
+                    toggle_down_carry_extra_machine_cycles: 85,
+                },
+                update_channels: RuntimeIntroUpdateChannelsTiming {
+                    pulse1_unchanged_machine_cycles: 71,
+                    pulse1_noise_sampling_machine_cycles: 88,
+                    pulse2_unchanged_machine_cycles: 49,
+                    pulse2_vibrato_override_machine_cycles: 67,
+                    wave_unchanged_machine_cycles: 45,
+                    wave_noise_sampling_machine_cycles: 201,
+                    noise_unchanged_machine_cycles: 40,
+                    noise_noise_sampling_machine_cycles: 65,
+                },
+                parse_music: RuntimeIntroParseMusicTiming {
+                    normal_note_base_machine_cycles: 201,
+                    music_noise_note_base_machine_cycles: 220,
+                    octave_command_machine_cycles: 145,
+                    set_note_duration: RuntimeIntroSetNoteDurationTiming {
+                        fixed_machine_cycles: 64,
+                        multiply_per_bit_machine_cycles: 13,
+                        multiply_fixed_machine_cycles: 5,
+                        multiply_set_bit_extra_machine_cycles: 1,
+                        minimum_multiply_iterations: 1,
+                    },
+                    get_frequency: RuntimeIntroGetFrequencyTiming {
+                        fixed_machine_cycles: 60,
+                        per_right_shift_machine_cycles: 12,
+                        target_octave: 7,
+                    },
+                },
+                noise: RuntimeIntroNoiseTiming {
+                    inactive_machine_cycles: 13,
+                    sfx_prefix_machine_cycles: 19,
+                    music_ch8_off_prefix_machine_cycles: 27,
+                    music_ch8_non_noise_prefix_machine_cycles: 31,
+                    music_blocked_by_noise_ch8_machine_cycles: 34,
+                    nonzero_delay_machine_cycles: 16,
+                    zero_delay_machine_cycles: 8,
+                    empty_address_machine_cycles: 18,
+                    sound_ret_machine_cycles: 26,
+                    sample_machine_cycles: 71,
+                },
+            },
         }
     );
+    let vibrato = RuntimeIntroPresentationParameters::from_program(&program)
+        .expect("source-derived intro parameters should remain readable")
+        .interrupt_timing
+        .track_vibrato;
+    assert_eq!(
+        vibrato.machine_cycles(false, false, RuntimeIntroVibratoBranch::Disabled),
+        37
+    );
+    assert_eq!(
+        vibrato.machine_cycles(
+            false,
+            true,
+            RuntimeIntroVibratoBranch::DelayCountNonzero
+        ),
+        84
+    );
+    assert_eq!(
+        vibrato.machine_cycles(false, false, RuntimeIntroVibratoBranch::RateCountNonzero),
+        74
+    );
+    assert_eq!(
+        vibrato.machine_cycles(false, false, RuntimeIntroVibratoBranch::ToggleUpNoBorrow),
+        120
+    );
+    assert_eq!(
+        vibrato.machine_cycles(false, false, RuntimeIntroVibratoBranch::ToggleDownNoCarry),
+        121
+    );
+    let update_channels = RuntimeIntroPresentationParameters::from_program(&program)
+        .expect("source-derived intro parameters should remain readable")
+        .interrupt_timing
+        .update_channels;
+    let expected_update_channels = [
+        (RuntimeIntroUpdateChannelsPath::Pulse1Unchanged, 71),
+        (RuntimeIntroUpdateChannelsPath::Pulse1NoiseSampling, 88),
+        (RuntimeIntroUpdateChannelsPath::Pulse2Unchanged, 49),
+        (RuntimeIntroUpdateChannelsPath::Pulse2VibratoOverride, 67),
+        (RuntimeIntroUpdateChannelsPath::WaveUnchanged, 45),
+        (RuntimeIntroUpdateChannelsPath::WaveNoiseSampling, 201),
+        (RuntimeIntroUpdateChannelsPath::NoiseUnchanged, 40),
+        (RuntimeIntroUpdateChannelsPath::NoiseNoiseSampling, 65),
+    ];
+    for (path, expected) in expected_update_channels {
+        assert_eq!(update_channels.machine_cycles(path), expected);
+    }
+    let parse_music = RuntimeIntroPresentationParameters::from_program(&program)
+        .expect("source-derived intro parameters should remain readable")
+        .interrupt_timing
+        .parse_music;
+    assert_eq!(parse_music.normal_note_machine_cycles(6, 0, 7, 0), 417);
+    assert_eq!(parse_music.normal_note_machine_cycles(12, 1, 6, 0), 468);
+    assert_eq!(parse_music.normal_note_machine_cycles(12, 1, 5, 0), 480);
+    assert_eq!(parse_music.normal_note_machine_cycles(12, 1, 6, 1), 613);
+    assert_eq!(parse_music.normal_note_machine_cycles(12, 1, 5, 1), 625);
+    assert_eq!(parse_music.music_noise_note_machine_cycles(12, 0, 0), 402);
+    assert_eq!(parse_music.music_noise_note_machine_cycles(12, 1, 0), 415);
+    let noise = RuntimeIntroPresentationParameters::from_program(&program)
+        .expect("source-derived intro parameters should remain readable")
+        .interrupt_timing
+        .noise;
+    assert_eq!(
+        noise.machine_cycles(
+            false,
+            false,
+            false,
+            false,
+            false,
+            RuntimeIntroNoiseSamplePath::EmptyAddress
+        ),
+        13
+    );
+    assert_eq!(
+        noise.machine_cycles(
+            true,
+            false,
+            false,
+            false,
+            true,
+            RuntimeIntroNoiseSamplePath::EmptyAddress
+        ),
+        43
+    );
+    assert_eq!(
+        noise.machine_cycles(
+            true,
+            false,
+            false,
+            false,
+            false,
+            RuntimeIntroNoiseSamplePath::EmptyAddress
+        ),
+        53
+    );
+    assert_eq!(
+        noise.machine_cycles(
+            true,
+            false,
+            true,
+            false,
+            false,
+            RuntimeIntroNoiseSamplePath::EmptyAddress
+        ),
+        57
+    );
+    assert_eq!(
+        noise.machine_cycles(
+            true,
+            false,
+            false,
+            false,
+            false,
+            RuntimeIntroNoiseSamplePath::SoundRet
+        ),
+        61
+    );
+    assert_eq!(
+        noise.machine_cycles(
+            true,
+            false,
+            false,
+            false,
+            false,
+            RuntimeIntroNoiseSamplePath::Sample
+        ),
+        106
+    );
+    assert_eq!(
+        noise.machine_cycles(
+            true,
+            false,
+            true,
+            true,
+            false,
+            RuntimeIntroNoiseSamplePath::Sample
+        ),
+        34
+    );
+    let sound_timing = RuntimeIntroPresentationParameters::from_program(&program)
+        .expect("source-derived intro parameters should remain readable")
+        .interrupt_timing;
+    assert_eq!(
+        sound_timing
+            .outer_loop_body_machine_cycles()
+            .expect("source outer-loop body should compose"),
+        118
+    );
+    assert_eq!(sound_timing.joy_text_delay_machine_cycles(true, 0), 101);
+    assert_eq!(sound_timing.joy_text_delay_machine_cycles(false, 4), 107);
+    assert_eq!(sound_timing.joy_text_delay_machine_cycles(false, 0), 110);
+    let mut frame_clock = RuntimeIntroFrameClock::new(100, 90).expect("test frame clock");
+    assert_eq!(
+        frame_clock
+            .advance_machine_cycles(3)
+            .expect("advance machine cycles across a frame"),
+        1
+    );
+    assert_eq!(frame_clock.phase_t_cycles, 2);
+    let mut entry_clock = RuntimeIntroFrameClock::new(
+        sound_timing.frame_t_cycles,
+        sound_timing.intro_entry_phase_t_cycles,
+    )
+    .expect("intro entry frame clock");
+    assert_eq!(
+        entry_clock
+            .advance_machine_cycles(sound_timing.entry_to_first_input_machine_cycles.into())
+            .expect("advance source entry body"),
+        0
+    );
+    assert_eq!(
+        entry_clock
+            .advance_machine_cycles(sound_timing.lcd_callback_zero_machine_cycles.into())
+            .expect("advance entry LCD interrupt"),
+        0
+    );
+    assert_eq!(entry_clock.phase_t_cycles, 3_324);
+    assert_eq!(
+        sound_timing
+            .t_cycles_until_next_lcd_hblank(&entry_clock)
+            .expect("next LCD HBlank request"),
+        118
+    );
+    assert_eq!(
+        sound_timing
+            .t_cycles_until_next_vblank(&entry_clock)
+            .expect("next VBlank request"),
+        62_340
+    );
+    let mut first_input_clock = entry_clock;
+    let first_input_advance = sound_timing
+        .advance_instruction_sequence_with_interrupts(
+            &mut first_input_clock,
+            sound_timing.joy_text_delay_instruction_machine_cycles(false, 0),
+            false,
+            &mut || anyhow::bail!("unexpected VBlank in first JoyTextDelay"),
+        )
+        .expect("execute first JoyTextDelay instruction timing");
+    assert_eq!(first_input_advance.frame_boundaries_crossed, 0);
+    assert_eq!(first_input_advance.lcd_interrupts_serviced, 1);
+    assert_eq!(first_input_advance.timer_interrupts_serviced, 0);
+    assert_eq!(first_input_clock.phase_t_cycles, 3_872);
+    let mut callback_clock = RuntimeIntroFrameClock::new(70_224, 534).expect("callback clock");
+    let callback_advance = sound_timing
+        .advance_instruction_sequence_with_interrupts(
+            &mut callback_clock,
+            sound_timing.joy_text_delay_instruction_machine_cycles(false, 0),
+            true,
+            &mut || anyhow::bail!("unexpected VBlank in callback JoyTextDelay"),
+        )
+        .expect("execute callback-active JoyTextDelay instruction timing");
+    assert_eq!(callback_advance.lcd_interrupts_serviced, 2);
+    assert_eq!(callback_advance.timer_interrupts_serviced, 0);
+    assert_eq!(callback_clock.phase_t_cycles, 1_366);
+    for (start_elapsed, start_phase, restart_path, callback_nonzero, expected_elapsed) in [
+        (52_949_186_u64, 3_270_u32, false, true, 1_012_u64),
+        (91_221_868, 3_872, true, false, 848),
+        (95_154_328, 3_788, false, false, 836),
+        (113_766_524, 6_624, false, false, 836),
+        (141_291_540, 3_832, false, false, 836),
+    ] {
+        let mut timer_clock = RuntimeIntroFrameClock::new(70_224, 2_980)
+            .expect("timer-reconciled intro clock");
+        timer_clock
+            .advance_t_cycles(start_elapsed)
+            .expect("advance to timer-interrupted JoyTextDelay");
+        assert_eq!(timer_clock.phase_t_cycles, start_phase);
+        let before = timer_clock.elapsed_t_cycles;
+        let advance = sound_timing
+            .advance_instruction_sequence_with_interrupts(
+                &mut timer_clock,
+                sound_timing.joy_text_delay_instruction_machine_cycles(
+                    false,
+                    if restart_path { 0 } else { 1 },
+                ),
+                callback_nonzero,
+                &mut || anyhow::bail!("unexpected VBlank in timer JoyTextDelay"),
+            )
+            .expect("execute timer-interrupted JoyTextDelay instruction timing");
+        assert_eq!(advance.lcd_interrupts_serviced, 2);
+        assert_eq!(advance.timer_interrupts_serviced, 1);
+        assert_eq!(timer_clock.elapsed_t_cycles - before, expected_elapsed);
+    }
+    let mut vblank_clock = RuntimeIntroFrameClock::new(70_224, 65_660)
+        .expect("VBlank-admission intro clock");
+    let mut vblank_calls = 0_u8;
+    let vblank_advance = sound_timing
+        .advance_instruction_sequence_with_interrupts(
+            &mut vblank_clock,
+            [1],
+            false,
+            &mut || {
+                vblank_calls += 1;
+                Ok(10_000)
+            },
+        )
+        .expect("execute a long VBlank body with coalesced HBlank requests");
+    assert_eq!(vblank_calls, 1);
+    assert_eq!(vblank_advance.frame_boundaries_crossed, 1);
+    assert_eq!(vblank_advance.vblank_interrupts_serviced, 1);
+    assert_eq!(vblank_advance.lcd_interrupts_serviced, 1);
+    assert_eq!(vblank_advance.timer_interrupts_serviced, 0);
+    assert_eq!(vblank_clock.phase_t_cycles, 35_584);
+    entry_clock
+        .advance_t_cycles(121)
+        .expect("advance just beyond HBlank request");
+    assert_eq!(
+        sound_timing
+            .t_cycles_until_next_lcd_hblank(&entry_clock)
+            .expect("following LCD HBlank request"),
+        453
+    );
+    let sfx_sustain = RuntimeIntroActiveSoundChannelTiming {
+        class: RuntimeIntroActiveSoundChannelClass::Sfx,
+        pitch_slide_machine_cycles: 13,
+        track_vibrato_machine_cycles: 74,
+        noise_machine_cycles: 13,
+        update_channels_machine_cycles: Some(49),
+        note_over: false,
+        parse_music_machine_cycles: None,
+    };
+    assert_eq!(
+        sound_timing
+            .sound_update_machine_cycles(&[sfx_sustain])
+            .expect("observed sustained SFX timing should compose"),
+        599
+    );
+    assert_eq!(
+        sound_timing
+            .sound_update_machine_cycles(&[RuntimeIntroActiveSoundChannelTiming {
+                track_vibrato_machine_cycles: 120,
+                update_channels_machine_cycles: Some(67),
+                ..sfx_sustain
+            }])
+            .expect("observed vibrato-write SFX timing should compose"),
+        663
+    );
+    let five_channel_frame = [
+        RuntimeIntroActiveSoundChannelTiming {
+            class: RuntimeIntroActiveSoundChannelClass::MusicWithoutActiveSfx,
+            pitch_slide_machine_cycles: 13,
+            track_vibrato_machine_cycles: 105,
+            noise_machine_cycles: 13,
+            update_channels_machine_cycles: Some(71),
+            note_over: false,
+            parse_music_machine_cycles: None,
+        },
+        RuntimeIntroActiveSoundChannelTiming {
+            class: RuntimeIntroActiveSoundChannelClass::MusicWithoutActiveSfx,
+            pitch_slide_machine_cycles: 13,
+            track_vibrato_machine_cycles: 74,
+            noise_machine_cycles: 13,
+            update_channels_machine_cycles: Some(49),
+            note_over: false,
+            parse_music_machine_cycles: None,
+        },
+        RuntimeIntroActiveSoundChannelTiming {
+            class: RuntimeIntroActiveSoundChannelClass::MusicWithoutActiveSfx,
+            pitch_slide_machine_cycles: 13,
+            track_vibrato_machine_cycles: 37,
+            noise_machine_cycles: 13,
+            update_channels_machine_cycles: Some(201),
+            note_over: true,
+            parse_music_machine_cycles: Some(417),
+        },
+        RuntimeIntroActiveSoundChannelTiming {
+            class: RuntimeIntroActiveSoundChannelClass::MusicShadowedByActiveSfx,
+            pitch_slide_machine_cycles: 13,
+            track_vibrato_machine_cycles: 37,
+            noise_machine_cycles: 57,
+            update_channels_machine_cycles: None,
+            note_over: true,
+            parse_music_machine_cycles: None,
+        },
+        RuntimeIntroActiveSoundChannelTiming {
+            class: RuntimeIntroActiveSoundChannelClass::Sfx,
+            pitch_slide_machine_cycles: 13,
+            track_vibrato_machine_cycles: 37,
+            noise_machine_cycles: 13,
+            update_channels_machine_cycles: Some(40),
+            note_over: false,
+            parse_music_machine_cycles: None,
+        },
+    ];
+    assert_eq!(
+        sound_timing
+            .sound_update_machine_cycles(&five_channel_frame)
+            .expect("observed five-channel VBlank timing should compose"),
+        2168
+    );
+    assert!(
+        sound_timing
+            .sound_update_machine_cycles(&[RuntimeIntroActiveSoundChannelTiming {
+                class: RuntimeIntroActiveSoundChannelClass::MusicShadowedByActiveSfx,
+                update_channels_machine_cycles: Some(40),
+                ..sfx_sustain
+            }])
+            .expect_err("shadowed music must not write hardware channels")
+            .to_string()
+            .contains("shadowed music channel")
+    );
+    program.subprograms[0].loop_["interrupt_timing"]["lcd_stat"]
+        ["callback_zero_machine_cycles"] = serde_json::json!(0);
+    assert!(
+        RuntimeIntroPresentationParameters::from_program(&program)
+            .expect_err("zero LCD interrupt cost must fail closed")
+            .to_string()
+            .contains("callback_zero_machine_cycles")
+    );
+    program.subprograms[0].loop_["interrupt_timing"]["lcd_stat"]
+        ["callback_zero_machine_cycles"] = serde_json::json!(27);
+    program.subprograms[0].loop_["interrupt_timing"]["vblank_normal"]["audio_update"]
+        ["timing"] = serde_json::json!("constant");
+    assert!(
+        RuntimeIntroPresentationParameters::from_program(&program)
+            .expect_err("constant VBlank audio timing must fail closed")
+            .to_string()
+            .contains("VBlank sound timing semantics")
+    );
+    program.subprograms[0].loop_["interrupt_timing"]["vblank_normal"]["audio_update"]
+        ["timing"] = serde_json::json!("state_dependent");
+    program.subprograms[0].loop_["interrupt_timing"]["vblank_normal"]["audio_update"]
+        ["all_channels_inactive"]["machine_cycles"] = serde_json::json!(0);
+    assert!(
+        RuntimeIntroPresentationParameters::from_program(&program)
+            .expect_err("zero inactive-channel sound cost must fail closed")
+            .to_string()
+            .contains("all_channels_inactive.machine_cycles")
+    );
+    program.subprograms[0].loop_["interrupt_timing"]["vblank_normal"]["audio_update"]
+        ["all_channels_inactive"]["machine_cycles"] = serde_json::json!(341);
+    program.subprograms[0].loop_["interrupt_timing"]["vblank_normal"]["audio_update"]
+        ["helper_inactive_paths"]["apply_pitch_slide"]["machine_cycles"] =
+        serde_json::json!(0);
+    assert!(
+        RuntimeIntroPresentationParameters::from_program(&program)
+            .expect_err("zero inactive pitch-slide cost must fail closed")
+            .to_string()
+            .contains("apply_pitch_slide.machine_cycles")
+    );
+    program.subprograms[0].loop_["interrupt_timing"]["vblank_normal"]["audio_update"]
+        ["helper_inactive_paths"]["apply_pitch_slide"]["machine_cycles"] =
+        serde_json::json!(13);
+    program.subprograms[0].loop_["interrupt_timing"]["vblank_normal"]["audio_update"]
+        ["active_channel_paths"]["extra_over_inactive_channel_machine_cycles"]
+        ["music_without_active_sfx"] = serde_json::json!(0);
+    assert!(
+        RuntimeIntroPresentationParameters::from_program(&program)
+            .expect_err("zero active music-channel overhead must fail closed")
+            .to_string()
+            .contains("music_without_active_sfx")
+    );
+    program.subprograms[0].loop_["interrupt_timing"]["vblank_normal"]["audio_update"]
+        ["active_channel_paths"]["extra_over_inactive_channel_machine_cycles"]
+        ["music_without_active_sfx"] = serde_json::json!(118);
+    let local_offset = program.subprograms[0].phases[0]
+        .labels
+        .remove(".local@IntroScene2")
+        .expect("local scene label");
+    assert!(
+        RuntimeIntroPresentationParameters::from_program(&program)
+            .expect_err("unresolved scene-local branch must fail closed")
+            .to_string()
+            .contains("scene branch target")
+    );
+    program.subprograms[0].phases[0]
+        .labels
+        .insert(".local@IntroScene2".to_string(), local_offset);
     program.subprograms[0].loop_["scene_dispatch"]["completion_wait_frames"][0] =
         serde_json::json!(1);
     assert!(
@@ -573,6 +1858,163 @@ fn intro_presentation_parameters_are_read_from_exported_scene_dispatch_labels() 
 }
 
 #[test]
+fn canonical_intro_audio_exposes_embedded_asm_channel_programs() {
+    let root = repository_root_for_tests();
+    let mut command_surface = BTreeSet::new();
+    for (relative_path, id, expected_channels) in [
+        (
+            "apps/web/assets/data/content-packs/core-modular/music/MUSIC_CRYSTAL_OPENING.json",
+            "MUSIC_CRYSTAL_OPENING",
+            4,
+        ),
+        (
+            "apps/web/assets/data/content-packs/core-modular/sfx/SFX_INTRO_UNOWN_1.json",
+            "SFX_INTRO_UNOWN_1",
+            1,
+        ),
+        (
+            "apps/web/assets/data/content-packs/core-modular/sfx/SFX_INTRO_UNOWN_2.json",
+            "SFX_INTRO_UNOWN_2",
+            1,
+        ),
+        (
+            "apps/web/assets/data/content-packs/core-modular/sfx/SFX_INTRO_UNOWN_3.json",
+            "SFX_INTRO_UNOWN_3",
+            1,
+        ),
+        (
+            "apps/web/assets/data/content-packs/core-modular/sfx/SFX_INTRO_SUICUNE_2.json",
+            "SFX_INTRO_SUICUNE_2",
+            1,
+        ),
+        (
+            "apps/web/assets/data/content-packs/core-modular/sfx/SFX_INTRO_SUICUNE_3.json",
+            "SFX_INTRO_SUICUNE_3",
+            1,
+        ),
+        (
+            "apps/web/assets/data/content-packs/core-modular/sfx/SFX_INTRO_SUICUNE_4.json",
+            "SFX_INTRO_SUICUNE_4",
+            1,
+        ),
+        (
+            "apps/web/assets/data/content-packs/core-modular/sfx/SFX_INTRO_PICHU.json",
+            "SFX_INTRO_PICHU",
+            1,
+        ),
+        (
+            "apps/web/assets/data/content-packs/core-modular/sfx/SFX_INTRO_WHOOSH.json",
+            "SFX_INTRO_WHOOSH",
+            1,
+        ),
+    ] {
+        let payload = std::fs::read(root.join(relative_path)).expect("read canonical audio metadata");
+        let assets: BTreeMap<String, ModpackAudioAsset> =
+            serde_json::from_slice(&payload).expect("decode canonical audio metadata");
+        let asset = assets.get(id).expect("canonical audio id");
+        let program = asset
+            .midi_program
+            .as_ref()
+            .expect("canonical audio MIDI program")
+            .crystal_program(id)
+            .expect("extract embedded ASM audio program");
+        assert_eq!(program.music_data.channel_count, expected_channels);
+        assert_eq!(program.music_data.channels.len(), usize::from(expected_channels));
+        assert!(program.music_data.subroutines.is_empty());
+        assert!(program.music_data.shared_sources.is_empty());
+        let channel_programs = program
+            .intro_channel_programs(id)
+            .expect("decode typed CrystalIntro channel commands");
+        assert_eq!(channel_programs.len(), usize::from(expected_channels));
+        command_surface.extend(program
+            .music_data
+            .channels
+            .values()
+            .flat_map(|source| &source.commands)
+            .map(|command| command.command.clone()));
+    }
+    assert_eq!(
+        command_surface,
+        BTreeSet::from([
+            "drum_note".to_string(),
+            "drum_speed".to_string(),
+            "duty_cycle".to_string(),
+            "label".to_string(),
+            "noise_note".to_string(),
+            "note".to_string(),
+            "note_type".to_string(),
+            "octave".to_string(),
+            "pitch_offset".to_string(),
+            "pitch_sweep".to_string(),
+            "rest".to_string(),
+            "sound_ret".to_string(),
+            "square_note".to_string(),
+            "stereo_panning".to_string(),
+            "tempo".to_string(),
+            "toggle_noise".to_string(),
+            "vibrato".to_string(),
+            "volume".to_string(),
+        ])
+    );
+}
+
+#[test]
+fn intro_audio_command_boundary_rejects_non_asm_or_malformed_programs() {
+    let command = |command: &str, args: &[&str]| ModpackAsmAudioCommand {
+        command: command.to_string(),
+        args: args.iter().map(|arg| (*arg).to_string()).collect(),
+    };
+    assert!(
+        command("wait", &["1"])
+            .intro_command("BAD")
+            .expect_err("invented wait command must fail closed")
+            .to_string()
+            .contains("unsupported CrystalIntro ASM command")
+    );
+    assert!(
+        command("square_note", &["1", "8", "0", "2048"])
+            .intro_command("BAD")
+            .expect_err("12-bit pulse frequency must fail closed")
+            .to_string()
+            .contains("exceeds 11 bits")
+    );
+    assert!(
+        command("volume", &["8", "7"])
+            .intro_command("BAD")
+            .expect_err("out-of-range master volume must fail closed")
+            .to_string()
+            .contains("hardware 0..=7 domain")
+    );
+    let program = ModpackCrystalMidiProgram {
+        profile: "pokecrystal-midi-v1".to_string(),
+        music_data: ModpackAsmMusicData {
+            channel_count: 1,
+            channels: BTreeMap::from([(
+                "BadChannel".to_string(),
+                ModpackAsmAudioSource {
+                    number: Some(5),
+                    commands: vec![
+                        command("label", &["BadChannel"]),
+                        command("square_note", &["1", "8", "0", "1024"]),
+                    ],
+                },
+            )]),
+            subroutines: BTreeMap::new(),
+            shared_sources: BTreeMap::new(),
+        },
+        cry_pitch: None,
+        cry_length: None,
+    };
+    assert!(
+        program
+            .intro_channel_programs("BAD")
+            .expect_err("unterminated channel must fail closed")
+            .to_string()
+            .contains("not label/return delimited")
+    );
+}
+
+#[test]
 fn title_presentation_parameters_are_read_from_certified_operations() {
     let operation =
         |op: &str, target: &str, field: &str, value: u16| RuntimePresentationOperation {
@@ -600,6 +2042,7 @@ fn title_presentation_parameters_are_read_from_certified_operations() {
                     (".check_start@TitleScreenMain".to_string(), 5),
                     (".reset_clock@TitleScreenMain".to_string(), 6),
                     (".incave@TitleScreenMain".to_string(), 7),
+                    ("TitleScreenEnd".to_string(), 12),
                 ]
                 .into_iter()
                 .collect(),
@@ -627,6 +2070,20 @@ fn title_presentation_parameters_are_read_from_certified_operations() {
                             ),
                             ("stop_at".to_string(), serde_json::json!(22)),
                             ("y_delta".to_string(), serde_json::json!(2)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
+                    RuntimePresentationOperation {
+                        op: "postincrement_memory_byte".to_string(),
+                        source_span: presentation_span(),
+                        fields: [
+                            ("target".to_string(), serde_json::json!("wSuicuneFrame")),
+                            (
+                                "result".to_string(),
+                                serde_json::json!("title_suicune_frame"),
+                            ),
+                            ("delta".to_string(), serde_json::json!(1)),
                         ]
                         .into_iter()
                         .collect(),
@@ -669,6 +2126,17 @@ fn title_presentation_parameters_are_read_from_certified_operations() {
                     input_mask(".check_start@TitleScreenMain", 0x86),
                     input_mask(".reset_clock@TitleScreenMain", 0x60),
                     input_mask(".incave@TitleScreenMain", 0x09),
+                    operation("fill_memory", "wShadowOAM", "value", 0),
+                    RuntimePresentationOperation {
+                        op: "dispatch_table".to_string(),
+                        source_span: presentation_span(),
+                        fields: [(
+                            "dispatcher".to_string(),
+                            serde_json::json!("StartTitleScreen option tail"),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    },
                 ],
             }],
             source_span: presentation_span(),
@@ -690,6 +2158,9 @@ fn title_presentation_parameters_are_read_from_certified_operations() {
             timeout_fade_audio: "MUSIC_NONE".to_string(),
             crystal_oam_target: "wShadowOAMSprite00YCoord".to_string(),
             crystal_initial_y: 222,
+            suicune_iterator_operation_index: 2,
+            teardown_start_operation_index: 12,
+            teardown_dispatch_operation_index: 13,
             suicune_frames: vec![128, 136, 0, 8],
             suicune_selector_mask: 24,
             suicune_selector_shift_left: 1,
@@ -791,24 +2262,29 @@ fn title_main_menu_definition_is_read_from_certified_asm_tables() {
         vec![
             vec![
                 RuntimeTitleMainMenuItem {
+                    selection_index: 1,
                     label: "NEW GAME".to_string(),
                     dispatch_target: "MainMenu_NewGame".to_string(),
                 },
                 RuntimeTitleMainMenuItem {
+                    selection_index: 2,
                     label: "OPTION".to_string(),
                     dispatch_target: "MainMenu_Option".to_string(),
                 },
             ],
             vec![
                 RuntimeTitleMainMenuItem {
+                    selection_index: 0,
                     label: "CONTINUE".to_string(),
                     dispatch_target: "MainMenu_Continue".to_string(),
                 },
                 RuntimeTitleMainMenuItem {
+                    selection_index: 1,
                     label: "NEW GAME".to_string(),
                     dispatch_target: "MainMenu_NewGame".to_string(),
                 },
                 RuntimeTitleMainMenuItem {
+                    selection_index: 2,
                     label: "OPTION".to_string(),
                     dispatch_target: "MainMenu_Option".to_string(),
                 },
@@ -1600,7 +3076,6 @@ fn test_item(id: &str) -> Item {
         battle_capture_ball: None,
         battle_focus_energy: None,
         battle_stat_drop_guard: None,
-        battle_stat_drop_guard_turns: None,
         confusion_heal: None,
         repel_steps: None,
         escape_rope_mode: None,
@@ -1736,38 +3211,20 @@ fn test_weather_modifiers() -> WeatherModifiers {
 }
 
 fn test_type_effectiveness() -> TypeEffectivenessTable {
-    let types = ["NORMAL", "FIGHTING", "FIRE", "WATER"];
-    let matchups = types
-        .iter()
-        .map(|attacker| {
-            (
-                (*attacker).to_string(),
-                types
-                    .iter()
-                    .map(|defender| {
-                        (
-                            (*defender).to_string(),
-                            crystal_core::battle::damage::TypeMultiplier::one(),
-                        )
-                    })
-                    .collect(),
-            )
-        })
-        .collect();
-    let foresight_matchups = [(
-        "NORMAL".to_string(),
-        [(
-            "FIGHTING".to_string(),
-            crystal_core::battle::damage::TypeMultiplier::zero(),
-        )]
-        .into_iter()
-        .collect(),
-    )]
-    .into_iter()
-    .collect();
     TypeEffectivenessTable {
-        matchups,
-        foresight_matchups,
+        matchups: vec![TypeEffectivenessEntry {
+            attacker: "FIRE".to_string(),
+            defender: "WATER".to_string(),
+            multiplier: crystal_core::battle::damage::TypeMultiplier {
+                numerator: 1,
+                denominator: 2,
+            },
+        }],
+        foresight_matchups: vec![TypeEffectivenessEntry {
+            attacker: "NORMAL".to_string(),
+            defender: "FIGHTING".to_string(),
+            multiplier: crystal_core::battle::damage::TypeMultiplier::zero(),
+        }],
     }
 }
 
@@ -2147,7 +3604,7 @@ fn add_complete_runtime_pack_fixture(data: &mut GameDataSet) {
     });
     let mut escape_rope = test_item("ESCAPE_ROPE");
     escape_rope.effect = "ESCAPE_ROPE".to_string();
-    escape_rope.escape_rope_mode = Some("ESCAPE_ROPE".to_string());
+    escape_rope.escape_rope_mode = Some("DIG_WARP".to_string());
     escape_rope.field_menu = "ITEMMENU_CURRENT".to_string();
     escape_rope.field_usable = true;
     data.items.insert("ESCAPE_ROPE".to_string(), escape_rope);
@@ -2681,14 +4138,18 @@ fn trainer_post_order_test_data_and_combat() -> (GameDataSet, BattleCombatState)
         numerator: 1,
         denominator: 1,
     };
-    data.type_effectiveness.matchups.insert(
-        "ELECTRIC".to_string(),
-        [("ELECTRIC".to_string(), neutral)].into_iter().collect(),
-    );
-    data.type_effectiveness.matchups.insert(
-        "NORMAL".to_string(),
-        [("ELECTRIC".to_string(), neutral)].into_iter().collect(),
-    );
+    data.type_effectiveness.matchups.extend([
+        TypeEffectivenessEntry {
+            attacker: "ELECTRIC".to_string(),
+            defender: "ELECTRIC".to_string(),
+            multiplier: neutral,
+        },
+        TypeEffectivenessEntry {
+            attacker: "NORMAL".to_string(),
+            defender: "ELECTRIC".to_string(),
+            multiplier: neutral,
+        },
+    ]);
     let mut trainer = test_trainer("YOUNGSTER_JOEY", "MUSIC_NONE");
     trainer.items = vec![Some("POTION".to_string()), None];
     data.trainers
@@ -2707,6 +4168,30 @@ fn trainer_post_order_test_data_and_combat() -> (GameDataSet, BattleCombatState)
         .with_parties(vec![player], vec![enemy])
         .with_party_indices(0, 0);
     (data, combat)
+}
+
+#[test]
+fn trainer_move_selection_exposes_last_ai_damage_register() {
+    let (mut data, mut combat) = trainer_post_order_test_data_and_combat();
+    let mut dragon_rage = test_move("DRAGON_RAGE");
+    dragon_rage.power = 40;
+    dragon_rage.effect = "STATIC_DAMAGE".to_string();
+    data.moves
+        .insert("DRAGON_RAGE".to_string(), dragon_rage);
+    combat.enemy.moves = vec![LearnedMove {
+        name: "DRAGON_RAGE".to_string(),
+        current_pp: 10,
+        pp_ups: 0,
+    }];
+    let mut rng = TrainerAiTestRandom::new([0]);
+
+    let selection = data
+        .select_trainer_enemy_move_with_scratch(&combat, 1 << 6, &mut rng)
+        .expect("aggressive trainer move selection");
+
+    assert_eq!(selection.slot, 0);
+    assert_eq!(selection.ai_damage_register, 40);
+    assert_eq!(rng.calls, 1);
 }
 
 #[test]
@@ -2924,6 +4409,10 @@ fn active_wild_battle_escape_rejects_truncated_divider_trace_before_mutation() {
 fn runtime_blackout_recovery_uses_authoritative_saved_spawn() {
     let mut data = GameDataSet::default();
     data.moves.insert("TACKLE".to_string(), test_move("TACKLE"));
+    let mut home_spawn = test_runtime_spawn_point(0, "PlayersHouse2F");
+    home_spawn.map_constant = "HOME_MAP".to_string();
+    data.runtime_spawn_points
+        .insert("0".to_string(), home_spawn);
     data.runtime_spawn_points.insert(
         "2".to_string(),
         test_runtime_spawn_point(2, "PlayersHouse2F"),
@@ -2936,6 +4425,9 @@ fn runtime_blackout_recovery_uses_authoritative_saved_spawn() {
     data.tilesets = BTreeMap::from([("johto".to_string(), test_tileset_definition())]);
     data.pokegear_landmarks = map_name_sign_landmarks_for_tests(["PlayersHouse2F"]);
     data.special_routines = special_routine_rules(["WarpToSpawnPoint"]);
+    data.story_event_script_constants
+        .global
+        .insert("SPAWN_HOME".to_string(), 0);
     let mut player = crystal_core::models::Pokemon::new_for_tests(
         species(),
         5,
@@ -2944,7 +4436,7 @@ fn runtime_blackout_recovery_uses_authoritative_saved_spawn() {
     let enemy = player.clone();
     player.hp = 0;
     let mut state = GameState {
-        last_spawn_identifier: Some(2),
+        last_spawn_map_constant: Some("ROUTE_29".to_string()),
         money: 100,
         battle_pay_day_money: 50,
         battle: BattleMemory::StaticWild {
@@ -3005,6 +4497,34 @@ fn runtime_blackout_recovery_uses_authoritative_saved_spawn() {
     );
     let audio_ids = BTreeSet::new();
 
+    state.script_runtime.pending_script_warp = Some(crystal_core::state::ScriptWarpRequest {
+        target_map: "Route30".to_string(),
+        tile: TilePosition::new(0, 0),
+        facing: None,
+        source_script: "ExistingWarp".to_string(),
+        command_index: 4,
+    });
+    let pending_before_special = state.script_runtime.pending_script_warp.clone();
+    let special = data
+        .apply_runtime_mutation_command(
+            &mut state,
+            &mut session,
+            RuntimeMutationCommand::WarpToSpawnPoint,
+            &audio_ids,
+            &audio_ids,
+            &audio_ids,
+        )
+        .expect("WarpToSpawnPoint only applies status cleanup");
+    assert!(matches!(
+        special.result,
+        RuntimeMutationResult::SpawnPointWarped(_)
+    ));
+    assert_eq!(
+        state.script_runtime.pending_script_warp,
+        pending_before_special
+    );
+    state.script_runtime.pending_script_warp = None;
+
     let mut draw_state = state.clone();
     crystal_core::battle::start::deactivate_battle_after_draw(&mut draw_state);
     let mut draw_session = session.clone();
@@ -3026,6 +4546,28 @@ fn runtime_blackout_recovery_uses_authoritative_saved_spawn() {
     assert_eq!((draw_state, draw_session), draw_before);
 
     crystal_core::battle::start::deactivate_battle_after_loss(&mut state);
+    let mut home_state = state.clone();
+    home_state.last_spawn_map_constant = Some("NO_SPAWN_MAP".to_string());
+    let mut home_session = session.clone();
+    let home_outcome = data
+        .apply_runtime_mutation_command(
+            &mut home_state,
+            &mut home_session,
+            RuntimeMutationCommand::ResolveBlackoutToLastSpawn,
+            &audio_ids,
+            &audio_ids,
+            &audio_ids,
+        )
+        .expect("whiteout without a recognized last spawn returns home");
+    let RuntimeMutationResult::BlackoutResolved(home_recovery) = home_outcome.result else {
+        panic!("expected home blackout recovery result");
+    };
+    assert_eq!(home_recovery.spawn_identifier, Some(0));
+    assert_eq!(
+        home_state.last_spawn_map_constant.as_deref(),
+        Some("NO_SPAWN_MAP")
+    );
+
     let outcome = data
         .apply_runtime_mutation_command(
             &mut state,
@@ -3624,6 +5166,30 @@ fn active_wild_battle_reward_claim_is_atomic_when_pay_day_claim_rejects() {
     add_runtime_species_and_move(&mut data);
     add_test_growth_rates(&mut data);
     data.battle_reward_rules = test_battle_reward_rules();
+    data.happiness_data = Some(HappinessData {
+        changes: BTreeMap::from([
+            (
+                1,
+                crystal_core::systems::special_routines::HappinessChangeEntry {
+                    code: "HAPPINESS_GAINLEVEL".to_string(),
+                    low: 5,
+                    mid: 3,
+                    high: 2,
+                },
+            ),
+            (
+                19,
+                crystal_core::systems::special_routines::HappinessChangeEntry {
+                    code: "HAPPINESS_GAINLEVELATHOME".to_string(),
+                    low: 10,
+                    mid: 6,
+                    high: 4,
+                },
+            ),
+        ]),
+        services: BTreeMap::new(),
+    });
+    data.pokegear_landmarks = map_name_sign_landmarks_for_tests(["Route29"]);
     let player = crystal_core::models::Pokemon::new_for_tests(
         species(),
         20,
@@ -4025,6 +5591,13 @@ fn catching_a_transformed_wild_pokemon_materializes_ditto() {
         special_attack: player.special_attack,
         special_defense: player.special_defense,
     });
+    combat.enemy_loaded_stats = crystal_core::battle::turn::BattleLoadedStats {
+        attack: player.attack,
+        defense: player.defense,
+        speed: player.speed,
+        special_attack: player.special_attack,
+        special_defense: player.special_defense,
+    };
     let mut state = GameState {
         battle: BattleMemory::Wild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
@@ -4423,6 +5996,8 @@ fn deferred_level_evolution_queues_same_level_target_move_when_moves_are_full() 
     let evolved = state.storage.party.pokemon[0].as_ref().expect("Dragonite");
     assert_eq!(evolved.species.id, "DRAGONITE");
     assert_eq!(evolved.moves, moves_before);
+    assert!(!state.pokedex.seen_species.contains("DRAGONITE"));
+    assert!(!state.pokedex.caught_species.contains("DRAGONITE"));
     assert_eq!(report.pending_move_learns.len(), 1);
     let pending = state
         .pending_move_learn
@@ -4949,9 +6524,9 @@ fn escape_rope_transition_commit_is_atomic_when_destination_rejects() {
     let mut escape_rope = test_item("ESCAPE_ROPE");
     escape_rope.field_usable = true;
     escape_rope.consumable = true;
-    escape_rope.escape_rope_mode = Some("ESCAPE_ROPE".to_string());
+    escape_rope.escape_rope_mode = Some("DIG_WARP".to_string());
 
-    let mut source = test_map_module("SourceCave", "SOURCE_CAVE", None);
+    let mut source = test_map_module("RuinsOfAlphKabutoChamber", "SOURCE_CAVE", None);
     source.attributes.environment = Some("cave".to_string());
     let mut destination = test_map_module("EscapeDest", "ESCAPE_DEST", None);
     destination.events.warps = vec![WarpEvent {
@@ -4959,11 +6534,12 @@ fn escape_rope_transition_commit_is_atomic_when_destination_rejects() {
         x: 5,
         y: 5,
         target_map_constant: "SOURCE_CAVE".to_string(),
-        target_map: "SourceCave".to_string(),
+        target_map: "RuinsOfAlphKabutoChamber".to_string(),
         target_warp_id: 1,
     }];
 
-    let mut source_metadata = test_runtime_map_metadata("SOURCE_CAVE", "SourceCave");
+    let mut source_metadata =
+        test_runtime_map_metadata("SOURCE_CAVE", "RuinsOfAlphKabutoChamber");
     source_metadata.environment = "CAVE".to_string();
     let mut destination_metadata = test_runtime_map_metadata("ESCAPE_DEST", "EscapeDest");
     destination_metadata.environment = "ROUTE".to_string();
@@ -4989,7 +6565,7 @@ fn escape_rope_transition_commit_is_atomic_when_destination_rejects() {
         .expect("add escape rope");
     let mut overworld = data
         .overworld_session_for_traversal(
-            "SourceCave",
+            "RuinsOfAlphKabutoChamber",
             TilePosition { x: 0, y: 0 },
             17,
             PlayerTraversalState::Walk,
@@ -5005,7 +6581,13 @@ fn escape_rope_transition_commit_is_atomic_when_destination_rejects() {
     assert_eq!(state.bag.quantity(&data.items["ESCAPE_ROPE"]), 0);
     assert_eq!(state.script_runtime.item_use_events.len(), 1);
     assert!(state.script_runtime.pending_field_travel.is_some());
-    assert_eq!(overworld.map.name, "SourceCave");
+    assert_eq!(overworld.map.name, "RuinsOfAlphKabutoChamber");
+    assert!(
+        state
+            .flags
+            .is_event_flag_set("EVENT_WALL_OPENED_IN_KABUTO_CHAMBER")
+            .expect("Kabuto chamber wall flag")
+    );
     assert_eq!(overworld.player.tile, TilePosition { x: 0, y: 0 });
     assert_eq!(overworld.frame, 17);
     let state_before_commit = state.clone();
@@ -5084,7 +6666,7 @@ fn verifier_requires_escape_rope_rule_match_exact_item_payload() {
     data.items.insert("ESCAPE_ROPE".to_string(), item);
     data.field_moves.escape_rope = crystal_core::systems::field_moves::FieldEscapeItemRule {
         item_id: "MOD_ESCAPE_ROPE".to_string(),
-        escape_rope_mode: "MOD_WARP".to_string(),
+        escape_rope_mode: "DIG_WARP".to_string(),
     };
 
     let report = verify_game_data(

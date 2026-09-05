@@ -3,10 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use crystal_core::battle::abilities::SUPPORTED_GEN3_ABILITIES;
-use crystal_core::models::{
-    FrontpicAnimProgram, Item, PokemonSpecies, RuntimePokedexEntry, item_pocket,
-};
+use crystal_core::models::{FrontpicAnimProgram, PokemonSpecies, RuntimePokedexEntry};
 use crystal_core::systems::evolution::EvolutionTable;
 use crystal_core::systems::learnsets::SpeciesLearnsets;
 use serde::Deserialize;
@@ -23,36 +20,82 @@ use crate::{
 
 pub const GEN3_MANIFEST_ID: &str = "gen3";
 pub const GEN3_SPECIES_COUNT: usize = 135;
-const GEN3_PICKUP_ITEM_IDS: &[&str] = &[
-    "ANTIDOTE",
-    "ELIXER",
-    "ESCAPE_ROPE",
-    "ETHER",
-    "FULL_HEAL",
-    "FULL_RESTORE",
-    "GREAT_BALL",
-    "HP_UP",
-    "HYPER_POTION",
-    "KINGS_ROCK",
-    "LEFTOVERS",
-    "MAX_ELIXER",
-    "MAX_REVIVE",
-    "NUGGET",
-    "POTION",
-    "PP_UP",
-    "PROTEIN",
-    "RARE_CANDY",
-    "REPEL",
-    "REVIVE",
-    "SUPER_POTION",
-    "TM_EARTHQUAKE",
-    "TM_FOCUS_PUNCH",
-    "TM_REST",
-    "ULTRA_BALL",
-    "WHITE_HERB",
-    "X_ATTACK",
+/// Exact primary-ability vocabulary assigned by the pinned Emerald data.
+/// This validates the optional pack as data; Crystal's runtime does not
+/// execute ability mechanics.
+const GEN3_ASSIGNED_ABILITIES: &[&str] = &[
+    "AIR_LOCK",
+    "BATTLE_ARMOR",
+    "BLAZE",
+    "CHLOROPHYLL",
+    "CLEAR_BODY",
+    "COLOR_CHANGE",
+    "COMPOUND_EYES",
+    "CUTE_CHARM",
+    "DAMP",
+    "DRIZZLE",
+    "DROUGHT",
+    "EARLY_BIRD",
+    "EFFECT_SPORE",
+    "FLAME_BODY",
+    "FLASH_FIRE",
+    "FORECAST",
+    "GUTS",
+    "HUSTLE",
+    "HYPER_CUTTER",
+    "ILLUMINATE",
+    "IMMUNITY",
+    "INNER_FOCUS",
+    "INSOMNIA",
+    "INTIMIDATE",
+    "KEEN_EYE",
+    "LEVITATE",
+    "LIGHTNING_ROD",
+    "LIMBER",
+    "LIQUID_OOZE",
+    "MAGMA_ARMOR",
+    "MAGNET_PULL",
+    "MARVEL_SCALE",
+    "MINUS",
+    "NATURAL_CURE",
+    "OBLIVIOUS",
+    "OVERGROW",
+    "OWN_TEMPO",
+    "PICKUP",
+    "PLUS",
+    "POISON_POINT",
+    "PRESSURE",
+    "PURE_POWER",
+    "ROCK_HEAD",
+    "ROUGH_SKIN",
+    "RUN_AWAY",
+    "SAND_STREAM",
+    "SAND_VEIL",
+    "SERENE_GRACE",
+    "SHADOW_TAG",
+    "SHED_SKIN",
+    "SHELL_ARMOR",
+    "SHIELD_DUST",
+    "SOUNDPROOF",
+    "SPEED_BOOST",
+    "STATIC",
+    "STENCH",
+    "STURDY",
+    "SUCTION_CUPS",
+    "SWARM",
+    "SWIFT_SWIM",
+    "SYNCHRONIZE",
+    "THICK_FAT",
+    "TORRENT",
+    "TRACE",
+    "TRUANT",
+    "VITAL_SPIRIT",
+    "VOLT_ABSORB",
+    "WATER_ABSORB",
+    "WATER_VEIL",
+    "WHITE_SMOKE",
+    "WONDER_GUARD",
 ];
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Gen3Source {
@@ -96,23 +139,6 @@ pub fn build_gen3_modpack(
     validate_source(&source)?;
 
     let mut pack = base.clone();
-    for (item_id, item) in gen3_pickup_extension_items() {
-        ensure!(
-            pack.data.items.insert(item_id.clone(), item).is_none(),
-            "Generation 3 Pickup item '{item_id}' already exists in the base pack"
-        );
-    }
-    pack.report.items = pack.data.items.len();
-    let missing_pickup_items = GEN3_PICKUP_ITEM_IDS
-        .iter()
-        .filter(|item_id| !pack.data.items.contains_key(**item_id))
-        .copied()
-        .collect::<Vec<_>>();
-    ensure!(
-        missing_pickup_items.is_empty(),
-        "Generation 3 Pickup requires missing item definitions: {}",
-        missing_pickup_items.join(", ")
-    );
     ensure!(
         pack.data
             .pokemon
@@ -208,83 +234,6 @@ pub fn build_gen3_modpack(
     Ok(pack)
 }
 
-fn gen3_pickup_extension_items() -> BTreeMap<String, Item> {
-    [
-        (
-            "TM_FOCUS_PUNCH",
-            inert_pickup_item(
-                "TM01",
-                "A Generation III TM containing FOCUS PUNCH.",
-                "TM_HM",
-            ),
-        ),
-        (
-            "WHITE_HERB",
-            pickup_item(
-                "WHITE HERB",
-                "A hold item that restores lowered battle stats once.",
-                "ITEM",
-                "HELD_WHITE_HERB",
-                true,
-            ),
-        ),
-    ]
-    .into_iter()
-    .map(|(id, item)| (id.to_string(), item))
-    .collect()
-}
-
-fn inert_pickup_item(name: &str, description: &str, pocket: &str) -> Item {
-    pickup_item(name, description, pocket, "HELD_NONE", false)
-}
-
-fn pickup_item(
-    name: &str,
-    description: &str,
-    pocket: &str,
-    held_effect: &str,
-    consumable: bool,
-) -> Item {
-    Item {
-        name: name.to_string(),
-        description: description.to_string(),
-        effect: "NONE".to_string(),
-        status_heals: Vec::new(),
-        revive_hp_percent: None,
-        party_revive_hp_percent: None,
-        pp_restore_scope: None,
-        pp_restore_points: None,
-        pp_up_stages: None,
-        vitamin_stat: None,
-        vitamin_stat_exp: None,
-        vitamin_max_stat_exp: None,
-        rare_candy_level_gain: None,
-        battle_stat_boost_stat: None,
-        battle_stat_boost_stages: None,
-        battle_escape_mode: None,
-        battle_capture_ball: None,
-        battle_focus_energy: None,
-        battle_stat_drop_guard: None,
-        battle_stat_drop_guard_turns: None,
-        confusion_heal: None,
-        repel_steps: None,
-        escape_rope_mode: None,
-        price: 0,
-        held_effect: held_effect.to_string(),
-        parameter: 0,
-        property: String::new(),
-        pocket: item_pocket(pocket),
-        field_menu: "ITEMMENU_NOUSE".to_string(),
-        field_usable: false,
-        battle_menu: "ITEMMENU_NOUSE".to_string(),
-        battle_usable: false,
-        script_name: "NoEffectScript".to_string(),
-        consumable,
-        tmhm_index: None,
-        tmhm_move: None,
-    }
-}
-
 fn validate_source(source: &Gen3Source) -> Result<()> {
     ensure!(
         source.schema_version == 1,
@@ -316,13 +265,13 @@ fn validate_source(source: &Gen3Source) -> Result<()> {
         .values()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let supported_abilities = SUPPORTED_GEN3_ABILITIES
+    let expected_abilities = GEN3_ASSIGNED_ABILITIES
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
     ensure!(
-        assigned_abilities == supported_abilities,
-        "Generation 3 assigned abilities and implemented runtime ability catalog must match exactly"
+        assigned_abilities == expected_abilities,
+        "Generation 3 assigned abilities must match the pinned ability catalog exactly"
     );
     ensure!(
         source.pokemon.keys().eq(source.learnsets.keys())

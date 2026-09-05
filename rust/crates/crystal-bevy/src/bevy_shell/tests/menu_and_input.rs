@@ -7577,6 +7577,31 @@ fn arrow_key_dispatch_moves_visible_start_menu_cursor() {
 }
 
 #[test]
+fn battle_move_held_direction_repeat_depends_on_credits_h_in_menu_leak() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    runtime_shell.battle_move_cursor = Some(MenuCursor {
+        surface_id: "battle:moves".to_string(),
+        option_index: 0,
+    });
+
+    assert_eq!(runtime_shell.h_in_menu, 0);
+    assert!(!visible_ui_direction_can_repeat(&runtime_shell));
+
+    runtime_shell.h_in_menu = 1;
+    assert!(
+        visible_ui_direction_can_repeat(&runtime_shell),
+        "Credits' unrestored hInMenu must enable held movement in the battle move menu"
+    );
+
+    runtime_shell.battle_move_cursor = None;
+    runtime_shell.h_in_menu = 0;
+    assert!(
+        visible_ui_direction_can_repeat(&runtime_shell),
+        "ordinary menus manage their own repeat behavior"
+    );
+}
+
+#[test]
 fn held_overworld_direction_is_restored_after_warp_navigation_reset() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
     let mut keys = ButtonInput::<KeyCode>::default();

@@ -822,7 +822,6 @@ describe("exportItems", () => {
       battle_escape_mode: "WILD_BATTLE",
       battle_focus_energy: null,
       battle_stat_drop_guard: null,
-      battle_stat_drop_guard_turns: null,
       confusion_heal: null,
     });
   });
@@ -848,7 +847,6 @@ describe("exportItems", () => {
       battle_escape_mode: null,
       battle_focus_energy: true,
       battle_stat_drop_guard: null,
-      battle_stat_drop_guard_turns: null,
       confusion_heal: null,
     });
   });
@@ -874,7 +872,6 @@ describe("exportItems", () => {
       battle_escape_mode: null,
       battle_focus_energy: null,
       battle_stat_drop_guard: true,
-      battle_stat_drop_guard_turns: 5,
       confusion_heal: null,
     });
   });
@@ -900,7 +897,6 @@ describe("exportItems", () => {
       battle_escape_mode: null,
       battle_focus_energy: null,
       battle_stat_drop_guard: null,
-      battle_stat_drop_guard_turns: null,
       confusion_heal: true,
     });
   });
@@ -927,7 +923,6 @@ describe("exportItems", () => {
       battle_escape_mode: null,
       battle_focus_energy: null,
       battle_stat_drop_guard: null,
-      battle_stat_drop_guard_turns: null,
       confusion_heal: null,
     });
   });
@@ -986,7 +981,6 @@ describe("exportItems", () => {
       battle_escape_mode: null,
       battle_focus_energy: null,
       battle_stat_drop_guard: null,
-      battle_stat_drop_guard_turns: null,
       confusion_heal: null,
     });
   });

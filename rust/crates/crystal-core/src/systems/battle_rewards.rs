@@ -7,6 +7,8 @@ use crate::battle::start::{
     ActiveBattleEnemyError, ActiveBattlePartyError, claim_active_trainer_battle_reward_index,
     deactivate_battle_after_win, require_active_battle_party_index, update_active_battle_enemy,
 };
+use crate::battle::stats::BattleStatMultiplierTables;
+use crate::battle::turn::{BattleTurnError, recalculate_loaded_stats};
 use crate::models::pokemon::StatExperience;
 use crate::models::{LearnedMove, Move, Pokemon, PokemonSpecies, calculate_stats};
 use crate::random::{CrystalRandom, DividerSource};
@@ -28,6 +30,40 @@ pub struct BattleRewardRules {
     pub mom_money_increment: u32,
     pub mom_random_items: Vec<MomPurchaseRule>,
     pub mom_progression_items: Vec<MomPurchaseRule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BattleLevelUpHappinessContext {
+    pub current_landmark: u8,
+    pub gain_level: [i16; 3],
+    pub gain_level_at_home: [i16; 3],
+}
+
+impl BattleLevelUpHappinessContext {
+    fn changes(self, pokemon: &Pokemon) -> [i16; 3] {
+        let caught_location = pokemon
+            .caught_data
+            .as_ref()
+            .map_or(0, |caught| caught.location);
+        let at_home = caught_location == self.current_landmark;
+        if at_home {
+            self.gain_level_at_home
+        } else {
+            self.gain_level
+        }
+    }
+}
+
+pub fn happiness_delta(happiness: u8, changes: [i16; 3]) -> i16 {
+    changes[usize::from(happiness >= 100) + usize::from(happiness >= 200)]
+}
+
+pub fn apply_happiness_change(pokemon: &mut Pokemon, changes: [i16; 3]) {
+    if pokemon.is_egg {
+        return;
+    }
+    pokemon.happiness = (i16::from(pokemon.happiness) + happiness_delta(pokemon.happiness, changes))
+        .clamp(0, 255) as u8;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +367,7 @@ pub struct BattleRewardOutcome {
     pub deferred_level_evolution: bool,
     pub evolution: EvolutionReport,
     pub recipient_outcomes: Vec<BattleRewardRecipientOutcome>,
+    pub post_battle_evolutions: Vec<BattlePartyEvolutionOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,6 +379,13 @@ pub struct BattleRewardRecipientOutcome {
     pub level_after: u8,
     pub learned_moves: Vec<String>,
     pub pending_move_learns: Vec<LearnedMove>,
+    pub evolution: EvolutionReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BattlePartyEvolutionOutcome {
+    pub party_index: usize,
+    pub nickname: String,
     pub evolution: EvolutionReport,
 }
 
@@ -415,6 +459,8 @@ pub enum BattleRewardError {
     PendingMoveLearnLevelMismatch { party_index: usize, level: u8 },
     #[error("post-battle Pokerus divider failed: {error}")]
     PokerusDivider { error: String },
+    #[error("active level-up battle-stat refresh failed: {0:?}")]
+    BattleStats(BattleTurnError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -478,8 +524,90 @@ pub fn sync_active_combat_player_party_from_storage(state: &mut GameState) {
         *combat_pokemon = stored_pokemon.clone();
     }
     if let Some(Some(active_pokemon)) = state.storage.party.pokemon.get(combat.player_party_index) {
+        let stat_boosts = combat.player.stat_boosts.clone();
+        let flinching = combat.player.flinching;
+        let rampage_turns = combat.player.rampage_turns;
+        let confusion_turns = combat.player.confusion_turns;
+        let perish_song_turns = combat.player.perish_song_turns;
+        let focus_energy = combat.player.focus_energy;
+        let turns_in_battle = combat.player.turns_in_battle;
         combat.player = active_pokemon.clone();
+        combat.player.stat_boosts = stat_boosts;
+        combat.player.flinching = flinching;
+        combat.player.rampage_turns = rampage_turns;
+        combat.player.confusion_turns = confusion_turns;
+        combat.player.perish_song_turns = perish_song_turns;
+        combat.player.focus_energy = focus_energy;
+        combat.player.turns_in_battle = turns_in_battle;
     }
+}
+
+fn sync_active_combat_player_reward_from_storage(
+    state: &mut GameState,
+    stat_multipliers: &BattleStatMultiplierTables,
+    leveled_up: bool,
+) -> Result<(), BattleRewardError> {
+    let Some(combat) = state.script_runtime.active_battle_combat.as_mut() else {
+        return Ok(());
+    };
+    for (index, combat_pokemon) in combat.player_party.iter_mut().enumerate() {
+        let Some(Some(stored_pokemon)) = state.storage.party.pokemon.get(index) else {
+            continue;
+        };
+        *combat_pokemon = stored_pokemon.clone();
+    }
+    let Some(Some(stored)) = state.storage.party.pokemon.get(combat.player_party_index) else {
+        return Ok(());
+    };
+
+    // The level-up path updates persistent party data while the active BattleMon
+    // retains its volatile battle bytes. It then rebuilds live stats in the
+    // source order: stages, status, badges. Transform keeps supplying its copied
+    // raw words, but uses the newly loaded level for subsequent damage.
+    let stat_boosts = combat.player.stat_boosts.clone();
+    let flinching = combat.player.flinching;
+    let rampage_turns = combat.player.rampage_turns;
+    let confusion_turns = combat.player.confusion_turns;
+    let perish_song_turns = combat.player.perish_song_turns;
+    let focus_energy = combat.player.focus_energy;
+    let turns_in_battle = combat.player.turns_in_battle;
+    let level = combat.player.level;
+    let hp = combat.player.hp;
+    let max_hp = combat.player.max_hp;
+    let raw_stats = (
+        combat.player.attack,
+        combat.player.defense,
+        combat.player.speed,
+        combat.player.special_attack,
+        combat.player.special_defense,
+    );
+    combat.player = stored.clone();
+    combat.player.stat_boosts = stat_boosts;
+    combat.player.flinching = flinching;
+    combat.player.rampage_turns = rampage_turns;
+    combat.player.confusion_turns = confusion_turns;
+    combat.player.perish_song_turns = perish_song_turns;
+    combat.player.focus_energy = focus_energy;
+    combat.player.turns_in_battle = turns_in_battle;
+    if leveled_up {
+        combat.player_badge_before_status = false;
+        recalculate_loaded_stats(
+            combat,
+            crate::battle::turn::BattleSide::Player,
+            stat_multipliers,
+        )
+        .map_err(BattleRewardError::BattleStats)?;
+    } else {
+        combat.player.level = level;
+        combat.player.hp = hp;
+        combat.player.max_hp = max_hp;
+        combat.player.attack = raw_stats.0;
+        combat.player.defense = raw_stats.1;
+        combat.player.speed = raw_stats.2;
+        combat.player.special_attack = raw_stats.3;
+        combat.player.special_defense = raw_stats.4;
+    }
+    Ok(())
 }
 
 fn reset_trainer_reward_participants(state: &mut GameState, active_index: usize) {
@@ -499,6 +627,8 @@ pub fn claim_active_trainer_battle_rewards(
     learnsets: &SpeciesLearnsets,
     growth_rates: &GrowthRateCatalog,
     evolutions: &EvolutionTable,
+    stat_multipliers: &BattleStatMultiplierTables,
+    level_up_happiness: BattleLevelUpHappinessContext,
     time_of_day: TimeOfDay,
 ) -> Result<BattleRewardOutcome, ActiveTrainerBattleRewardError> {
     let rewards_disabled = state.link_session.link_mode != 0
@@ -533,6 +663,7 @@ pub fn claim_active_trainer_battle_rewards(
             deferred_level_evolution: false,
             evolution: EvolutionReport::default(),
             recipient_outcomes: Vec::new(),
+            post_battle_evolutions: Vec::new(),
         };
         update_active_battle_enemy(state, enemy)?;
         claim_active_trainer_battle_reward_index(state)?;
@@ -541,6 +672,12 @@ pub fn claim_active_trainer_battle_rewards(
         sync_active_combat_player_party_from_storage(state);
         return Ok(outcome);
     }
+    let active_level_before = state.storage.party.pokemon[active_index]
+        .as_ref()
+        .ok_or(ActiveBattlePartyError::EmptyPartySlot {
+            index: active_index,
+        })?
+        .level;
     let mut participant_indices = state
         .storage
         .party
@@ -583,76 +720,49 @@ pub fn claim_active_trainer_battle_rewards(
         participant_count.saturating_mul(2)
     };
     let participant_experience = split_experience_award(rules, &enemy, participant_divisor, true)?;
-    let active_traded = state.storage.party.pokemon[active_index]
-        .as_ref()
-        .is_some_and(|pokemon| pokemon.original_trainer_id != state.player_id);
-    let player = state.storage.party.pokemon[active_index].as_mut().ok_or(
-        ActiveBattlePartyError::EmptyPartySlot {
-            index: active_index,
-        },
-    )?;
-    let mut outcome = apply_battle_rewards_with_experience(
-        rules,
-        player,
-        &enemy,
-        species,
-        moves,
-        learnsets,
-        growth_rates,
-        evolutions,
-        time_of_day,
-        active_traded,
-        participant_experience,
-        if exp_share_indices.is_empty() {
-            participant_count
-        } else {
-            participant_count.saturating_mul(2)
-        },
-    )?;
-    queue_pending_move_learn(state, active_index, &outcome)?;
-    let active_recipient_outcome = recipient_reward_outcome(
-        active_index,
-        state.storage.party.pokemon[active_index]
-            .as_ref()
-            .unwrap()
-            .nickname
-            .clone(),
-        &outcome,
-    );
-    outcome.recipient_outcomes.push(active_recipient_outcome);
-    state.sync_party_from_storage();
-    update_active_battle_enemy(state, enemy.clone())?;
-    claim_active_trainer_battle_reward_index(state)?;
+    let stat_experience_divisor = if exp_share_indices.is_empty() {
+        participant_count
+    } else {
+        participant_count.saturating_mul(2)
+    };
+    let mut active_outcome = None;
+    let mut recipient_outcomes = Vec::new();
+    // GiveExperiencePoints advances wCurPartyMon from slot 0 through the
+    // party, irrespective of which participant is currently active.
     for participant_index in participant_indices {
-        if participant_index == active_index {
-            continue;
-        }
         let participant_traded = state.storage.party.pokemon[participant_index]
             .as_ref()
             .is_some_and(|pokemon| pokemon.original_trainer_id != state.player_id);
-        let Some(participant) = state.storage.party.pokemon[participant_index].as_mut() else {
-            continue;
+        let participant_outcome = {
+            let participant = state.storage.party.pokemon[participant_index]
+                .as_mut()
+                .ok_or(ActiveBattlePartyError::EmptyPartySlot {
+                    index: participant_index,
+                })?;
+            apply_battle_rewards_with_experience(
+                rules,
+                participant,
+                &enemy,
+                species,
+                moves,
+                learnsets,
+                growth_rates,
+                evolutions,
+                level_up_happiness,
+                time_of_day,
+                false,
+                participant_traded,
+                participant_experience,
+                stat_experience_divisor,
+            )?
         };
-        let participant_outcome = apply_battle_rewards_with_experience(
-            rules,
-            participant,
-            &enemy,
-            species,
-            moves,
-            learnsets,
-            growth_rates,
-            evolutions,
-            time_of_day,
-            participant_traded,
-            participant_experience,
-            if exp_share_indices.is_empty() {
-                participant_count
-            } else {
-                participant_count.saturating_mul(2)
-            },
-        )?;
+        if participant_outcome.level_after > participant_outcome.level_before {
+            state
+                .battle_evolvable_party_indices
+                .insert(participant_index);
+        }
         queue_pending_move_learn(state, participant_index, &participant_outcome)?;
-        outcome.recipient_outcomes.push(recipient_reward_outcome(
+        recipient_outcomes.push(recipient_reward_outcome(
             participant_index,
             state.storage.party.pokemon[participant_index]
                 .as_ref()
@@ -661,10 +771,22 @@ pub fn claim_active_trainer_battle_rewards(
                 .clone(),
             &participant_outcome,
         ));
+        if participant_index == active_index {
+            active_outcome = Some(participant_outcome);
+        }
     }
+    let mut outcome = active_outcome.ok_or(ActiveBattlePartyError::EmptyPartySlot {
+        index: active_index,
+    })?;
+    state.sync_party_from_storage();
+    update_active_battle_enemy(state, enemy.clone())?;
+    claim_active_trainer_battle_reward_index(state)?;
     for share_index in exp_share_indices {
         let exp_share_count =
             exp_share_count.ok_or(BattleRewardError::InvalidRecipientCount { count: 0 })?;
+        // GiveExperiencePoints restores wBackupEnemyMonBaseStats here, but
+        // that backup was taken after the Exp. Share halving pass.
+        let exp_share_divisor = exp_share_count.saturating_mul(2);
         let holder_traded = state.storage.party.pokemon[share_index]
             .as_ref()
             .is_some_and(|pokemon| pokemon.original_trainer_id != state.player_id);
@@ -680,13 +802,18 @@ pub fn claim_active_trainer_battle_rewards(
             learnsets,
             growth_rates,
             evolutions,
+            level_up_happiness,
             time_of_day,
+            false,
             holder_traded,
-            split_experience_award(rules, &enemy, exp_share_count, true)?,
-            exp_share_count,
+            split_experience_award(rules, &enemy, exp_share_divisor, true)?,
+            exp_share_divisor,
         )?;
+        if share_outcome.level_after > share_outcome.level_before {
+            state.battle_evolvable_party_indices.insert(share_index);
+        }
         queue_pending_move_learn(state, share_index, &share_outcome)?;
-        outcome.recipient_outcomes.push(recipient_reward_outcome(
+        recipient_outcomes.push(recipient_reward_outcome(
             share_index,
             state.storage.party.pokemon[share_index]
                 .as_ref()
@@ -696,10 +823,119 @@ pub fn claim_active_trainer_battle_rewards(
             &share_outcome,
         ));
     }
+    outcome.recipient_outcomes = recipient_outcomes;
+    let trainer_defeated = match (&state.battle, state.battle_active_enemy_party_index) {
+        (BattleMemory::Trainer { enemy_party, .. }, Some(active_enemy_index)) => enemy_party
+            .iter()
+            .enumerate()
+            .all(|(index, pokemon)| index == active_enemy_index || pokemon.hp == 0),
+        _ => false,
+    };
+    if trainer_defeated
+        && state.pending_move_learn.is_none()
+        && state.pending_move_learn_queue.is_empty()
+    {
+        let evolutions = evolve_flagged_party_after_battle(
+            state,
+            species,
+            moves,
+            learnsets,
+            evolutions,
+            time_of_day,
+        )?;
+        for evolution in &evolutions {
+            if evolution.party_index == active_index {
+                outcome.evolution = evolution.evolution.clone();
+            }
+        }
+        outcome.post_battle_evolutions = evolutions;
+    }
+    let active_leveled_up = state.storage.party.pokemon[active_index]
+        .as_ref()
+        .is_some_and(|pokemon| pokemon.level > active_level_before);
     reset_trainer_reward_participants(state, active_index);
     state.sync_party_from_storage();
-    sync_active_combat_player_party_from_storage(state);
+    sync_active_combat_player_reward_from_storage(state, stat_multipliers, active_leveled_up)?;
     Ok(outcome)
+}
+
+fn evolve_flagged_party_after_battle(
+    state: &mut GameState,
+    species: &BTreeMap<String, PokemonSpecies>,
+    moves: &BTreeMap<String, Move>,
+    learnsets: &SpeciesLearnsets,
+    evolutions: &EvolutionTable,
+    time_of_day: TimeOfDay,
+) -> Result<Vec<BattlePartyEvolutionOutcome>, BattleRewardError> {
+    let flagged = state
+        .battle_evolvable_party_indices
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    let context = crate::systems::evolution::EvolutionContext {
+        species,
+        moves,
+        learnsets,
+        time_of_day,
+        current_item: None,
+        force_evolution: false,
+        link_mode: crate::systems::evolution::LinkMode::None,
+    };
+    let mut outcomes = Vec::new();
+    for party_index in flagged {
+        let nickname = state.storage.party.pokemon[party_index]
+            .as_ref()
+            .ok_or(BattleRewardError::PendingMoveLearnEmptyPartySlot { party_index })?
+            .nickname
+            .clone();
+        let report = {
+            let pokemon = state.storage.party.pokemon[party_index]
+                .as_mut()
+                .ok_or(BattleRewardError::PendingMoveLearnEmptyPartySlot { party_index })?;
+            check_and_evolve(pokemon, evolutions, &context, true)?
+        };
+        state.battle_evolvable_party_indices.remove(&party_index);
+        if report.target_species.is_none() {
+            continue;
+        }
+        if report.cancel_snapshot.is_none() {
+            let evolved_pokemon = state.storage.party.pokemon[party_index]
+                .as_ref()
+                .unwrap()
+                .clone();
+            state.pokedex.record_caught_pokemon(&evolved_pokemon);
+        }
+        rebase_pending_move_learns_for_party(state, party_index, true);
+        if !report.pending_move_learns.is_empty() {
+            let queue_outcome = BattleRewardOutcome {
+                defeated_species: String::new(),
+                experience_awarded: 0,
+                level_before: state.storage.party.pokemon[party_index]
+                    .as_ref()
+                    .unwrap()
+                    .level,
+                level_after: state.storage.party.pokemon[party_index]
+                    .as_ref()
+                    .unwrap()
+                    .level,
+                learned_moves: Vec::new(),
+                pending_move_learns: report.pending_move_learns.clone(),
+                deferred_level_evolution: false,
+                evolution: report.clone(),
+                recipient_outcomes: Vec::new(),
+                post_battle_evolutions: Vec::new(),
+            };
+            queue_pending_move_learn(state, party_index, &queue_outcome)?;
+        }
+        outcomes.push(BattlePartyEvolutionOutcome {
+            party_index,
+            nickname,
+            evolution: report,
+        });
+    }
+    state.sync_party_from_storage();
+    sync_active_combat_player_party_from_storage(state);
+    Ok(outcomes)
 }
 
 pub fn claim_active_wild_battle_rewards<S>(
@@ -710,6 +946,7 @@ pub fn claim_active_wild_battle_rewards<S>(
     learnsets: &SpeciesLearnsets,
     growth_rates: &GrowthRateCatalog,
     evolutions: &EvolutionTable,
+    level_up_happiness: BattleLevelUpHappinessContext,
     time_of_day: TimeOfDay,
     divider: &mut S,
 ) -> Result<BattleRewardOutcome, ActiveWildBattleRewardError>
@@ -770,73 +1007,47 @@ where
         participant_count.saturating_mul(2)
     };
     let participant_experience = split_experience_award(rules, &enemy, participant_divisor, false)?;
-    let active_traded = state.storage.party.pokemon[active_index]
-        .as_ref()
-        .is_some_and(|pokemon| pokemon.original_trainer_id != state.player_id);
-    let player = state.storage.party.pokemon[active_index].as_mut().ok_or(
-        ActiveBattlePartyError::EmptyPartySlot {
-            index: active_index,
-        },
-    )?;
-    let mut outcome = apply_battle_rewards_with_experience(
-        rules,
-        player,
-        &enemy,
-        species,
-        moves,
-        learnsets,
-        growth_rates,
-        evolutions,
-        time_of_day,
-        active_traded,
-        participant_experience,
-        if exp_share_indices.is_empty() {
-            participant_count
-        } else {
-            participant_count.saturating_mul(2)
-        },
-    )?;
-    queue_pending_move_learn(state, active_index, &outcome)?;
-    let active_recipient_outcome = recipient_reward_outcome(
-        active_index,
-        state.storage.party.pokemon[active_index]
-            .as_ref()
-            .unwrap()
-            .nickname
-            .clone(),
-        &outcome,
-    );
-    outcome.recipient_outcomes.push(active_recipient_outcome);
+    let stat_experience_divisor = if exp_share_indices.is_empty() {
+        participant_count
+    } else {
+        participant_count.saturating_mul(2)
+    };
+    let mut active_outcome = None;
+    let mut recipient_outcomes = Vec::new();
     for participant_index in participant_indices {
-        if participant_index == active_index {
-            continue;
-        }
         let participant_traded = state.storage.party.pokemon[participant_index]
             .as_ref()
             .is_some_and(|pokemon| pokemon.original_trainer_id != state.player_id);
-        let Some(participant) = state.storage.party.pokemon[participant_index].as_mut() else {
-            continue;
+        let participant_outcome = {
+            let participant = state.storage.party.pokemon[participant_index]
+                .as_mut()
+                .ok_or(ActiveBattlePartyError::EmptyPartySlot {
+                    index: participant_index,
+                })?;
+            apply_battle_rewards_with_experience(
+                rules,
+                participant,
+                &enemy,
+                species,
+                moves,
+                learnsets,
+                growth_rates,
+                evolutions,
+                level_up_happiness,
+                time_of_day,
+                false,
+                participant_traded,
+                participant_experience,
+                stat_experience_divisor,
+            )?
         };
-        let participant_outcome = apply_battle_rewards_with_experience(
-            rules,
-            participant,
-            &enemy,
-            species,
-            moves,
-            learnsets,
-            growth_rates,
-            evolutions,
-            time_of_day,
-            participant_traded,
-            participant_experience,
-            if exp_share_indices.is_empty() {
-                participant_count
-            } else {
-                participant_count.saturating_mul(2)
-            },
-        )?;
+        if participant_outcome.level_after > participant_outcome.level_before {
+            state
+                .battle_evolvable_party_indices
+                .insert(participant_index);
+        }
         queue_pending_move_learn(state, participant_index, &participant_outcome)?;
-        outcome.recipient_outcomes.push(recipient_reward_outcome(
+        recipient_outcomes.push(recipient_reward_outcome(
             participant_index,
             state.storage.party.pokemon[participant_index]
                 .as_ref()
@@ -845,10 +1056,19 @@ where
                 .clone(),
             &participant_outcome,
         ));
+        if participant_index == active_index {
+            active_outcome = Some(participant_outcome);
+        }
     }
+    let mut outcome = active_outcome.ok_or(ActiveBattlePartyError::EmptyPartySlot {
+        index: active_index,
+    })?;
     for share_index in exp_share_indices {
         let exp_share_count =
             exp_share_count.ok_or(BattleRewardError::InvalidRecipientCount { count: 0 })?;
+        // GiveExperiencePoints restores wBackupEnemyMonBaseStats here, but
+        // that backup was taken after the Exp. Share halving pass.
+        let exp_share_divisor = exp_share_count.saturating_mul(2);
         let holder_traded = state.storage.party.pokemon[share_index]
             .as_ref()
             .is_some_and(|pokemon| pokemon.original_trainer_id != state.player_id);
@@ -864,13 +1084,18 @@ where
             learnsets,
             growth_rates,
             evolutions,
+            level_up_happiness,
             time_of_day,
+            false,
             holder_traded,
-            split_experience_award(rules, &enemy, exp_share_count, false)?,
-            exp_share_count,
+            split_experience_award(rules, &enemy, exp_share_divisor, false)?,
+            exp_share_divisor,
         )?;
+        if share_outcome.level_after > share_outcome.level_before {
+            state.battle_evolvable_party_indices.insert(share_index);
+        }
         queue_pending_move_learn(state, share_index, &share_outcome)?;
-        outcome.recipient_outcomes.push(recipient_reward_outcome(
+        recipient_outcomes.push(recipient_reward_outcome(
             share_index,
             state.storage.party.pokemon[share_index]
                 .as_ref()
@@ -879,6 +1104,23 @@ where
                 .clone(),
             &share_outcome,
         ));
+    }
+    outcome.recipient_outcomes = recipient_outcomes;
+    if state.pending_move_learn.is_none() && state.pending_move_learn_queue.is_empty() {
+        let evolution_outcomes = evolve_flagged_party_after_battle(
+            state,
+            species,
+            moves,
+            learnsets,
+            evolutions,
+            time_of_day,
+        )?;
+        for evolution in &evolution_outcomes {
+            if evolution.party_index == active_index {
+                outcome.evolution = evolution.evolution.clone();
+            }
+        }
+        outcome.post_battle_evolutions = evolution_outcomes;
     }
     deactivate_battle_after_win(state);
     state
@@ -1005,6 +1247,7 @@ pub fn apply_wild_battle_rewards(
     learnsets: &SpeciesLearnsets,
     growth_rates: &GrowthRateCatalog,
     evolutions: &EvolutionTable,
+    level_up_happiness: BattleLevelUpHappinessContext,
     time_of_day: TimeOfDay,
 ) -> Result<BattleRewardOutcome, BattleRewardError> {
     require_battle_reward_rules(rules)?;
@@ -1017,7 +1260,9 @@ pub fn apply_wild_battle_rewards(
         learnsets,
         growth_rates,
         evolutions,
+        level_up_happiness,
         time_of_day,
+        true,
         false,
         wild_experience_award(rules, defeated)?,
         1,
@@ -1033,6 +1278,7 @@ pub fn apply_trainer_battle_rewards(
     learnsets: &SpeciesLearnsets,
     growth_rates: &GrowthRateCatalog,
     evolutions: &EvolutionTable,
+    level_up_happiness: BattleLevelUpHappinessContext,
     time_of_day: TimeOfDay,
 ) -> Result<BattleRewardOutcome, BattleRewardError> {
     require_battle_reward_rules(rules)?;
@@ -1045,7 +1291,9 @@ pub fn apply_trainer_battle_rewards(
         learnsets,
         growth_rates,
         evolutions,
+        level_up_happiness,
         time_of_day,
+        true,
         false,
         trainer_experience_award(rules, defeated)?,
         1,
@@ -1080,6 +1328,15 @@ pub fn replace_pending_move_learn(
     state.pending_move_learn = None;
     state.sync_party_from_storage();
     sync_active_combat_player_party_from_storage(state);
+    if let Some(combat) = state.script_runtime.active_battle_combat.as_mut()
+        && combat.player_party_index == pending.party_index
+        && combat
+            .player_disable
+            .as_ref()
+            .is_some_and(|disable| disable.move_name == replaced_move)
+    {
+        combat.player_disable = None;
+    }
     Ok(PendingMoveLearnResolution {
         party_index: pending.party_index,
         learned_move: pending.learned_move.name,
@@ -1144,7 +1401,9 @@ fn apply_battle_rewards_with_experience(
     learnsets: &SpeciesLearnsets,
     growth_rates: &GrowthRateCatalog,
     evolutions: &EvolutionTable,
+    level_up_happiness: BattleLevelUpHappinessContext,
     time_of_day: TimeOfDay,
+    evolve_now: bool,
     traded: bool,
     base_experience_awarded: i32,
     stat_experience_divisor: i32,
@@ -1178,9 +1437,12 @@ fn apply_battle_rewards_with_experience(
         defeated.species.base_stats,
         stat_experience_divisor,
     );
-    refresh_level_stats(&mut rewarded);
     let level_up =
         apply_experience_level_ups(&mut rewarded, moves, learnsets, growth_rates, rules)?;
+    if level_up.level_after > level_up.level_before {
+        let level_up_change = level_up_happiness.changes(&rewarded);
+        apply_happiness_change(&mut rewarded, level_up_change);
+    }
     let evolution_context = crate::systems::evolution::EvolutionContext {
         species,
         moves,
@@ -1192,7 +1454,7 @@ fn apply_battle_rewards_with_experience(
     };
     let mut pending_move_learns = level_up.pending_move_learns;
     let deferred_level_evolution = !pending_move_learns.is_empty();
-    let evolution = if deferred_level_evolution {
+    let evolution = if !evolve_now || deferred_level_evolution {
         EvolutionReport::default()
     } else {
         let evolution = check_and_evolve(&mut rewarded, evolutions, &evolution_context, true)?;
@@ -1210,6 +1472,7 @@ fn apply_battle_rewards_with_experience(
         deferred_level_evolution,
         evolution,
         recipient_outcomes: Vec::new(),
+        post_battle_evolutions: Vec::new(),
     })
 }
 
@@ -1298,6 +1561,7 @@ pub fn apply_direct_level_gain(
     growth_rates: &GrowthRateCatalog,
     rules: &BattleRewardRules,
     level_gain: u8,
+    level_up_happiness: BattleLevelUpHappinessContext,
 ) -> Result<PokemonLevelUpOutcome, BattleRewardError> {
     require_battle_reward_rules(rules)?;
     require_positive_u8(rules.max_level, "max_level")?;
@@ -1309,12 +1573,11 @@ pub fn apply_direct_level_gain(
     let mut pending_move_learns = Vec::new();
     while leveled.level < target_level {
         leveled.level += 1;
-        leveled.experience = leveled.experience.max(calculate_experience(
-            growth_rates,
-            &leveled.species.growth_rate,
-            leveled.level,
-        )?);
+        leveled.experience =
+            calculate_experience(growth_rates, &leveled.species.growth_rate, leveled.level)?;
         refresh_level_stats(&mut leveled);
+        let level_up_change = level_up_happiness.changes(&leveled);
+        apply_happiness_change(&mut leveled, level_up_change);
         let level_moves = learn_moves_for_current_level(&mut leveled, moves, learnsets)?;
         for learned in level_moves.learned {
             learned_moves.push(learned.name);
@@ -1438,6 +1701,8 @@ fn learn_moves_for_current_level(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::battle::stats::{BattleStatMultiplier, apply_stage};
+    use crate::models::pokemon::CaughtData;
     use crate::models::{BaseStats, Dv, GrowthRate, growth_rate, pokemon_type};
     use crate::random::ReplayDivider;
     use crate::systems::evolution::EvolutionEntry;
@@ -1490,6 +1755,123 @@ mod tests {
                 decoration_flag: None,
             }],
         }
+    }
+
+    fn battle_stat_multipliers() -> BattleStatMultiplierTables {
+        BattleStatMultiplierTables {
+            stat: [
+                (25, 100),
+                (28, 100),
+                (33, 100),
+                (40, 100),
+                (50, 100),
+                (66, 100),
+                (1, 1),
+                (15, 10),
+                (2, 1),
+                (25, 10),
+                (3, 1),
+                (35, 10),
+                (4, 1),
+            ]
+            .into_iter()
+            .map(|(numerator, denominator)| BattleStatMultiplier {
+                numerator,
+                denominator,
+            })
+            .collect(),
+            accuracy: Vec::new(),
+        }
+    }
+
+    fn level_up_happiness() -> BattleLevelUpHappinessContext {
+        BattleLevelUpHappinessContext {
+            current_landmark: 1,
+            gain_level: [5, 3, 2],
+            gain_level_at_home: [10, 6, 4],
+        }
+    }
+
+    #[test]
+    fn happiness_change_uses_source_thresholds_clamps_and_skips_eggs() {
+        let changes = [5, 3, 2];
+        let make_pokemon = || {
+            Pokemon::new_for_tests(
+                species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+                10,
+                Dv::default(),
+            )
+        };
+        let mut low = make_pokemon();
+        low.happiness = 99;
+        apply_happiness_change(&mut low, changes);
+        assert_eq!(low.happiness, 104);
+
+        let mut middle = make_pokemon();
+        middle.happiness = 199;
+        apply_happiness_change(&mut middle, changes);
+        assert_eq!(middle.happiness, 202);
+
+        let mut high = make_pokemon();
+        high.happiness = 254;
+        apply_happiness_change(&mut high, changes);
+        assert_eq!(high.happiness, 255);
+
+        let mut bitter = make_pokemon();
+        bitter.happiness = 4;
+        apply_happiness_change(&mut bitter, [-5, -5, -10]);
+        assert_eq!(bitter.happiness, 0);
+
+        let mut egg = make_pokemon();
+        egg.happiness = 70;
+        egg.is_egg = true;
+        apply_happiness_change(&mut egg, changes);
+        assert_eq!(egg.happiness, 70);
+    }
+
+    #[test]
+    fn active_level_up_rebuilds_loaded_stats_after_stages_status_and_badges() {
+        let mut player = Pokemon::new_for_tests(
+            species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+            15,
+            Dv::default(),
+        );
+        player.status = Some("BURN".to_string());
+        let enemy = Pokemon::new_for_tests(
+            species("PIDGEY", 91, growth_rate("GROWTH_MEDIUM_FAST")),
+            5,
+            Dv::default(),
+        );
+        let mut badges = [false; 8];
+        badges[0] = true;
+        let mut combat = crate::battle::turn::BattleCombatState::new(player.clone(), enemy)
+            .with_obedience(1, badges)
+            .with_badge_boosts_enabled(true);
+        combat
+            .player
+            .stat_boosts
+            .insert(crate::models::Stat::Attack, 1);
+        combat.player.confusion_turns = 4;
+
+        let mut rewarded = player;
+        rewarded.level += 1;
+        rewarded.attack = 101;
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(rewarded.clone());
+        state.script_runtime.active_battle_combat = Some(combat);
+
+        let tables = battle_stat_multipliers();
+        sync_active_combat_player_reward_from_storage(&mut state, &tables, true)
+            .expect("active level-up refreshes loaded stats");
+
+        let combat = state.script_runtime.active_battle_combat.as_ref().unwrap();
+        let staged = apply_stage(&tables, rewarded.attack, 1).unwrap();
+        let burned = (staged / 2).max(1);
+        assert_eq!(combat.player_loaded_stats.attack, burned + burned / 8);
+        assert_eq!(combat.player.level, rewarded.level);
+        assert_eq!(combat.player.confusion_turns, 4);
+        assert_eq!(combat.player.stat_boosts[&crate::models::Stat::Attack], 1);
+        assert!(!combat.player_badge_before_status);
     }
 
     #[test]
@@ -1731,6 +2113,7 @@ mod tests {
                 &learnsets,
                 &growth_rates,
                 &evolutions,
+                level_up_happiness(),
                 TimeOfDay::Day,
             ),
             Err(BattleRewardError::MissingRules)
@@ -1787,6 +2170,7 @@ mod tests {
                 &learnsets,
                 &growth_rates,
                 &evolutions,
+                level_up_happiness(),
                 TimeOfDay::Day,
             ),
             Err(BattleRewardError::InvalidRule {
@@ -1863,6 +2247,7 @@ mod tests {
             &learnsets,
             &growth_rates,
             &evolutions,
+            level_up_happiness(),
             TimeOfDay::Day,
         )
         .expect("battle rewards");
@@ -1882,7 +2267,7 @@ mod tests {
     }
 
     #[test]
-    fn active_wild_battle_rewards_commit_player_deactivate_and_sync_party() {
+    fn active_wild_battle_rewards_follow_party_slot_order_and_deactivate() {
         let growth_rates = crystal_growth_rate_catalog_for_tests();
         let mut player = Pokemon::new_for_tests(
             species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
@@ -1894,6 +2279,7 @@ mod tests {
             current_pp: 35,
             pp_ups: 0,
         }];
+        player.turns_in_battle = 1;
         let mut defeated = Pokemon::new_for_tests(
             species("PIDGEY", 91, growth_rate("GROWTH_MEDIUM_FAST")),
             5,
@@ -1925,7 +2311,10 @@ mod tests {
         );
         let mut state = GameState::default();
         state.storage.party.pokemon[0] = Some(player.clone());
-        state.battle_active_party_index = Some(0);
+        let mut active_player = player.clone();
+        active_player.nickname = "ACTIVE".to_string();
+        state.storage.party.pokemon[1] = Some(active_player);
+        state.battle_active_party_index = Some(1);
         state.battle = BattleMemory::Wild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
             battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
@@ -1944,12 +2333,15 @@ mod tests {
             &learnsets,
             &growth_rates,
             &evolutions,
+            level_up_happiness(),
             TimeOfDay::Day,
             &mut divider,
         )
         .expect("claim wild rewards");
 
         assert_eq!(outcome.defeated_species, "PIDGEY");
+        assert_eq!(outcome.recipient_outcomes[0].party_index, 0);
+        assert_eq!(outcome.recipient_outcomes[1].party_index, 1);
         assert_eq!(state.battle, BattleMemory::Inactive);
         assert_eq!(state.battle_active_party_index, None);
         assert_eq!(
@@ -1962,7 +2354,192 @@ mod tests {
     }
 
     #[test]
-    fn active_trainer_battle_rewards_commit_player_enemy_and_reward_index() {
+    fn wild_exp_share_finishes_both_reward_passes_before_evolution() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let mut player = Pokemon::new_for_tests(
+            species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+            15,
+            Dv::default(),
+        );
+        player.experience =
+            calculate_experience(&growth_rates, "GROWTH_MEDIUM_FAST", 16).unwrap() - 1;
+        player.item = Some("EXP_SHARE".to_string());
+        player.turns_in_battle = 1;
+        let mut defeated = Pokemon::new_for_tests(
+            species("PIDGEY", 255, growth_rate("GROWTH_MEDIUM_FAST")),
+            100,
+            Dv::default(),
+        );
+        defeated.hp = 0;
+        let bayleef = species("BAYLEEF", 141, growth_rate("GROWTH_SLOW"));
+        let species = [
+            (player.species.id.clone(), player.species.clone()),
+            (defeated.species.id.clone(), defeated.species.clone()),
+            (bayleef.id.clone(), bayleef),
+        ]
+        .into_iter()
+        .collect();
+        let learnsets = [
+            ("CHIKORITA".to_string(), Vec::new()),
+            ("BAYLEEF".to_string(), Vec::new()),
+            ("PIDGEY".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [
+                (
+                    "CHIKORITA".to_string(),
+                    vec![EvolutionEntry::level("BAYLEEF", 16)],
+                ),
+                ("BAYLEEF".to_string(), Vec::new()),
+                ("PIDGEY".to_string(), Vec::new()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(player);
+        state.battle_active_party_index = Some(0);
+        state.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+            map_name: "ROUTE_29".to_string(),
+            roaming_slot: None,
+            enemy_pokemon: defeated.clone(),
+            enemy_party: vec![defeated],
+        };
+
+        let mut divider = ReplayDivider::new([]);
+        let outcome = claim_active_wild_battle_rewards(
+            &mut state,
+            &reward_rules(),
+            &species,
+            &BTreeMap::new(),
+            &learnsets,
+            &growth_rates,
+            &evolutions,
+            level_up_happiness(),
+            TimeOfDay::Day,
+            &mut divider,
+        )
+        .expect("claim both wild reward passes");
+
+        let rewarded = state.storage.party.pokemon[0].as_ref().unwrap();
+        assert_eq!(
+            outcome
+                .recipient_outcomes
+                .iter()
+                .map(|recipient| recipient.experience_awarded)
+                .collect::<Vec<_>>(),
+            vec![1_814, 1_814]
+        );
+        assert_eq!(rewarded.level, 19);
+        assert_eq!(rewarded.species.id, "BAYLEEF");
+        assert_eq!(outcome.evolution.target_species.as_deref(), Some("BAYLEEF"));
+    }
+
+    #[test]
+    fn exp_share_pass_reuses_the_halved_enemy_record() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let mut participant = Pokemon::new_for_tests(
+            species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+            50,
+            Dv::default(),
+        );
+        participant.turns_in_battle = 1;
+        let mut second_participant = participant.clone();
+        second_participant.nickname = "SECOND".to_string();
+        let mut holder = participant.clone();
+        holder.nickname = "HOLDER".to_string();
+        holder.turns_in_battle = 0;
+        holder.item = Some("EXP_SHARE".to_string());
+
+        let mut defeated_species = species("PIDGEY", 65, growth_rate("GROWTH_MEDIUM_FAST"));
+        defeated_species.base_stats = BaseStats::new(65, 65, 65, 65, 65, 65);
+        let mut defeated = Pokemon::new_for_tests(defeated_species, 7, Dv::default());
+        defeated.hp = 0;
+        let species = [
+            (participant.species.id.clone(), participant.species.clone()),
+            (defeated.species.id.clone(), defeated.species.clone()),
+        ]
+        .into_iter()
+        .collect();
+        let learnsets = [
+            ("CHIKORITA".to_string(), Vec::new()),
+            ("PIDGEY".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [
+                ("CHIKORITA".to_string(), Vec::new()),
+                ("PIDGEY".to_string(), Vec::new()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(participant);
+        state.storage.party.pokemon[1] = Some(second_participant);
+        state.storage.party.pokemon[2] = Some(holder);
+        state.battle_active_party_index = Some(1);
+        state.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+            map_name: "ROUTE_29".to_string(),
+            roaming_slot: None,
+            enemy_pokemon: defeated.clone(),
+            enemy_party: vec![defeated],
+        };
+
+        let experience_before = state
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .take(3)
+            .map(|pokemon| pokemon.as_ref().unwrap().experience)
+            .collect::<Vec<_>>();
+        let mut divider = ReplayDivider::new([]);
+        let outcome = claim_active_wild_battle_rewards(
+            &mut state,
+            &reward_rules(),
+            &species,
+            &BTreeMap::new(),
+            &learnsets,
+            &growth_rates,
+            &evolutions,
+            level_up_happiness(),
+            TimeOfDay::Day,
+            &mut divider,
+        )
+        .expect("claim split participant and Exp. Share rewards");
+
+        assert_eq!(
+            outcome
+                .recipient_outcomes
+                .iter()
+                .map(|recipient| (recipient.party_index, recipient.experience_awarded))
+                .collect::<Vec<_>>(),
+            vec![(0, 16), (1, 16), (2, 32)]
+        );
+        for (index, expected_gain) in [(0, 16), (1, 16), (2, 32)] {
+            let rewarded = state.storage.party.pokemon[index].as_ref().unwrap();
+            assert_eq!(
+                rewarded.experience - experience_before[index],
+                expected_gain
+            );
+            assert_eq!(rewarded.hp_exp, expected_gain as u16);
+            assert_eq!(rewarded.attack_exp, expected_gain as u16);
+            assert_eq!(rewarded.defense_exp, expected_gain as u16);
+            assert_eq!(rewarded.speed_exp, expected_gain as u16);
+            assert_eq!(rewarded.special_exp, expected_gain as u16);
+        }
+    }
+
+    #[test]
+    fn active_trainer_battle_rewards_follow_party_slot_order_and_commit_enemy() {
         let growth_rates = crystal_growth_rate_catalog_for_tests();
         let mut player = Pokemon::new_for_tests(
             species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
@@ -2009,7 +2586,7 @@ mod tests {
         previous_participant.nickname = "BENCH".to_string();
         state.storage.party.pokemon[0] = Some(player.clone());
         state.storage.party.pokemon[1] = Some(previous_participant.clone());
-        state.battle_active_party_index = Some(0);
+        state.battle_active_party_index = Some(1);
         state.battle_active_enemy_party_index = Some(0);
         state.battle = BattleMemory::Trainer {
             battle_type: "BATTLETYPE_TRAINER".to_string(),
@@ -2031,9 +2608,12 @@ mod tests {
             ai_layers: Vec::new(),
         };
         state.script_runtime.active_battle_combat = Some(
-            crate::battle::turn::BattleCombatState::new(player.clone(), defeated.clone())
-                .with_parties(vec![player, previous_participant], vec![defeated])
-                .with_party_indices(0, 0),
+            crate::battle::turn::BattleCombatState::new(
+                previous_participant.clone(),
+                defeated.clone(),
+            )
+            .with_parties(vec![player, previous_participant], vec![defeated])
+            .with_party_indices(1, 0),
         );
 
         let mut tower_state = state.clone();
@@ -2041,7 +2621,7 @@ mod tests {
             unreachable!();
         };
         *battle_type = "BATTLETYPE_BATTLE_TOWER".to_string();
-        let tower_experience_before = tower_state.storage.party.pokemon[0]
+        let tower_experience_before = tower_state.storage.party.pokemon[1]
             .as_ref()
             .unwrap()
             .experience;
@@ -2053,12 +2633,14 @@ mod tests {
             &learnsets,
             &growth_rates,
             &evolutions,
+            &battle_stat_multipliers(),
+            level_up_happiness(),
             TimeOfDay::Day,
         )
         .expect("settle Battle Tower opponent");
         assert_eq!(tower_outcome.experience_awarded, 0);
         assert_eq!(
-            tower_state.storage.party.pokemon[0]
+            tower_state.storage.party.pokemon[1]
                 .as_ref()
                 .unwrap()
                 .experience,
@@ -2074,6 +2656,8 @@ mod tests {
             &learnsets,
             &growth_rates,
             &evolutions,
+            &battle_stat_multipliers(),
+            level_up_happiness(),
             TimeOfDay::Day,
         )
         .expect("claim trainer rewards");
@@ -2081,6 +2665,7 @@ mod tests {
         assert_eq!(outcome.defeated_species, "PIDGEY");
         assert_eq!(outcome.recipient_outcomes.len(), 2);
         assert_eq!(outcome.recipient_outcomes[0].party_index, 0);
+        assert_eq!(outcome.recipient_outcomes[1].party_index, 1);
         assert_eq!(outcome.recipient_outcomes[1].nickname, "BENCH");
         assert!(state.battle_rewarded_enemy_party_indices.contains(&0));
         assert_eq!(
@@ -2099,7 +2684,7 @@ mod tests {
         };
         assert_eq!(enemy_pokemon.hp, 0);
         assert_eq!(enemy_party[0].hp, 0);
-        let rewarded = state.storage.party.pokemon[0].as_ref().unwrap();
+        let rewarded = state.storage.party.pokemon[1].as_ref().unwrap();
         let combat = state
             .script_runtime
             .active_battle_combat
@@ -2107,16 +2692,261 @@ mod tests {
             .expect("active trainer combat remains between opponents");
         assert_eq!(combat.player.experience, rewarded.experience);
         assert_eq!(combat.player.level, rewarded.level);
-        assert_eq!(combat.player_party[0], *rewarded);
+        assert_eq!(combat.player_party[1], *rewarded);
         assert_eq!(rewarded.turns_in_battle, 1);
         assert_eq!(
-            state.storage.party.pokemon[1]
+            state.storage.party.pokemon[0]
                 .as_ref()
                 .unwrap()
                 .turns_in_battle,
             0
         );
-        assert_eq!(combat.player_party[1].turns_in_battle, 0);
+        assert_eq!(combat.player_party[0].turns_in_battle, 0);
+    }
+
+    #[test]
+    fn trainer_level_evolution_waits_until_every_enemy_is_defeated() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let mut player = Pokemon::new_for_tests(
+            species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+            15,
+            Dv::default(),
+        );
+        player.experience =
+            calculate_experience(&growth_rates, "GROWTH_MEDIUM_FAST", 16).unwrap() - 1;
+        player.turns_in_battle = 1;
+        let mut defeated = Pokemon::new_for_tests(
+            species("PIDGEY", 91, growth_rate("GROWTH_MEDIUM_FAST")),
+            5,
+            Dv::default(),
+        );
+        defeated.hp = 0;
+        let reserve_enemy = Pokemon::new_for_tests(
+            species("RATTATA", 57, growth_rate("GROWTH_MEDIUM_FAST")),
+            5,
+            Dv::default(),
+        );
+        let bayleef = species("BAYLEEF", 141, growth_rate("GROWTH_MEDIUM_FAST"));
+        let species = [
+            (player.species.id.clone(), player.species.clone()),
+            (defeated.species.id.clone(), defeated.species.clone()),
+            (
+                reserve_enemy.species.id.clone(),
+                reserve_enemy.species.clone(),
+            ),
+            (bayleef.id.clone(), bayleef),
+        ]
+        .into_iter()
+        .collect();
+        let learnsets = [
+            ("CHIKORITA".to_string(), Vec::new()),
+            ("BAYLEEF".to_string(), Vec::new()),
+            ("PIDGEY".to_string(), Vec::new()),
+            ("RATTATA".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [
+                (
+                    "CHIKORITA".to_string(),
+                    vec![EvolutionEntry::level("BAYLEEF", 16)],
+                ),
+                ("BAYLEEF".to_string(), Vec::new()),
+                ("PIDGEY".to_string(), Vec::new()),
+                ("RATTATA".to_string(), Vec::new()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(player.clone());
+        state.battle_active_party_index = Some(0);
+        state.battle_active_enemy_party_index = Some(0);
+        state.battle = BattleMemory::Trainer {
+            battle_type: "BATTLETYPE_TRAINER".to_string(),
+            trainer_class: "YOUNGSTER".to_string(),
+            trainer_id: "YOUNGSTER_JOEY".to_string(),
+            trainer_name: "JOEY".to_string(),
+            event_flag: "EVENT_BEAT_YOUNGSTER_JOEY".to_string(),
+            seen_text: String::new(),
+            win_text: String::new(),
+            loss_text: String::new(),
+            callback: String::new(),
+            source_script: "TrainerScript".to_string(),
+            enemy_pokemon: defeated.clone(),
+            enemy_party: vec![defeated.clone(), reserve_enemy.clone()],
+            reward: 64,
+            encounter_music: "MUSIC_YOUNGSTER_ENCOUNTER".to_string(),
+            ai_move_flags: 0,
+            ai_item_switch_flags: 0,
+            ai_layers: Vec::new(),
+        };
+        state.script_runtime.active_battle_combat = Some(
+            crate::battle::turn::BattleCombatState::new(player.clone(), defeated.clone())
+                .with_parties(vec![player], vec![defeated, reserve_enemy])
+                .with_party_indices(0, 0),
+        );
+
+        let outcome = claim_active_trainer_battle_rewards(
+            &mut state,
+            &reward_rules(),
+            &species,
+            &BTreeMap::new(),
+            &learnsets,
+            &growth_rates,
+            &evolutions,
+            &battle_stat_multipliers(),
+            level_up_happiness(),
+            TimeOfDay::Day,
+        )
+        .expect("claim first trainer opponent rewards");
+
+        assert_eq!(outcome.level_after, 16);
+        assert_eq!(outcome.evolution, EvolutionReport::default());
+        assert_eq!(
+            state.storage.party.pokemon[0].as_ref().unwrap().species.id,
+            "CHIKORITA"
+        );
+        crate::battle::start::advance_active_trainer_battle(&mut state)
+            .expect("advance to second trainer opponent");
+        let BattleMemory::Trainer { enemy_pokemon, .. } = &mut state.battle else {
+            unreachable!();
+        };
+        enemy_pokemon.hp = 0;
+        state
+            .script_runtime
+            .active_battle_combat
+            .as_mut()
+            .unwrap()
+            .enemy
+            .hp = 0;
+
+        let final_outcome = claim_active_trainer_battle_rewards(
+            &mut state,
+            &reward_rules(),
+            &species,
+            &BTreeMap::new(),
+            &learnsets,
+            &growth_rates,
+            &evolutions,
+            &battle_stat_multipliers(),
+            level_up_happiness(),
+            TimeOfDay::Day,
+        )
+        .expect("claim final trainer opponent rewards");
+
+        assert_eq!(
+            final_outcome.evolution.target_species.as_deref(),
+            Some("BAYLEEF")
+        );
+        assert_eq!(
+            state.storage.party.pokemon[0].as_ref().unwrap().species.id,
+            "BAYLEEF"
+        );
+        assert!(!state.pokedex.seen_species.contains("BAYLEEF"));
+        assert!(!state.pokedex.caught_species.contains("BAYLEEF"));
+        assert!(state.battle_evolvable_party_indices.is_empty());
+    }
+
+    #[test]
+    fn final_trainer_reward_reports_an_earlier_participants_post_battle_evolution() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let chikorita = species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST"));
+        let bayleef = species("BAYLEEF", 141, growth_rate("GROWTH_MEDIUM_FAST"));
+        let pidgey = species("PIDGEY", 50, growth_rate("GROWTH_MEDIUM_FAST"));
+        let earlier_participant = Pokemon::new_for_tests(chikorita.clone(), 16, Dv::default());
+        let mut active = Pokemon::new_for_tests(pidgey.clone(), 10, Dv::default());
+        active.turns_in_battle = 1;
+        let mut defeated = Pokemon::new_for_tests(pidgey.clone(), 5, Dv::default());
+        defeated.hp = 0;
+        let species = [
+            (chikorita.id.clone(), chikorita),
+            (bayleef.id.clone(), bayleef),
+            (pidgey.id.clone(), pidgey),
+        ]
+        .into_iter()
+        .collect();
+        let learnsets = [
+            ("CHIKORITA".to_string(), Vec::new()),
+            ("BAYLEEF".to_string(), Vec::new()),
+            ("PIDGEY".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [
+                (
+                    "CHIKORITA".to_string(),
+                    vec![EvolutionEntry::level("BAYLEEF", 16)],
+                ),
+                ("BAYLEEF".to_string(), Vec::new()),
+                ("PIDGEY".to_string(), Vec::new()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(earlier_participant.clone());
+        state.storage.party.pokemon[1] = Some(active.clone());
+        state.battle_active_party_index = Some(1);
+        state.battle_active_enemy_party_index = Some(0);
+        state.battle_evolvable_party_indices.insert(0);
+        state.battle = BattleMemory::Trainer {
+            battle_type: "BATTLETYPE_TRAINER".to_string(),
+            trainer_class: "YOUNGSTER".to_string(),
+            trainer_id: "YOUNGSTER_JOEY".to_string(),
+            trainer_name: "JOEY".to_string(),
+            event_flag: "EVENT_BEAT_YOUNGSTER_JOEY".to_string(),
+            seen_text: String::new(),
+            win_text: String::new(),
+            loss_text: String::new(),
+            callback: String::new(),
+            source_script: "TrainerScript".to_string(),
+            enemy_pokemon: defeated.clone(),
+            enemy_party: vec![defeated.clone()],
+            reward: 64,
+            encounter_music: "MUSIC_YOUNGSTER_ENCOUNTER".to_string(),
+            ai_move_flags: 0,
+            ai_item_switch_flags: 0,
+            ai_layers: Vec::new(),
+        };
+        state.script_runtime.active_battle_combat = Some(
+            crate::battle::turn::BattleCombatState::new(active.clone(), defeated.clone())
+                .with_parties(vec![earlier_participant, active], vec![defeated])
+                .with_party_indices(1, 0),
+        );
+
+        let outcome = claim_active_trainer_battle_rewards(
+            &mut state,
+            &reward_rules(),
+            &species,
+            &BTreeMap::new(),
+            &learnsets,
+            &growth_rates,
+            &evolutions,
+            &battle_stat_multipliers(),
+            level_up_happiness(),
+            TimeOfDay::Day,
+        )
+        .expect("claim final trainer rewards");
+
+        assert_eq!(outcome.recipient_outcomes.len(), 1);
+        assert_eq!(outcome.recipient_outcomes[0].party_index, 1);
+        assert_eq!(outcome.post_battle_evolutions.len(), 1);
+        assert_eq!(outcome.post_battle_evolutions[0].party_index, 0);
+        assert_eq!(outcome.post_battle_evolutions[0].nickname, "CHIKORITA");
+        assert_eq!(
+            outcome.post_battle_evolutions[0]
+                .evolution
+                .target_species
+                .as_deref(),
+            Some("BAYLEEF")
+        );
+        assert_eq!(
+            state.storage.party.pokemon[0].as_ref().unwrap().species.id,
+            "BAYLEEF"
+        );
     }
 
     #[test]
@@ -2168,6 +2998,7 @@ mod tests {
             &learnsets,
             &growth_rates,
             &evolutions,
+            level_up_happiness(),
             TimeOfDay::Day,
         )
         .expect("trainer rewards");
@@ -2181,7 +3012,149 @@ mod tests {
     }
 
     #[test]
-    fn rewards_refresh_stats_after_stat_exp_without_level_up() {
+    fn battle_level_up_happiness_applies_once_after_all_gained_levels() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let mut player = Pokemon::new_for_tests(
+            species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+            5,
+            Dv::default(),
+        );
+        player.happiness = 99;
+        player.caught_data = Some(CaughtData {
+            level: 5,
+            time_of_day: Some(TimeOfDay::Day),
+            original_trainer_gender: 0,
+            location: 1,
+        });
+        let mut defeated = Pokemon::new_for_tests(
+            species("PIDGEY", 1_000, growth_rate("GROWTH_MEDIUM_FAST")),
+            100,
+            Dv::default(),
+        );
+        defeated.hp = 0;
+        let species = [
+            (player.species.id.clone(), player.species.clone()),
+            (defeated.species.id.clone(), defeated.species.clone()),
+        ]
+        .into_iter()
+        .collect();
+        let learnsets = [
+            ("CHIKORITA".to_string(), Vec::new()),
+            ("PIDGEY".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [
+                ("CHIKORITA".to_string(), Vec::new()),
+                ("PIDGEY".to_string(), Vec::new()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let outcome = apply_trainer_battle_rewards(
+            &reward_rules(),
+            &mut player,
+            &defeated,
+            &species,
+            &BTreeMap::new(),
+            &learnsets,
+            &growth_rates,
+            &evolutions,
+            level_up_happiness(),
+            TimeOfDay::Day,
+        )
+        .expect("trainer rewards");
+
+        assert!(outcome.level_after > outcome.level_before + 1);
+        assert_eq!(player.happiness, 109);
+    }
+
+    #[test]
+    fn absent_caught_data_compares_as_crystals_zero_location_byte() {
+        let player = Pokemon::new_for_tests(
+            species("CHIKORITA", 64, growth_rate("GROWTH_MEDIUM_FAST")),
+            5,
+            Dv::default(),
+        );
+        let context = BattleLevelUpHappinessContext {
+            current_landmark: 0,
+            ..level_up_happiness()
+        };
+
+        assert_eq!(
+            happiness_delta(player.happiness, context.changes(&player)),
+            10
+        );
+    }
+
+    #[test]
+    fn level_up_happiness_is_applied_before_happiness_evolution() {
+        let growth_rates = crystal_growth_rate_catalog_for_tests();
+        let mut player = Pokemon::new_for_tests(
+            species("EEVEE", 92, growth_rate("GROWTH_MEDIUM_FAST")),
+            15,
+            Dv::default(),
+        );
+        player.experience =
+            calculate_experience(&growth_rates, "GROWTH_MEDIUM_FAST", 16).unwrap() - 1;
+        player.happiness = 219;
+        let mut defeated = Pokemon::new_for_tests(
+            species("PIDGEY", 91, growth_rate("GROWTH_MEDIUM_FAST")),
+            5,
+            Dv::default(),
+        );
+        defeated.hp = 0;
+        let espeon = species("ESPEON", 197, growth_rate("GROWTH_MEDIUM_FAST"));
+        let species = [
+            (player.species.id.clone(), player.species.clone()),
+            (defeated.species.id.clone(), defeated.species.clone()),
+            (espeon.id.clone(), espeon),
+        ]
+        .into_iter()
+        .collect();
+        let learnsets = [
+            ("EEVEE".to_string(), Vec::new()),
+            ("ESPEON".to_string(), Vec::new()),
+            ("PIDGEY".to_string(), Vec::new()),
+        ]
+        .into_iter()
+        .collect();
+        let evolutions = EvolutionTable(
+            [
+                (
+                    "EEVEE".to_string(),
+                    vec![EvolutionEntry::happiness("ESPEON", "TR_MORNDAY")],
+                ),
+                ("ESPEON".to_string(), Vec::new()),
+                ("PIDGEY".to_string(), Vec::new()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let outcome = apply_wild_battle_rewards(
+            &reward_rules(),
+            &mut player,
+            &defeated,
+            &species,
+            &BTreeMap::new(),
+            &learnsets,
+            &growth_rates,
+            &evolutions,
+            level_up_happiness(),
+            TimeOfDay::Day,
+        )
+        .expect("wild rewards");
+
+        assert_eq!(player.happiness, 221);
+        assert_eq!(outcome.evolution.target_species.as_deref(), Some("ESPEON"));
+        assert_eq!(player.species.id, "ESPEON");
+    }
+
+    #[test]
+    fn rewards_leave_calculated_stats_stale_after_stat_exp_without_level_up() {
         let growth_rates = crystal_growth_rate_catalog_for_tests();
         let mut player = Pokemon::new_for_tests(
             species("TYPHLOSION", 64, growth_rate("GROWTH_MEDIUM_FAST")),
@@ -2189,6 +3162,14 @@ mod tests {
             Dv::from_non_hp(10, 10, 10, 10),
         );
         let level_before = player.level;
+        let stats_before = (
+            player.max_hp,
+            player.attack,
+            player.defense,
+            player.speed,
+            player.special_attack,
+            player.special_defense,
+        );
         let mut defeated = Pokemon::new_for_tests(
             species("PIDGEY", 91, growth_rate("GROWTH_MEDIUM_FAST")),
             5,
@@ -2222,34 +3203,30 @@ mod tests {
             &learnsets,
             &growth_rates,
             &evolutions,
+            level_up_happiness(),
             TimeOfDay::Day,
         )
         .expect("trainer rewards");
 
         assert_eq!(outcome.level_before, level_before);
         assert_eq!(outcome.level_after, level_before);
+        assert_eq!(player.happiness, 70);
         assert!(player.hp_exp > 0);
         player
             .validate_saved_state()
             .expect("valid rewarded Pokemon");
-        let expected = calculate_stats(
-            &player.species,
-            player.level,
-            player.dvs,
-            StatExperience {
-                hp: player.hp_exp,
-                attack: player.attack_exp,
-                defense: player.defense_exp,
-                speed: player.speed_exp,
-                special: player.special_exp,
-            },
+        assert_eq!(
+            (
+                player.max_hp,
+                player.attack,
+                player.defense,
+                player.speed,
+                player.special_attack,
+                player.special_defense,
+            ),
+            stats_before,
+            "Crystal stores new stat experience immediately but does not call CalcMonStats until a level is gained"
         );
-        assert_eq!(player.max_hp, expected.max_hp);
-        assert_eq!(player.attack, expected.attack);
-        assert_eq!(player.defense, expected.defense);
-        assert_eq!(player.speed, expected.speed);
-        assert_eq!(player.special_attack, expected.special_attack);
-        assert_eq!(player.special_defense, expected.special_defense);
     }
 
     #[test]
@@ -2295,6 +3272,7 @@ mod tests {
                 &learnsets,
                 &growth_rates,
                 &evolutions,
+                level_up_happiness(),
                 TimeOfDay::Day,
             ),
             Err(BattleRewardError::DefeatedPokemonNotFainted)
@@ -2312,6 +3290,7 @@ mod tests {
                 &learnsets,
                 &growth_rates,
                 &evolutions,
+                level_up_happiness(),
                 TimeOfDay::Day,
             ),
             Err(BattleRewardError::MissingMoveData {
@@ -2346,6 +3325,7 @@ mod tests {
                 &growth_rates,
                 &reward_rules(),
                 1,
+                level_up_happiness(),
             ),
             Err(BattleRewardError::MissingMoveData {
                 move_id: "razor_leaf".to_string()
@@ -2467,11 +3447,20 @@ mod tests {
             5,
             Dv::default(),
         );
-        state.script_runtime.active_battle_combat = Some(
-            crate::battle::turn::BattleCombatState::new(player.clone(), enemy.clone())
-                .with_parties(vec![player], vec![enemy])
-                .with_party_indices(0, 0),
-        );
+        let mut combat = crate::battle::turn::BattleCombatState::new(player.clone(), enemy.clone())
+            .with_parties(vec![player], vec![enemy])
+            .with_party_indices(0, 0);
+        combat
+            .player
+            .stat_boosts
+            .insert(crate::models::Stat::Attack, 2);
+        combat.player.confusion_turns = 3;
+        combat.player_loaded_stats.attack = 777;
+        combat.player_disable = Some(crate::battle::turn::BattleDisableState {
+            move_name: "GROWL".to_string(),
+            turns_remaining: 4,
+        });
+        state.script_runtime.active_battle_combat = Some(combat);
 
         replace_pending_move_learn(&mut state, 1).expect("replace pending move");
 
@@ -2480,6 +3469,44 @@ mod tests {
         let combat = state.script_runtime.active_battle_combat.as_ref().unwrap();
         assert_eq!(combat.player.moves, stored.moves);
         assert_eq!(combat.player_party[0].moves, stored.moves);
+        assert_eq!(combat.player.stat_boosts[&crate::models::Stat::Attack], 2);
+        assert_eq!(combat.player.confusion_turns, 3);
+        assert_eq!(combat.player_loaded_stats.attack, 777);
+        assert_eq!(combat.player_disable, None);
+    }
+
+    #[test]
+    fn pending_move_replacement_keeps_disable_for_a_different_move() {
+        let mut state = pending_move_learn_state();
+        let player = state.storage.party.pokemon[0].as_ref().unwrap().clone();
+        let enemy = Pokemon::new_for_tests(
+            species("PIDGEY", 91, growth_rate("GROWTH_MEDIUM_FAST")),
+            5,
+            Dv::default(),
+        );
+        let mut combat = crate::battle::turn::BattleCombatState::new(player.clone(), enemy.clone())
+            .with_parties(vec![player], vec![enemy])
+            .with_party_indices(0, 0);
+        combat.player_disable = Some(crate::battle::turn::BattleDisableState {
+            move_name: "TACKLE".to_string(),
+            turns_remaining: 4,
+        });
+        state.script_runtime.active_battle_combat = Some(combat);
+
+        replace_pending_move_learn(&mut state, 1).expect("replace non-disabled move");
+
+        assert_eq!(
+            state
+                .script_runtime
+                .active_battle_combat
+                .as_ref()
+                .unwrap()
+                .player_disable,
+            Some(crate::battle::turn::BattleDisableState {
+                move_name: "TACKLE".to_string(),
+                turns_remaining: 4,
+            })
+        );
     }
 
     #[test]
@@ -2500,6 +3527,7 @@ mod tests {
             deferred_level_evolution: true,
             evolution: EvolutionReport::default(),
             recipient_outcomes: Vec::new(),
+            post_battle_evolutions: Vec::new(),
         };
 
         queue_pending_move_learn(&mut state, 0, &outcome).expect("queue second move learn");

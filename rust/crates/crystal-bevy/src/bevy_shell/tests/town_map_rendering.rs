@@ -1,4 +1,62 @@
 #[test]
+fn fly_destinations_use_asm_landmark_order_and_new_bark_default() {
+    let destinations = [
+        ("ENGINE_FLYPOINT_SILVER_CAVE", 26, "LANDMARK_SILVER_CAVE"),
+        ("ENGINE_FLYPOINT_VIOLET", 16, "LANDMARK_VIOLET_CITY"),
+        ("ENGINE_FLYPOINT_NEW_BARK", 14, "LANDMARK_NEW_BARK_TOWN"),
+        (
+            "ENGINE_FLYPOINT_INDIGO_PLATEAU",
+            13,
+            "LANDMARK_INDIGO_PLATEAU",
+        ),
+    ]
+    .into_iter()
+    .map(|(flypoint_flag, destination_spawn_identifier, label)| {
+        RuntimeFlyDestinationKey {
+            flypoint_flag: flypoint_flag.to_string(),
+            destination_spawn_identifier,
+            label: label.to_string(),
+        }
+    })
+    .collect::<BTreeSet<_>>();
+    let landmarks = crystal_core::models::PokegearLandmarksPayload {
+        landmarks: [
+            (46, "LANDMARK_SILVER_CAVE", "JOHTO"),
+            (6, "LANDMARK_VIOLET_CITY", "JOHTO"),
+            (1, "LANDMARK_NEW_BARK_TOWN", "JOHTO"),
+            (90, "LANDMARK_INDIGO_PLATEAU", "KANTO"),
+        ]
+        .into_iter()
+        .map(|(id, constant, region)| crystal_core::models::PokegearLandmark {
+            id,
+            constant: constant.to_string(),
+            label: constant.to_string(),
+            name: constant.to_string(),
+            region: region.to_string(),
+            x: 0,
+            y: 0,
+        })
+        .collect(),
+        map_to_landmark: BTreeMap::new(),
+    };
+    let active_flags = ["ENGINE_FLYPOINT_VIOLET".to_string()]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+    let active =
+        ordered_active_fly_destinations(destinations, &landmarks, &active_flags, false)
+            .expect("exact Fly table should resolve");
+
+    assert_eq!(
+        active
+            .iter()
+            .map(|destination| destination.flypoint_flag.as_str())
+            .collect::<Vec<_>>(),
+        ["ENGINE_FLYPOINT_NEW_BARK", "ENGINE_FLYPOINT_VIOLET"]
+    );
+}
+
+#[test]
 fn town_map_markers_project_oam_coordinates_at_full_lcd_scale() {
     let player = crate::core::models::PokegearLandmark {
         id: 1,

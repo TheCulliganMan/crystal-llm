@@ -43,7 +43,7 @@ fn visible_player_withdraw_message(
     runtime_shell: &BevyRuntimeShell,
     snapshot: &RuntimeShellSnapshot,
     nickname: &str,
-) -> String {
+) -> Result<String> {
     let battle = snapshot
         .battle
         .as_ref()
@@ -51,18 +51,24 @@ fn visible_player_withdraw_message(
     let hp_at_send_out = runtime_shell
         .battle_enemy_hp_at_player_send_out
         .expect("player withdrawal requires the enemy HP captured at send-out");
-    let damage = hp_at_send_out.saturating_sub(battle.enemy_pokemon.hp);
-    let percent = if battle.enemy_pokemon.max_hp == 0 {
-        0
-    } else {
-        u32::from(damage).saturating_mul(100) / u32::from(battle.enemy_pokemon.max_hp)
-    };
-    match percent {
+    // WithdrawMonText performs the HP subtraction in two bytes, so healing
+    // above the captured HP wraps exactly as it does on the cartridge. Like
+    // SendOutMonText, it truncates max HP before division and only examines
+    // the quotient's low byte.
+    let damage = hp_at_send_out.wrapping_sub(battle.enemy_pokemon.hp);
+    let divisor = battle.enemy_pokemon.max_hp >> 2;
+    anyhow::ensure!(
+        divisor != 0,
+        "WithdrawMonText would not terminate with enemy max HP {}",
+        battle.enemy_pokemon.max_hp
+    );
+    let percent = ((u32::from(damage) * 25) / u32::from(divisor)) as u8;
+    Ok(match percent {
         0 => format!("{nickname}, that's enough! Come back!"),
         1..=29 => format!("{nickname}, come back!"),
         30..=69 => format!("{nickname}, OK! Come back!"),
         _ => format!("{nickname}, good! Come back!"),
-    }
+    })
 }
 
 fn queue_visible_player_recall_animation(
@@ -151,6 +157,59 @@ fn stage_visible_battle_messages(
         Stat::SpecialDefense => "SPCL.DEF",
         Stat::Accuracy => "ACCURACY",
         Stat::Evasion => "EVASION",
+    };
+    let protected_moves = events
+        .iter()
+        .filter_map(|event| match event {
+            BattleEvent::MoveProtected {
+                side, move_name, ..
+            } => Some((*side, move_name.as_str())),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let command_owned_check_hit_failures = events
+        .iter()
+        .filter_map(|event| match event {
+            BattleEvent::LeechSeedFailed {
+                side, move_name, ..
+            }
+            | BattleEvent::PainSplitFailed {
+                side, move_name, ..
+            }
+            | BattleEvent::MimicFailed {
+                side, move_name, ..
+            }
+            | BattleEvent::EncoreFailed {
+                side, move_name, ..
+            }
+            | BattleEvent::SpiteFailed {
+                side, move_name, ..
+            }
+            | BattleEvent::Conversion2Failed { side, move_name }
+            | BattleEvent::AttractFailed {
+                side, move_name, ..
+            }
+            | BattleEvent::DisableFailed {
+                side, move_name, ..
+            }
+            | BattleEvent::ForesightFailed {
+                side, move_name, ..
+            }
+            | BattleEvent::ForceSwitchFailed {
+                side, move_name, ..
+            }
+            | BattleEvent::LockOnFailed {
+                side, move_name, ..
+            } => Some((*side, move_name.as_str())),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let fail_move_text = |side: BattleSide, move_name: &str| {
+        if protected_moves.contains(&(side, move_name)) {
+            "It failed!".to_string()
+        } else {
+            "But it failed!".to_string()
+        }
     };
     let message_count_before = runtime_shell.battle_messages.len();
     let stage_message_scenes = message_count_before == 0;
@@ -399,6 +458,9 @@ fn stage_visible_battle_messages(
             | BattleEvent::HealFailed {
                 side, move_name, ..
             }
+            | BattleEvent::PainSplitFailed {
+                side, move_name, ..
+            }
             | BattleEvent::FutureSightFailed {
                 side, move_name, ..
             }
@@ -444,6 +506,9 @@ fn stage_visible_battle_messages(
                 side, move_name, ..
             }
             | BattleEvent::EscapeTrapFailed {
+                side, move_name, ..
+            }
+            | BattleEvent::LockOnFailed {
                 side, move_name, ..
             }
             | BattleEvent::OhkoFailed {
@@ -1026,7 +1091,19 @@ fn stage_visible_battle_messages(
                 name(*side),
                 battle_move_display_name(snapshot, move_name)
             )),
+            BattleEvent::Missed {
+                side, move_name, ..
+            } if command_owned_check_hit_failures.contains(&(*side, move_name.as_str())) =>
+            {
+                None
+            }
             BattleEvent::Missed { side, .. } => Some(format!("{}'s\nattack missed!", name(*side))),
+            BattleEvent::AirborneAvoided {
+                side, move_name, ..
+            } if command_owned_check_hit_failures.contains(&(*side, move_name.as_str())) =>
+            {
+                None
+            }
             BattleEvent::AirborneAvoided { target, .. } => {
                 Some(format!("{}\nevaded the attack!", name(*target)))
             }
@@ -1103,16 +1180,26 @@ fn stage_visible_battle_messages(
             BattleEvent::TeleportFailed { .. }
             | BattleEvent::StatusHealFailed { .. }
             | BattleEvent::ConfusionFailed { .. }
-            | BattleEvent::LeechSeedFailed { .. }
             | BattleEvent::CurseFailed { .. }
             | BattleEvent::ConversionFailed { .. }
-            | BattleEvent::Conversion2Failed { .. }
             | BattleEvent::MetronomeFailed { .. }
-            | BattleEvent::MimicFailed { .. }
             | BattleEvent::SketchFailed { .. }
             | BattleEvent::SleepTalkFailed { .. }
             | BattleEvent::MirrorMoveFailed { .. }
             | BattleEvent::ForceSwitchFailed { .. } => Some("But it failed!".to_string()),
+            BattleEvent::Conversion2Failed { side, move_name } => {
+                Some(fail_move_text(*side, move_name))
+            }
+            BattleEvent::MimicFailed {
+                side, move_name, ..
+            } => Some(fail_move_text(*side, move_name)),
+            BattleEvent::LeechSeedFailed { target, .. } => {
+                Some(format!("{}\nevaded the attack!", name(*target)))
+            }
+            BattleEvent::CurseStatsCapped { side, .. } => Some(format!(
+                "{}'s\nABILITY won't\nrise anymore!",
+                name(*side)
+            )),
             BattleEvent::TrapFailed { .. } => None,
             BattleEvent::LeechSeedImmune { target, .. } => {
                 Some(format!("It doesn't affect\n{}!", name(*target)))
@@ -1123,9 +1210,6 @@ fn stage_visible_battle_messages(
                 }
                 crate::core::battle::turn::OhkoFailureReason::Missed { .. } => {
                     "The attack missed!".to_string()
-                }
-                crate::core::battle::turn::OhkoFailureReason::AbilityBlocked { .. } => {
-                    format!("It doesn't affect\n{}!", name(side.other()))
                 }
             }),
             BattleEvent::Disobeyed { .. } if disobedience_nap => None,
@@ -1643,7 +1727,9 @@ fn stage_visible_battle_messages(
             BattleEvent::AttractApplied { target, .. } => {
                 Some(format!("{}\nfell in love!", name(*target)))
             }
-            BattleEvent::AttractFailed { .. } => Some("But it failed!".to_string()),
+            BattleEvent::AttractFailed {
+                side, move_name, ..
+            } => Some(fail_move_text(*side, move_name)),
             BattleEvent::InfatuatedTurn { side, source, .. } => {
                 let message = format!("{}\nis in love with\n{}!", name(*side), name(*source));
                 queue_visible_status_animation(
@@ -1673,14 +1759,18 @@ fn stage_visible_battle_messages(
             BattleEvent::DisableEnded { side, .. } => {
                 Some(format!("{}'s\ndisabled no more!", name(*side)))
             }
-            BattleEvent::DisableFailed { .. } => Some("But it failed!".to_string()),
+            BattleEvent::DisableFailed {
+                side, move_name, ..
+            } => Some(fail_move_text(*side, move_name)),
             BattleEvent::EncoreApplied { target, .. } => {
                 Some(format!("{}\ngot an ENCORE!", name(*target)))
             }
             BattleEvent::EncoreEnded { side, .. } => {
                 Some(format!("{}'s\nENCORE ended!", name(*side)))
             }
-            BattleEvent::EncoreFailed { .. } => Some("But it failed!".to_string()),
+            BattleEvent::EncoreFailed { target, .. } => {
+                Some(format!("It didn't affect\n{}!", name(*target)))
+            }
             BattleEvent::ProtectApplied { side, .. } => {
                 Some(format!("{}\nPROTECTED itself!", name(*side)))
             }
@@ -1712,10 +1802,17 @@ fn stage_visible_battle_messages(
                 Some(format!("{}'s\ngetting pumped!", name(*side)))
             }
             BattleEvent::FocusEnergyFailed { .. } => Some("But it failed!".to_string()),
+            BattleEvent::BellyDrumApplied { side, .. } => Some(format!(
+                "{}\ncut its HP and\nmaximized ATTACK!",
+                name(*side)
+            )),
+            BattleEvent::BellyDrumFailed { .. } => Some("But it failed!".to_string()),
             BattleEvent::ForesightApplied { side, target, .. } => {
                 Some(format!("{}\nidentified\n{}!", name(*side), name(*target)))
             }
-            BattleEvent::ForesightFailed { .. } => Some("But it failed!".to_string()),
+            BattleEvent::ForesightFailed {
+                side, move_name, ..
+            } => Some(fail_move_text(*side, move_name)),
             BattleEvent::NightmareApplied { target, .. } => {
                 Some(format!("{}\nstarted to have a\nNIGHTMARE!", name(*target)))
             }
@@ -1726,6 +1823,8 @@ fn stage_visible_battle_messages(
                     .push_back(format!("{}\ncopied the stat", name(*side)));
                 Some(format!("changes of\n{}!", name(*target)))
             }
+            BattleEvent::PsychUpFailed { .. } => Some("But it failed!".to_string()),
+            BattleEvent::WeatherFailed { .. } => Some("But it failed!".to_string()),
             BattleEvent::TransformApplied { side, species, .. } => Some(format!(
                 "{}\nTRANSFORMED into\n{}!",
                 name(*side),
@@ -1756,6 +1855,9 @@ fn stage_visible_battle_messages(
                 Some("All stat changes\nwere eliminated!".to_string())
             }
             BattleEvent::LockOnApplied { side, .. } => Some(format!("{}\ntook aim!", name(*side))),
+            BattleEvent::LockOnFailed { target, .. } => {
+                Some(format!("It didn't affect\n{}!", name(*target)))
+            }
             BattleEvent::DestinyBondApplied { side, .. } => Some(format!(
                 "{}'s\ntrying to take its\nopponent with it!",
                 name(*side)
@@ -1833,7 +1935,9 @@ fn stage_visible_battle_messages(
                 battle_move_display_name(snapshot, target_move),
                 reduction
             )),
-            BattleEvent::SpiteFailed { .. } => Some("But it failed!".to_string()),
+            BattleEvent::SpiteFailed { target, .. } => {
+                Some(format!("It didn't affect\n{}!", name(*target)))
+            }
             BattleEvent::Splash { .. } => Some("But nothing happened!".to_string()),
             BattleEvent::HealApplied {
                 side, move_name, ..
@@ -1879,6 +1983,9 @@ fn stage_visible_battle_messages(
                 Some(format!("Sucked health from\n{}!", name(*target)))
             }
             BattleEvent::PainSplitApplied { .. } => Some("The battlers\nshared pain!".to_string()),
+            BattleEvent::PainSplitFailed { target, .. } => {
+                Some(format!("It didn't affect\n{}!", name(*target)))
+            }
             BattleEvent::HeldItemHpHealed { side, item_id, .. } => {
                 let message = format!(
                     "{}\nrecovered with\n{}.",
@@ -2184,12 +2291,13 @@ fn stage_visible_battle_messages(
                             runtime_shell,
                             snapshot,
                             &name(BattleSide::Player),
-                        );
+                        )
+                        .expect("player switch event must resolve source withdrawal text");
                         runtime_shell.battle_messages.push_back(withdraw.clone());
                         queue_visible_player_recall_animation(runtime_shell, snapshot, &withdraw);
                     }
                     Some(
-                        visible_player_send_out_message(snapshot, *party_index)
+                        visible_player_send_out_message(snapshot, *party_index, false)
                             .expect("player switch event must resolve source send-out text"),
                     )
                 }
@@ -5010,31 +5118,48 @@ fn active_fly_destinations(
             .progression
             .active_engine_flags
             .contains("ENGINE_FLYPOINT_INDIGO_PLATEAU");
-    Ok(shell
-        .fly_destination_keys()
+    ordered_active_fly_destinations(
+        shell.fly_destination_keys(),
+        &snapshot.presentation.pokegear_landmarks,
+        &snapshot.progression.active_engine_flags,
+        use_kanto_map,
+    )
+}
+
+fn ordered_active_fly_destinations(
+    destinations: BTreeSet<RuntimeFlyDestinationKey>,
+    landmarks: &crystal_core::models::PokegearLandmarksPayload,
+    active_engine_flags: &BTreeSet<String>,
+    use_kanto_map: bool,
+) -> Result<Vec<RuntimeFlyDestinationKey>> {
+    let mut active = Vec::new();
+    for destination in destinations {
+        let landmark = landmarks
+            .landmarks
+            .iter()
+            .find(|landmark| landmark.constant == destination.label)
+            .with_context(|| {
+                format!(
+                    "FLY destination {} references missing Pokégear landmark {}",
+                    destination.flypoint_flag, destination.label
+                )
+            })?;
+        if (landmark.region == "KANTO") != use_kanto_map {
+            continue;
+        }
+        let is_default = if use_kanto_map {
+            destination.label == "LANDMARK_INDIGO_PLATEAU"
+        } else {
+            destination.label == "LANDMARK_NEW_BARK_TOWN"
+        };
+        if is_default || active_engine_flags.contains(&destination.flypoint_flag) {
+            active.push((landmark.id, destination));
+        }
+    }
+    active.sort_by_key(|(landmark_id, _)| *landmark_id);
+    Ok(active
         .into_iter()
-        .filter(|destination| {
-            let destination_is_kanto = snapshot
-                .presentation
-                .pokegear_landmarks
-                .landmarks
-                .iter()
-                .find(|landmark| landmark.constant == destination.label)
-                .is_some_and(|landmark| landmark.region == "KANTO");
-            if destination_is_kanto != use_kanto_map {
-                return false;
-            }
-            let is_default = if use_kanto_map {
-                destination.label == "LANDMARK_INDIGO_PLATEAU"
-            } else {
-                destination.label == "LANDMARK_SILVER_CAVE"
-            };
-            is_default
-                || snapshot
-                    .progression
-                    .active_engine_flags
-                    .contains(&destination.flypoint_flag)
-        })
+        .map(|(_, destination)| destination)
         .collect())
 }
 
@@ -6113,7 +6238,8 @@ fn switch_visible_battle_party_without_turn(
         switched.party_index, switched.state_checksum
     ));
     let replacement = runtime_shell.shell.snapshot()?;
-    let send_out_message = visible_player_send_out_message(&replacement, switched.party_index)?;
+    let send_out_message =
+        visible_player_send_out_message(&replacement, switched.party_index, false)?;
     runtime_shell
         .battle_messages
         .push_back(send_out_message.clone());
@@ -6207,9 +6333,13 @@ fn switch_visible_trainer_shift_party_without_turn(
         .find(|slot| slot.index == outgoing_index)
         .map(|slot| slot.pokemon.nickname.as_str())
         .context("trainer Shift switch is missing the outgoing party member")?;
-    let withdraw_message =
-        visible_player_withdraw_message(runtime_shell, &enemy_send_out_scene, outgoing_nickname);
-    let send_out_message = visible_player_send_out_message(&replacement, switched.party_index)?;
+    let withdraw_message = visible_player_withdraw_message(
+        runtime_shell,
+        &enemy_send_out_scene,
+        outgoing_nickname,
+    )?;
+    let send_out_message =
+        visible_player_send_out_message(&replacement, switched.party_index, false)?;
     runtime_shell
         .battle_messages
         .push_back(withdraw_message.clone());
@@ -7026,14 +7156,35 @@ fn push_visible_battle_reward_events(
                 learned_moves: recipient.learned_moves.clone(),
                 pending_move_learns: recipient.pending_move_learns.clone(),
                 deferred_level_evolution: false,
-                evolution: recipient.evolution.clone(),
+                evolution: Default::default(),
                 recipient_outcomes: Vec::new(),
+                post_battle_evolutions: Vec::new(),
             };
             push_visible_battle_reward_events(
                 runtime_shell,
                 &projected,
                 recipient.party_index,
                 &recipient.nickname,
+            )?;
+        }
+        for evolution in &outcome.post_battle_evolutions {
+            let projected = crate::core::systems::battle_rewards::BattleRewardOutcome {
+                defeated_species: outcome.defeated_species.clone(),
+                experience_awarded: 0,
+                level_before: 0,
+                level_after: 0,
+                learned_moves: Vec::new(),
+                pending_move_learns: Vec::new(),
+                deferred_level_evolution: false,
+                evolution: evolution.evolution.clone(),
+                recipient_outcomes: Vec::new(),
+                post_battle_evolutions: Vec::new(),
+            };
+            push_visible_battle_reward_events(
+                runtime_shell,
+                &projected,
+                evolution.party_index,
+                &evolution.nickname,
             )?;
         }
         return Ok(());
@@ -7124,6 +7275,7 @@ fn push_visible_battle_reward_events(
                     evolved_message: evolved_message.clone(),
                     pending_move_messages,
                     report: outcome.evolution.clone(),
+                    accepted: false,
                 });
         }
         runtime_shell

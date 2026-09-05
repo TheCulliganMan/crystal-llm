@@ -2495,6 +2495,10 @@ pub enum RuntimeMutationCommand {
     ApplyScriptMap(RuntimeScriptCommandRef),
     ApplyRandomScriptMap(RuntimeRandomScriptMapCommand),
     TransitionPendingScriptWarp,
+    TransitionToSpawnPoint {
+        spawn_identifier: u16,
+        map_setup: String,
+    },
     ApplyMapSetupCallbacks {
         map_setup: String,
     },
@@ -2984,7 +2988,7 @@ pub enum RuntimeScriptRuntimeMemoryEntryRemoved {
     PhoneNumber { key: String },
 }
 
-pub const RUNTIME_MUTATION_COMMAND_SCHEMA: &str = "crystal_runtime_mutation_command_v49";
+pub const RUNTIME_MUTATION_COMMAND_SCHEMA: &str = "crystal_runtime_mutation_command_v50";
 
 pub fn encode_runtime_mutation_command_payload(
     command: &RuntimeMutationCommand,
@@ -3282,7 +3286,7 @@ fn full_heal_party_slot(
             )
         })?;
         let before_pp = learned.current_pp;
-        let after_pp = move_data.pp;
+        let after_pp = crystal_core::models::max_move_pp(move_data.pp, learned.pp_ups);
         learned.current_pp = after_pp;
         pp_restored.push((learned.name.clone(), before_pp, after_pp));
     }
@@ -3290,6 +3294,7 @@ fn full_heal_party_slot(
         pokemon.hp = pokemon.max_hp;
     }
     pokemon.status = None;
+    pokemon.sleep_turns = 0;
     let outcome = PartyRecoveryOutcome {
         party_index,
         species_id: pokemon.species.id.clone(),
@@ -3558,6 +3563,10 @@ pub enum RuntimeMutationResult {
     ScriptAudioApplied(ScriptAudioCue),
     ScriptMapApplied(ScriptMapAction),
     PendingScriptWarpTransitioned(ScriptWarpRequest),
+    SpawnPointTransitioned {
+        spawn_identifier: u16,
+        map_name: String,
+    },
     MapSetupCallbacksApplied(String),
     ScriptTextApplied(ScriptTextAction),
     ScriptVariableApplied(ScriptVariableOutcome),
@@ -3789,6 +3798,7 @@ impl RuntimeMutationResult {
             Self::ScriptAudioApplied(_) => "script_audio_applied",
             Self::ScriptMapApplied(_) => "script_map_applied",
             Self::PendingScriptWarpTransitioned(_) => "pending_script_warp_transitioned",
+            Self::SpawnPointTransitioned { .. } => "spawn_point_transitioned",
             Self::MapSetupCallbacksApplied(_) => "map_setup_callbacks_applied",
             Self::ScriptTextApplied(_) => "script_text_applied",
             Self::ScriptVariableApplied(_) => "script_variable_applied",

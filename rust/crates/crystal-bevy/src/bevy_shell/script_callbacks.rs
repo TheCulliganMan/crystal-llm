@@ -2474,6 +2474,11 @@ fn begin_visible_gift_pokemon(
         runtime_shell.pending_name_choice = Some(VisibleNameChoice {
             options: vec!["YES".to_string(), "NO".to_string()],
             selected: 0,
+            player_menu: None,
+            player_phase: None,
+            motion_step: 0,
+            motion_frames_remaining: 0,
+            pending_player_name: None,
         });
         runtime_shell
             .last_audio_events
@@ -3217,6 +3222,7 @@ fn use_selected_rare_candy(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                     pending_move_learns: used.item_effect.pending_move_learns.clone(),
                     cancel_snapshot: Some(cancel_snapshot),
                 },
+                accepted: false,
             });
         }
     }

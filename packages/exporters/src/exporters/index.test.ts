@@ -325,8 +325,12 @@ const mockExportTypeCategories = jest.fn(() => {
 const mockExportTypeEffectivenessTable = jest.fn(() => {
   mockCalls.push("exportTypeEffectivenessTable");
   return {
-    matchups: { FIRE: { GRASS: { numerator: 2, denominator: 1 } } },
-    foresight_matchups: { NORMAL: { GHOST: { numerator: 0, denominator: 1 } } },
+    matchups: [
+      { attacker: "FIRE", defender: "GRASS", multiplier: { numerator: 2, denominator: 1 } },
+    ],
+    foresight_matchups: [
+      { attacker: "NORMAL", defender: "GHOST", multiplier: { numerator: 0, denominator: 1 } },
+    ],
   };
 });
 const mockExportWeatherModifiers = jest.fn(() => {
@@ -733,8 +737,12 @@ describe("exportCoreData", () => {
       },
       typeCategories: { physical: ["NORMAL"], special: ["FIRE"] },
       typeEffectiveness: {
-        matchups: { FIRE: { GRASS: { numerator: 2, denominator: 1 } } },
-        foresight_matchups: { NORMAL: { GHOST: { numerator: 0, denominator: 1 } } },
+        matchups: [
+          { attacker: "FIRE", defender: "GRASS", multiplier: { numerator: 2, denominator: 1 } },
+        ],
+        foresight_matchups: [
+          { attacker: "NORMAL", defender: "GHOST", multiplier: { numerator: 0, denominator: 1 } },
+        ],
       },
       weatherModifiers: {
         type_modifiers: [

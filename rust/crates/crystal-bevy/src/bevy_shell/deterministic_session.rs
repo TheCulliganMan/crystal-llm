@@ -166,7 +166,13 @@ fn apply_keyboard_input(
     log_visible_key_presses(&mut runtime_shell, &keys);
     let title_input_active = runtime_shell.title_menu.is_some();
     if let Some(title) = runtime_shell.title_menu.as_mut()
-        && !matches!(title.phase, VisibleTitlePhase::MainMenu)
+        && matches!(
+            title.source_phase(),
+            VisibleTitlePhase::Entrance
+                | VisibleTitlePhase::Timer
+                | VisibleTitlePhase::PressStart
+                | VisibleTitlePhase::FadeOut
+        )
     {
         let pressed_mask = [
             (KeyCode::KeyZ, 0x01_u8),
@@ -3828,29 +3834,7 @@ fn apply_runtime_hotkeys(
         return;
     }
     if runtime_shell.pending_time_set.is_some() {
-        if keys.just_pressed(KeyCode::ArrowUp) {
-            run_bevy_action(&mut runtime_shell, |shell| {
-                move_visible_time_set_direction(shell, VisibleTimeSetDirection::Up)
-            });
-        }
-        if keys.just_pressed(KeyCode::ArrowDown) {
-            run_bevy_action(&mut runtime_shell, |shell| {
-                move_visible_time_set_direction(shell, VisibleTimeSetDirection::Down)
-            });
-        }
-        if keys.just_pressed(KeyCode::ArrowLeft) {
-            run_bevy_action(&mut runtime_shell, |shell| {
-                move_visible_time_set_direction(shell, VisibleTimeSetDirection::Left)
-            });
-        }
-        if keys.just_pressed(KeyCode::ArrowRight) {
-            run_bevy_action(&mut runtime_shell, |shell| {
-                move_visible_time_set_direction(shell, VisibleTimeSetDirection::Right)
-            });
-        }
-        if keys.just_pressed(KeyCode::KeyZ) {
-            run_bevy_action(&mut runtime_shell, press_visible_time_set_a_button);
-        }
+        apply_visible_time_set_input_keys(&keys, &mut runtime_shell, elapsed_input_ticks);
         if keys.just_pressed(KeyCode::KeyX) {
             run_bevy_action(&mut runtime_shell, press_visible_time_set_b_button);
         }
@@ -3939,6 +3923,13 @@ fn apply_runtime_hotkeys(
                 shell.pending_name_choice = None;
                 finish_visible_gift_pokemon_nickname(shell, None)
             });
+        }
+        for _ in 0..elapsed_input_ticks {
+            if let Err(error) = tick_visible_player_name_choice(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                break;
+            }
         }
         return;
     }
@@ -4116,7 +4107,7 @@ fn apply_runtime_hotkeys(
         let Some(title) = runtime_shell.title_menu.as_mut() else {
             return;
         };
-        if !matches!(title.phase, VisibleTitlePhase::MainMenu) {
+        if !matches!(title.source_phase(), VisibleTitlePhase::MainMenu) {
             return;
         }
         if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowDown) {
@@ -4377,7 +4368,9 @@ fn apply_visible_runtime_controls(
             runtime_shell.ui_direction_repeat_ticks =
                 visible_ui_initial_repeat_ticks(runtime_shell);
         } else if let Some(direction) = active_held_direction {
-            let repeated = advance_repeat && runtime_shell.ui_direction_repeat_ticks == 0;
+            let repeated = advance_repeat
+                && runtime_shell.ui_direction_repeat_ticks == 0
+                && visible_ui_direction_can_repeat(runtime_shell);
             if repeated {
                 dispatch_visible_ui_direction(runtime_shell, direction);
                 runtime_shell.ui_direction_repeat_ticks = 4;
@@ -4429,6 +4422,116 @@ fn apply_visible_runtime_controls(
     if keys.just_pressed(KeyCode::Enter) && plain_input {
         if has_visible_shell_start_action(runtime_shell) {
             run_bevy_nonadvancing_action(runtime_shell, press_visible_start_button);
+        }
+    }
+}
+
+fn visible_ui_direction_can_repeat(runtime_shell: &BevyRuntimeShell) -> bool {
+    // MoveSelectionScreen calls ScrollingMenuJoypad without setting hInMenu.
+    // Therefore JoyTextDelay is edge-only before Credits and admits held
+    // directions after Credits leaks TRUE into hInMenu.
+    runtime_shell.battle_move_cursor.is_none() || runtime_shell.h_in_menu != 0
+}
+
+fn apply_visible_time_set_input_keys(
+    keys: &ButtonInput<KeyCode>,
+    runtime_shell: &mut BevyRuntimeShell,
+    elapsed_input_ticks: u32,
+) {
+    // SetHour/SetMinutes test newly pressed A before hJoyLast directions.
+    if keys.just_pressed(KeyCode::KeyZ) {
+        runtime_shell.ui_held_direction = None;
+        runtime_shell.ui_direction_repeat_ticks = 0;
+        run_bevy_action(runtime_shell, press_visible_time_set_a_button);
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyX) {
+        runtime_shell.ui_held_direction = None;
+        runtime_shell.ui_direction_repeat_ticks = 0;
+        run_bevy_action(runtime_shell, press_visible_time_set_b_button);
+        return;
+    }
+    let Some((phase, selector_active, first_repeat_frames, later_repeat_frames)) = runtime_shell
+        .pending_time_set
+        .as_ref()
+        .map(|time_set| {
+            (
+                time_set.phase,
+                matches!(
+                    time_set.phase,
+                    VisibleTimeSetPhase::SetHour | VisibleTimeSetPhase::SetMinute
+                ) && time_set.input_delay_frames == 0,
+                time_set.direction_first_repeat_frames,
+                time_set.direction_later_repeat_frames,
+            )
+        })
+    else {
+        return;
+    };
+    if matches!(
+        phase,
+        VisibleTimeSetPhase::HourConfirm | VisibleTimeSetPhase::MinuteConfirm
+    ) {
+        runtime_shell.ui_held_direction = None;
+        runtime_shell.ui_direction_repeat_ticks = 0;
+        if keys.just_pressed(KeyCode::ArrowUp) {
+            run_bevy_action(runtime_shell, |shell| {
+                move_visible_time_set_direction(shell, VisibleTimeSetDirection::Up)
+            });
+        } else if keys.just_pressed(KeyCode::ArrowDown) {
+            run_bevy_action(runtime_shell, |shell| {
+                move_visible_time_set_direction(shell, VisibleTimeSetDirection::Down)
+            });
+        }
+        return;
+    }
+    if !selector_active {
+        runtime_shell.ui_held_direction = None;
+        runtime_shell.ui_direction_repeat_ticks = 0;
+        return;
+    }
+    let held_direction = if keys.pressed(KeyCode::ArrowUp) {
+        Some((KeyCode::ArrowUp, GameButton::Up, VisibleTimeSetDirection::Up))
+    } else if keys.pressed(KeyCode::ArrowDown) {
+        Some((
+            KeyCode::ArrowDown,
+            GameButton::Down,
+            VisibleTimeSetDirection::Down,
+        ))
+    } else {
+        None
+    };
+    let Some((key, button, direction)) = held_direction else {
+        runtime_shell.ui_held_direction = None;
+        runtime_shell.ui_direction_repeat_ticks = 0;
+        return;
+    };
+    if keys.just_pressed(key) {
+        run_bevy_action(runtime_shell, |shell| {
+            move_visible_time_set_direction(shell, direction)
+        });
+        runtime_shell.ui_held_direction = Some(button);
+        runtime_shell.ui_direction_repeat_ticks = first_repeat_frames.saturating_sub(1);
+        return;
+    }
+    if runtime_shell.ui_held_direction != Some(button) {
+        // hInMenu makes hJoyDown visible even if the physical press began
+        // during the selector's ten blocking DelayFrames.
+        run_bevy_action(runtime_shell, |shell| {
+            move_visible_time_set_direction(shell, direction)
+        });
+        runtime_shell.ui_held_direction = Some(button);
+        runtime_shell.ui_direction_repeat_ticks = later_repeat_frames.saturating_sub(1);
+        return;
+    }
+    for _ in 0..elapsed_input_ticks {
+        if runtime_shell.ui_direction_repeat_ticks == 0 {
+            run_bevy_action(runtime_shell, |shell| {
+                move_visible_time_set_direction(shell, direction)
+            });
+            runtime_shell.ui_direction_repeat_ticks = later_repeat_frames.saturating_sub(1);
+        } else {
+            runtime_shell.ui_direction_repeat_ticks -= 1;
         }
     }
 }
@@ -4914,6 +5017,124 @@ fn restore_visible_cancelled_evolution(
     Ok(source_name)
 }
 
+fn record_visible_completed_evolution(
+    runtime_shell: &mut BevyRuntimeShell,
+    party_index: usize,
+) -> Result<()> {
+    let state = runtime_shell.shell.session_mut().state_mut();
+    let evolved = state
+        .storage
+        .party
+        .pokemon
+        .get(party_index)
+        .and_then(Option::as_ref)
+        .with_context(|| format!("completed evolution party index {party_index} is empty"))?
+        .clone();
+    state.pokedex.record_caught_pokemon(&evolved);
+    Ok(())
+}
+
+fn visible_evolution_moves_resolved(
+    runtime_shell: &BevyRuntimeShell,
+    cancellation: &VisibleEvolutionCancellation,
+) -> bool {
+    let pending_names = cancellation
+        .report
+        .pending_move_learns
+        .iter()
+        .map(|learned| learned.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let state = &runtime_shell.shell.session().state;
+    !state
+        .pending_move_learn
+        .iter()
+        .chain(state.pending_move_learn_queue.iter())
+        .any(|pending| {
+            pending.party_index == cancellation.party_index
+                && pending_names.contains(pending.learned_move.name.as_str())
+        })
+}
+
+fn complete_visible_accepted_evolution_after_battle_message(
+    runtime_shell: &mut BevyRuntimeShell,
+    dismissed_message: Option<&str>,
+) -> Result<()> {
+    let battle_party_index = runtime_shell
+        .battle_evolution_cancellations
+        .front()
+        .filter(|cancellation| {
+            cancellation.accepted
+                && visible_evolution_moves_resolved(runtime_shell, cancellation)
+                && if cancellation.report.pending_move_learns.is_empty() {
+                    dismissed_message == Some(cancellation.evolved_message.as_str())
+                } else {
+                    cancellation
+                        .pending_move_messages
+                        .last()
+                        .is_some_and(|message| dismissed_message == Some(message.as_str()))
+                }
+        })
+        .map(|cancellation| cancellation.party_index);
+    if let Some(party_index) = battle_party_index {
+        runtime_shell.battle_evolution_cancellations.pop_front();
+        record_visible_completed_evolution(runtime_shell, party_index)?;
+    }
+    let field_party_index = runtime_shell
+        .field_evolution_cancellation
+        .as_ref()
+        .filter(|cancellation| {
+            cancellation.accepted
+                && !cancellation.report.pending_move_learns.is_empty()
+                && visible_evolution_moves_resolved(runtime_shell, cancellation)
+                && cancellation
+                    .pending_move_messages
+                    .last()
+                    .is_some_and(|message| dismissed_message == Some(message.as_str()))
+        })
+        .map(|cancellation| cancellation.party_index);
+    if let Some(party_index) = field_party_index {
+        runtime_shell.field_evolution_cancellation = None;
+        record_visible_completed_evolution(runtime_shell, party_index)?;
+    }
+    Ok(())
+}
+
+fn complete_visible_accepted_evolution_after_special_boundary(
+    runtime_shell: &mut BevyRuntimeShell,
+    boundary_label: &str,
+) -> Result<()> {
+    if boundary_label != "LearnedMoveText" {
+        return Ok(());
+    }
+    let battle_party_index = runtime_shell
+        .battle_evolution_cancellations
+        .front()
+        .filter(|cancellation| {
+            cancellation.accepted
+                && !cancellation.report.pending_move_learns.is_empty()
+                && visible_evolution_moves_resolved(runtime_shell, cancellation)
+        })
+        .map(|cancellation| cancellation.party_index);
+    if let Some(party_index) = battle_party_index {
+        runtime_shell.battle_evolution_cancellations.pop_front();
+        record_visible_completed_evolution(runtime_shell, party_index)?;
+    }
+    let field_party_index = runtime_shell
+        .field_evolution_cancellation
+        .as_ref()
+        .filter(|cancellation| {
+            cancellation.accepted
+                && !cancellation.report.pending_move_learns.is_empty()
+                && visible_evolution_moves_resolved(runtime_shell, cancellation)
+        })
+        .map(|cancellation| cancellation.party_index);
+    if let Some(party_index) = field_party_index {
+        runtime_shell.field_evolution_cancellation = None;
+        record_visible_completed_evolution(runtime_shell, party_index)?;
+    }
+    Ok(())
+}
+
 fn cancel_visible_battle_evolution(runtime_shell: &mut BevyRuntimeShell) -> Result<bool> {
     let Some(cancellation) = runtime_shell.battle_evolution_cancellations.front() else {
         return Ok(false);
@@ -4921,7 +5142,8 @@ fn cancel_visible_battle_evolution(runtime_shell: &mut BevyRuntimeShell) -> Resu
     let Some(message) = runtime_shell.battle_messages.front() else {
         return Ok(false);
     };
-    if message != &cancellation.trigger_message
+    if cancellation.accepted
+        || message != &cancellation.trigger_message
         || !visible_battle_message_is_complete(runtime_shell, message)
     {
         return Ok(false);
@@ -4997,7 +5219,9 @@ fn cancel_visible_field_evolution(runtime_shell: &mut BevyRuntimeShell) -> Resul
     let Some(cancellation) = runtime_shell.field_evolution_cancellation.as_ref() else {
         return Ok(false);
     };
-    if runtime_shell.field_notice.as_deref() != Some(cancellation.trigger_message.as_str()) {
+    if cancellation.accepted
+        || runtime_shell.field_notice.as_deref() != Some(cancellation.trigger_message.as_str())
+    {
         return Ok(false);
     }
     let snapshot = runtime_shell.shell.presentation_snapshot()?;
@@ -5232,15 +5456,16 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 .unwrap();
             queue_visible_shell_sound_effect(runtime_shell, &sound_id)?;
         }
-        if runtime_shell
-            .battle_evolution_cancellations
-            .front()
-            .is_some_and(|cancellation| {
-                dismissed_battle_message.as_deref() == Some(cancellation.trigger_message.as_str())
-            })
+        if let Some(cancellation) = runtime_shell.battle_evolution_cancellations.front_mut()
+            && dismissed_battle_message.as_deref()
+                == Some(cancellation.trigger_message.as_str())
         {
-            runtime_shell.battle_evolution_cancellations.pop_front();
+            cancellation.accepted = true;
         }
+        complete_visible_accepted_evolution_after_battle_message(
+            runtime_shell,
+            dismissed_battle_message.as_deref(),
+        )?;
         let starts_exp_animation = runtime_shell
             .battle_exp_tween
             .as_ref()
@@ -5739,16 +5964,25 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     {
         queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
     }
-    if let Some(target_species) = runtime_shell
+    if let Some(cancellation) = runtime_shell.field_evolution_cancellation.as_mut()
+        && runtime_shell.field_notice.as_deref() == Some(cancellation.trigger_message.as_str())
+    {
+        cancellation.accepted = true;
+        runtime_shell.pending_field_notice_cry = cancellation.report.target_species.clone();
+    }
+    let completed_evolution_party_index = runtime_shell
         .field_evolution_cancellation
         .as_ref()
         .filter(|cancellation| {
-            runtime_shell.field_notice.as_deref() == Some(cancellation.trigger_message.as_str())
+            cancellation.accepted
+                && cancellation.report.pending_move_learns.is_empty()
+                && runtime_shell.field_notice.as_deref()
+                    == Some(cancellation.evolved_message.as_str())
         })
-        .and_then(|cancellation| cancellation.report.target_species.clone())
-    {
+        .map(|cancellation| cancellation.party_index);
+    if let Some(party_index) = completed_evolution_party_index {
         runtime_shell.field_evolution_cancellation = None;
-        runtime_shell.pending_field_notice_cry = Some(target_species);
+        record_visible_completed_evolution(runtime_shell, party_index)?;
     }
     if runtime_shell.field_notice.take().is_some() {
         if runtime_shell
@@ -5832,6 +6066,11 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             runtime_shell.pending_name_choice = Some(VisibleNameChoice {
                 options: vec!["YES".to_string(), "NO".to_string()],
                 selected: 0,
+                player_menu: None,
+                player_phase: None,
+                motion_step: 0,
+                motion_frames_remaining: 0,
+                pending_player_name: None,
             });
             set_shell_action_status(runtime_shell, "NICKNAME HATCHED POKEMON");
             mark_runtime_snapshot_dirty(runtime_shell);
@@ -6421,6 +6660,11 @@ fn continue_visible_capture_after_owned_surface(
         runtime_shell.pending_name_choice = Some(VisibleNameChoice {
             options: vec!["YES".to_string(), "NO".to_string()],
             selected: 0,
+            player_menu: None,
+            player_phase: None,
+            motion_step: 0,
+            motion_frames_remaining: 0,
+            pending_player_name: None,
         });
         set_shell_action_status(runtime_shell, "NICKNAME CAUGHT POKEMON");
         mark_runtime_snapshot_dirty(runtime_shell);
@@ -6511,6 +6755,15 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         return close_visible_mail_read(runtime_shell);
     }
     if runtime_shell.pending_name_choice.is_some() {
+        if runtime_shell
+            .pending_name_choice
+            .as_ref()
+            .is_some_and(|choice| choice.player_menu.is_some())
+        {
+            // ShowPlayerNamingChoices sets STATICMENU_DISABLE_B. The custom
+            // return phases are part of the same blocking NamePlayer call.
+            return Ok(());
+        }
         runtime_shell.pending_name_choice = None;
         if runtime_shell.pending_egg_hatch_nickname.is_some() {
             return finish_visible_egg_hatch_nickname(runtime_shell, None);

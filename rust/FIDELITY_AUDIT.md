@@ -18,11 +18,17 @@ existing Rust tests are implementation evidence only.
 
 ## Initial production findings
 
+- Credits now distinguishes its WRAM tilemap from transferred VRAM. The source's `CREDITS_THEEND, CREDITS_WAIT 20, CREDITS_END` sequence re-enters `ParseCredits` after the hold and clears WRAM rows 5–16, but first disables `hBGMapMode`; the already-transferred 8×2 THE END graphic therefore remains visible while A is accepted. A SHA-pinned PyBoy oracle that redirects only `CrystalIntro` through the ROM's unmodified `RedCredits` lifecycle proves that boundary frame is pixel-identical to the preceding frame while retaining the real fade, font loading, white palette setup, delay, and `Credits` call. Rust now advances `hBGMapThird` through top/middle/bottom on each enabled VBlank, commits text rows only when their third transfers, preserves the text engine's two-tile-row `<NEXT>` stride even when a string crosses a hardware-third boundary, expands encoded `$54` through `PlacePOKEText` into the displayed `POKé` tiles, delays THE END until its middle-third transfer, and retains its displayed pixels after the untransferred final WRAM clear. The credits bitmap decoder also uses the canonical four grayscale buckets; its former thresholds changed source color 2 into color 3 and painted the blue border wave white. The scanline compositor preserves the hardware-latched final SCX value after each eight-byte `wLYOverrides` band, producing the ROM's nine shifted lines at both borders. Full-screen normalized-RGB5 hashes now match the ROM for the blank top transfer, the first two STAFF rows, the completed three-third STAFF transfer, and the complete B-accelerated run's A-ready exit frame.
+- `InitClock` now models its saved `hInMenu` byte as live runtime state rather than validation-only metadata: entry saves the prior byte and writes one, and final acknowledgement restores it. The exporter certifies `JoyTextDelay`'s 15-count press seed and 5-count restart, each selector redraw's four-frame `WaitBGMap`, and the no-direction `DelayFrame` in both `SetHour` and `SetMinutes`. From those source loops it emits the observable ten-frame first repeat and five-frame later repeat. Rust accepts continuously held Up/Down at those exact boundaries, including a hold begun during the selector's blocking ten-frame entry delay; A retains priority and Left/Right/B remain ignored in the numeric selectors. The live keyboard path preserves Up/Down movement in the following YES/NO menus and now routes B there as the source cancel rather than swallowing it for the entire clock flow.
+- `InitClock`'s live selector now consumes the exported default hour/minute, exact hour/minute domains, ten-frame post-draw input delay, Up/Down-only direction contract, ten source text entries, and morning/day/night response map. The copied ASCII wake/reaction strings are deleted: typed `text`/`line`/`cont`/terminal commands preserve the first two-line ellipsis screen, the exact Unicode dialogue, and response scrolling. `SetHour` and `SetMinutes` ignore B and Left/Right exactly as their ASM loops do; Rust previously navigated backward on B and changed minutes with Left/Right. Entry now executes the exported `MUSIC_NONE` fade request and source-timed 79-frame transition: eight frames retaining the confirmed gender screen, four eight-frame palette steps to black, three one-frame `Request1bpp` transfers plus four `WaitBGMap` frames while black, and four eight-frame palette steps revealing the cleared clock screen before `OakTimeWokeUpText` starts. The exported setup also certifies the tilemap/sprite clears, Diploma layout, BG-map disable, standard font, and exact three GFX/tile destinations. Sprite-update register ownership still needs to move into the generic presentation interpreter.
+- OakSpeech portrait presentation now consumes its four exported ASM-derived portrait operations. Each Oak/player reveal uses the source six palette words at ten frames per word; Wooper's window starts at `$77`, waits one frame, subtracts eight through `$07`, and terminates before writing `$ff`. Rendering applies the hardware `WX - 7` boundary, correcting the old left-to-right host wipe to Crystal's right-to-left reveal. The three following `RotateThreePalettesRight`/`ClearTilemap` transitions are separate exported dismissal operations, and Rust reads their three-word/eight-frame timing instead of retaining the duplicate constant. All Oak text now comes from typed, source-spanned `text`/`line`/`cont`/`para`/prompt/terminal commands resolved through each `text_far` target; the copied prose arrays are deleted. This corrects OakText2 to its three source scroll states, makes OakText7's two `cont` passages eight visible states, and retains OakText3's prompt only after the exported embedded Wooper cry finishes `WaitSFX`. Credits remain in the larger presentation-program gap.
+- `NamePlayer` now consumes both source branches from exported metadata. The preset menu uses the gender-specific ASM arrays rather than Rust copies of CHRIS/KRIS and their alternatives; its title, title indent, default row, disabled-B behavior, and inclusive `menu_coords 0,0,10,11` geometry are validated, replacing an invented 12×14 window and displaced text. The shared eight-step `MovePlayerPic` loop executes four `WaitBGMap` frames plus one `DelayFrame` per step, shifting the retained portrait from tile x=6 through x=13 for 40 frames before input and back for 40 frames before a preset commits. `NEW NAME` now retains NamingScreen through the exact 24-frame `RotateThreePalettesRight`, clears the tilemap, holds the four-frame `WaitBGMap`, redraws the 7×7 gendered portrait at 6,4 without inventing the cleared OakText6 textbox, and reveals it through the exact 24-frame `RotateThreePalettesLeft`; only then does `InitName` commit the typed value or the gendered CHRIS/KRIS fallback and open OakText7. Headless smoke consumes the same choreography, and B remains disabled across the blocking NamePlayer menu/return call.
+- Credits no longer reads `data/credits_script.asm`, `constants/credits_constants.asm`, or `data/credits_strings.asm` from a vendor checkout during play. The exporter now embeds their source-certified contents in the required presentation payload, registers `MUSIC_CREDITS` and `MUSIC_POST_CREDITS`, derives the `$0d` B-skip position threshold from `Credits_HandleBButton`, and Rust decodes the complete operation/constant/string/tile program once when Credits opens. `CREDITS_WAIT` performs its distinct `hBGMapThird=0`/`hBGMapMode=1` update while `CREDITS_WAIT2` does not; enabled VBlanks now commit the exact six-row thirds into retained display state instead of drawing newly parsed text immediately. `CREDITS_MUSIC` preserves the source `MUSIC_NONE` → one `DelayFrame` → `MUSIC_CREDITS` ordering instead of queueing both requests in one host step. `CREDITS_END` starts the exact rate-32 fade toward `MUSIC_POST_CREDITS`, leaves the credits track active while that fade runs, and the live THE END jumptable continues until A with its stale VRAM graphic intact. That A press enters the source `ClearBGPalettes` teardown: the exporter certifies the CGB `$ff` palette-buffer fill and `WaitBGMap`'s four `DelayFrames`, Rust renders the resulting all-white LCD for that blocking interval, and only then returns without stopping the music fade. The certified setup and exact exit-without-restore blocks also expose the original `hInMenu=TRUE` leak: battle move Up/Down remains edge-only before Credits and admits continuous held input afterward. `tools/asm-oracle/credits_trace.py` SHA-checks the canonical ROM, applies a temporary standard farcall dispatch through `RedCredits`, and emits event LCD hashes plus optional PPMs for setup, all BG thirds, THE END, A, and teardown. Credits setup, jumptable scheduling, border transfer, and teardown state are still expressed by the handwritten visible state rather than the generic presentation interpreter.
 - All 20 exact `QueueScript` targets in `engine/events/overworld.asm` are now exported as canonical global script roots instead of depending on test injection or incidental reachability. Definition-only CPU closures for Fly and Headbutt presentation stay out of the script cursor catalog and are source-fingerprint certified. The queued Surf path materializes its live-facing `wMovementBuffer`, Waterfall samples live `wPlayerTileCollision`, and `TreeMonEncounter` runs through an exact source-certified, DIV-traced mutation that writes `wTempWildMonSpecies`, `wCurPartyLevel`, `wBattleType`, and `wScriptVar` before the script's ordinary `randomwildmon`/`startbattle` continuation. `text_asm` is treated as the static-text/embedded-code boundary rather than parsed as text bytecode.
 - Cry PCM rendering now follows the cartridge parameter boundary: it accepts `wCryPitch`/`wCryLength`, applies the 16-bit pitch addition to raw and symbolic tonal frequencies, replaces tempo only for non-noise channels, and preserves noise timing. The core exporter renders normal, Growl (`length + $c0`), and Roar (`length + $40`) PCM for every species, and Rust selects those exact species assets from `anim_cry` selectors 2/3, 0, and 1 respectively. Ordinary species cries also use the species-rendered normal asset instead of the unmodified shared base cry.
 - Used move-effect command routing is now checked exhaustively against the source pointer table and compiled effect bodies for `checkhit`, `effectchance`, and `kingsrock`. The comparison includes Bide's release-only shared hit gate and PoisonMultiHit's per-hit chance sampler as explicit control-flow placements. King's Rock now follows the exact scripts that contain `kingsrock`; built-in flinch scripts such as Headbutt no longer receive a second held-item flinch roll.
 - Battle animation packs and the visible timeline compiler now accept only the 36 opcodes in Crystal's `data/moves/animations.asm` command language (plus local labels). Rust previously validated commands as arbitrary nonempty strings and silently treated unknown opcodes as no-ops, allowing exporter drift or malformed packs to produce incomplete but plausible animations. Catalog and deserialization regressions reject unknown commands before presentation.
-- Intro sprite-animation input now crosses a typed, fail-closed boundary shared by intro and field-move OAM consumers. Missing piece coordinates/tiles/attributes, missing frames or OAM targets, unknown frame commands, invalid frame flags, truncated 32×32 tile/attribute maps, missing palette banks, and out-of-range graphic tiles are errors instead of zero defaults, skipped sprites, palette-first substitution, short-map acceptance, or modulo wrapping. Pack-owned sprite initialization, local-label control flow, callback instructions, and framesets now drive the live runner, including the `wSlotsDelay`/`wIntroSceneFrameCounter` WRAM alias that switches Unown F at `$40`. The remaining intro gap is resource-transfer/scene-program execution and ROM checkpoint parity, not permissive asset or callback interpretation.
+- Intro sprite-animation input now crosses a typed, fail-closed boundary shared by intro and field-move OAM consumers. Missing piece coordinates/tiles/attributes, missing frames or OAM targets, unknown frame commands, invalid frame flags, truncated 32×32 tile/attribute maps, missing palette banks, and out-of-range graphic tiles are errors instead of zero defaults, skipped sprites, palette-first substitution, short-map acceptance, or modulo wrapping. Pack-owned sprite initialization, local-label control flow, callback instructions, and framesets now drive the live runner, including the `wSlotsDelay`/`wIntroSceneFrameCounter` WRAM alias that switches Unown F at `$40`. `tools/asm-oracle/intro_trace.py` now SHA-checks and runs the unmodified ROM boot, verifies all 28 scene transitions, and records 56 first/last boundary checkpoints over the cartridge's 2,442-frame CrystalIntro execution, including normalized LCD, both BG maps and attribute maps, exact OAM bytes, palette buffers, LY overrides, and display registers. Its optional timing trace records every decompressor hook interval and interrupt count plus each intervening VBlank's live graphics-request state and elapsed CPU time through the call to `GameTimer`. Rust now uses the VBlank-latched scene state while retaining live STAT-owned LY data, keeps cumulative Crystal-word palette writes, performs byte-wrapped OAM coordinate arithmetic, clears `wGlobalAnimXOffset` as part of the source `wSpriteAnimData` range, and honors OBJ-behind-BG color-zero priority. Seven representative terminal scene LCD hashes now match the ROM exactly. The exporter executes an exact SM83 machine-cycle model over every source-certified LZ3 command path and emits `decompress_machine_cycles` for each presentation decompression; canonical regression values cover literal, run, alternate, zero, signed/absolute rewrite, flip, reverse, long-count, counter-carry, and terminating-return costs through the real intro resources. It also source-certifies the interrupt-vector jump, both `LCD` handler branches, the inherited 144-line HBlank trigger, and the inactive `MobileTimer` branch, exporting exact 27-, 49-, and 48-machine-cycle totals including hardware entry/vector dispatch. The VBlank contract now explicitly retains `_UpdateSound` as a state-dependent every-frame dependency guarded by `wMusicPlaying`; the ROM timing samples prove otherwise-identical graphics states range from 930 to 3,166 machine cycles before `GameTimer` as the live sound program changes. Rust parses, validates, and retains this interrupt contract in the visible intro state, rejecting missing/zero costs or a pack that falsely labels sound timing constant. Scene 16 exposes the remaining cycle-accuracy gap especially clearly: VBlank lands partway through `DoNextFrameForAllSprites`, so 11 grass OAM pieces contain the new Y coordinate while nine retain older shadow-OAM bytes. The current high-level frame runner rebuilds all pieces atomically. Decompression-heavy setup scenes likewise cross additional VBlanks, leaving Rust at 2,258 frames versus the ROM's 2,442. The remaining intro work is to execute the retained metadata in a shared CPU/VBlank scheduler, add exact stateful `_UpdateSound` costs, and extend equivalent source-derived costs to the scene and sprite paths—not add scene padding, a fitted per-frame budget, or a scene-specific sprite exception.
 - The live intro sprite runner now consumes object frameset/function bindings and every frame/wait/restart/end/delete step directly from the validated pack-owned ASM sprite bundle. The duplicate Rust frameset table is deleted; it had replaced `SPRITE_ANIM_FRAMESET_INTRO_UNOWN_F`'s source `wait 0; end` sequence with an invented one-frame wait. Missing framesets, oversized durations, unknown animation functions, and unresolved graphic ownership fail the visible sequence instead of freezing, silently skipping a sprite, or selecting art by object name. Each allocation's graphic and tile base are derived from the exported VRAM transfer state. The outer scene scheduler remains part of the larger presentation-program replacement.
 - Memory Game board initialization and pair accounting now follow `MemoryGame_InitBoard`/`MemoryGame_CheckMatch` rather than constructing and double-shuffling an invented 16-card species deck. Rust allocates the exact 9×5 board, consumes one of the three source count rows in placement-call order (`2,8,4,7,3,6,1`), rejection-samples `Random & $3f`, and fills the remaining cells with card 5 without another RNG call. Its live board, jumptable phase, counter, tries, five-byte match history, matched count, selected-card registers, cursor index, and last-drawn card now reside in validated typed core state; typed frame/joypad input replaces every `memory_*` string register and host card-index command. Each round performs 45 card-placement executions before spawning the cursor with five tries; `CheckTriesRemaining` decrements before the first-card loop, the sprite callback writes its one-based A-button choice after the jumptable for next-frame consumption, bounded 9×5 movement matches the source cursor, and B is ignored during play. Invalid choices remain latched in their distinct source phases. PickCard2's fallthrough decrement is followed by 63 more counter frames and a separate zero-counter resolution execution. Matches write `$ff` into both board cells, append the card id to the match history, increase the matched-card count by two, and retain the source last-card value; misses restore the face-down value. Zero tries enters RevealAll, whose first A reveals the board and whose blocking acknowledgement accepts A or B. Both apparent menu calls use the empty `UnusedCursor_InterpretJoypad_AnimateCursor` stub with carry clear, so ResetBoard always initializes and AskPlayAgain always loops to RestartGame; the invented proceed/restart/quit paths are removed. The obsolete parallel `memory_revealed` board and pair-at-once resolution shortcut are removed. Remaining gaps are presentation-owned tile rendering and text/audio timing.
 - Card Flip now uses validated typed core state and inputs for its exact 24-byte deck, face-indexed discard pile, source phase, played-card counter, selection registers, face-up card, and finite payout loop. Entry preserves the two distinct source failures around its three-coin stake: the shared `CheckCoinsAndCoinCase` wrapper rejects exactly zero coins before checking the Coin Case or consuming shuffle RNG; once entered, one or two coins still reach `_CardFlip`, shuffle the deck, and then produce the game-local `Not enough coins…` result. The wrapper is not rerun between an accepted stake and that round's reveal/payout phases, so spending the last three coins does not abort the already-started game. `wCardFlipNumCardsPlayed` advances only when Play Again is accepted, and its twelfth increment reshuffles before the next stake, matching the ASM control flow.
@@ -60,7 +66,17 @@ existing Rust tests are implementation evidence only.
 - Destination map music now synchronizes during map setup even when a field notice remains visible, and an old queued copy of that destination track cannot suppress the authoritative replacement after an intervening music change. The former textbox and stale-queue guards could leave Elm's Lab music playing after the player exited to New Bark Town; neither guard exists in the ASM map-music path.
 - Both authored `special WaitSFX` uses now enter the same autonomous transient-completion boundary as the `waitsfx` opcode. Fly cannot run `.ReturnFromFly`, and Rock Smash cannot start `SFX_STRENGTH`, until the pending/playing channels 5–8 program has ended. The former special branch drained the event and immediately cleared `waiting_for_sound_effect`, turning a blocking source call into a no-op.
 - The title timeout now executes its exported `fade_audio` boundary through the shared ASM music-fade engine. `TitleScreenMain` writes the certified source rate byte `8` to the exported `wMusicFade` target and requests `MUSIC_NONE`; Rust previously stored the derived 64-frame duration in that WRAM register, decremented it in title-specific shell code, and never began the audible fade. The phase interpreter now validates the exact register/rate/target and the eight-volume-step duration, the visible title observes real fade completion, and `TitleScreenEnd` selects `TITLESCREENOPTION_RESTART` only after the shared engine clears the source register. Red-then-green interpreter coverage, all 10 visible-title regressions, and the exact shared fade regression pass.
-- CrystalIntro's 28-entry scene domain now comes from the certified `IntroScenes` ASM jump table. The exporter records every entry's exact compiled-operation offset and source-authored completion waits in the loop dispatch contract; Rust independently derives those waits from each operation range and rejects missing, reordered, extra, out-of-range, operation-table-disagreeing, or timing-disagreeing entries. Bevy initializes, delays, and completes the intro from that source-derived contract. The invented descriptive scene-name array, clear-palette scene list, and special-case 6/3-frame delay policy are removed. Sprite activation is likewise keyed by exported `(dispatcher_entry, dispatch_tick)` operations and exact instance IDs rather than ten literal ASM source-line numbers; the load boundary verifies each activation remains inside its source scene and agrees with its lifetime or grouped-instance tick. All ten ordinary intro audio operations now carry source-derived dispatcher entry/tick metadata: allocation-adjacent cues inherit certified sprite activation ticks, persistent handlers use the independent ASM tick simulation, and Scene 28's whoosh derives from its exported `$80` pre-decrement sequence. Bevy tracks dispatcher invocation count separately from `wIntroSceneFrameCounter`, which is required when a scene inherits a nonzero counter. Scene 12's eight sentinel-terminated Unown sound cues likewise execute from that scene's exported `scheduled_audio` operation, including the certified SFX-channel stop semantics, instead of duplicated Rust frame/audio matches. Pack loading rejects misplaced ordinary cues and invalid schedule clocks, sentinels, channel behavior, unordered frames, or audio IDs absent from the certified catalog before gameplay begins. Unown pulse fades now resolve their three RGB555 colors from the exported `palette_fade_lookup` tables and source fold contract, while the final Crystal-word fade resolves both grayscale colors from the exported fast/slow hue vectors; the five handwritten renderer color generators are removed. Scene 20's indexed Unown reveal now selects its exact exported palette resource and destination slot from `copy_indexed_palette`, and Scene 24 converts the selected four RGB555 channels directly from `broadcast_indexed_palette` on the exported mask/shift cadence. The final broadcast naturally persists through Scene 25 instead of being reconstructed from a handwritten fade index, and the renderer no longer maps an invented numeric palette-set field to resource names. These exact operation boundaries now support replacing the remaining handwritten per-scene behavior without duplicating its topology, timing, allocation identity, palette data, or scheduled effects again.
+- CrystalIntro now distinguishes its two source exit paths. Button cancellation executes the exported `button_cancel` phase and its sole `PlayMusic(MUSIC_NONE)` effect; natural Scene 28 completion falls directly through cleanup and preserves `MUSIC_CRYSTAL_OPENING` during the otherwise-silent title entrance. Rust previously cleared pending audio and reset all channels on both exits, inserting a silence boundary absent from the ASM.
+- CrystalIntro now enters and leaves through its exported callable phases. Rust executes and validates the three exact AF stack-slot saves, `BANK(wGBCPalettes)` selection, and `hVBlank`/`hInMenu`/`hMapAnims`/`wJumptableIndex` initialization instead of reproducing their resulting zero defaults by hand. Its exit consumes the exported palette, OAM, tilemap, scroll/window, reverse restore, and return operations; saved registers are paired to their original stack slots, so malformed or reordered callable state fails rather than silently handing off to the title. Both `ClearBGPalettes` and LCD-enabled `ClearTilemap` retain their source four-frame `WaitBGMap` boundaries: the intro owns an opaque-white retained LCD for all eight cleanup frames, rejects further input, and queues the title entrance cue only after the final register restore and return.
+- CrystalIntro's 28-entry scene domain now comes from the certified `IntroScenes` ASM jump table. The exporter records every entry's exact compiled-operation offset and source-authored completion waits in the loop dispatch contract; Rust independently derives those waits from each operation range and rejects missing, reordered, extra, out-of-range, operation-table-disagreeing, or timing-disagreeing entries. Bevy initializes, delays, and completes the intro from that source-derived contract. The invented descriptive scene-name array, clear-palette scene list, and special-case 6/3-frame delay policy are removed. Sprite activation is likewise keyed by exported `(dispatcher_entry, dispatch_tick)` operations and exact instance IDs rather than ten literal ASM source-line numbers; the load boundary verifies each activation remains inside its source scene and agrees with its lifetime or grouped-instance tick. All ten ordinary intro audio operations now carry source-derived dispatcher entry/tick metadata: allocation-adjacent cues inherit certified sprite activation ticks, persistent handlers use the independent ASM tick simulation, and Scene 28's whoosh derives from its exported `$80` pre-decrement sequence. Bevy tracks dispatcher invocation count separately from `wIntroSceneFrameCounter`, which is required when a scene inherits a nonzero counter. Scene 12's eight sentinel-terminated Unown sound cues likewise execute from that scene's exported `scheduled_audio` operation, including the certified SFX-channel stop semantics, instead of duplicated Rust frame/audio matches. Pack loading rejects misplaced ordinary cues and invalid schedule clocks, sentinels, channel behavior, unordered frames, or audio IDs absent from the certified catalog before gameplay begins. Unown pulse fades now resolve their three RGB555 colors from the exported `palette_fade_lookup` tables and source fold contract, while the final Crystal-word fade resolves both grayscale colors from the exported fast/slow hue vectors; the five handwritten renderer color generators are removed. Scene 20's indexed Unown reveal now selects its exact exported palette resource and destination slot from `copy_indexed_palette`, and Scene 24 converts the selected four RGB555 channels directly from `broadcast_indexed_palette` on the exported mask/shift cadence. The final broadcast naturally persists through Scene 25 instead of being reconstructed from a handwritten fade index, and the renderer no longer maps an invented numeric palette-set field to resource names. All scene behavior now executes from these exact operation boundaries rather than a parallel handwritten per-scene state machine.
+- Visible intro scene identity now retains and reports the exact exported `IntroScenes` label for the active dispatch entry. Rust no longer manufactures `IntroScene{index + 1}` names independently of the source-owned dispatch table.
+- The exported CrystalIntro scene phase now carries executable operation-index labels for all 28 dispatch entries, every scene-local branch destination, and the outer loop entry. Label offsets are resolved against the first compiled operation covering each target block's source instruction rather than reconstructed in Rust. Pack loading requires every dispatch label to equal its exported entry offset, requires every scene-local branch target to exist, and rejects targets that leave their owning scene range. The shared Rust phase machine now executes the emitted comparisons and conditional returns, exact byte reads/writes, wrapped increments/decrements/transforms, masked byte-computation pipelines, local assignments, scheduled audio tables, conditional indexed 2bpp requests, and sprite/palette/perspective/tilemap effects. All 28 scenes are live through exported control and timing paths. This includes both Suicune motion sequences; both halves of the Scene 12 Unown fade; Scene 16's source four-frame prepare/swap cadence and `$08` XOR over only nonzero tile IDs below `$80`; Scene 20's scroll, hold, cadence, timer, and indexed-palette graph; Scene 24's palette broadcast and `$40` counter seed; Scene 25's source countdown behavior; Scene 27's dual-speed word fade and `$80` seed; and Scene 28's CGB-only white palette fill, palette-transfer request, internal four-frame `WaitBGMap`, pre-decrement whoosh edge, and terminal jumptable exit bit. Internal blocking waits are distinct from scene-completion delays, so they resume the same dispatcher entry rather than advancing early. Mutated-pack regressions prove exported operands drive live Rust behavior, and the outer dispatcher consumes interpreter-owned counter updates exactly once while preserving source-seeded values across scene boundaries. A resumable setup cursor executes all 13 linear scene routines—Scenes 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, and 26—directly through their exported operation ranges. It requires an explicit normal/mobile transfer mode, validates the `Request2bpp` blocking contract, derives every transfer duration from the exported tile count and tiles-per-VBlank rate, and triggers sprite allocations and Scene 13's opening music only when those operations are actually reached after the blocking transfers. The exporter attaches the same request-state, chunking, scheduling, and save/restore contract to direct one-tile `Request2bpp` calls as to helper-wrapped transfers; the two Scene 15/19 omissions previously made exact timing impossible. Normal-mode setup timings are verified at 55, 39, 55, 87, 7, 39, 71, 56, 55, 56, 4, 1, and 41 dispatcher invocations. Their `$00` black and Scene 26 `$ff` white RGB555 palette clears are distinguished.
+- CrystalIntro decompression, 2bpp-transfer, enclosing-wrapper, and sprite-scheduler timing are no longer discarded at the presentation boundary. Every LZ3 operation carries its exact source-decoder machine-cycle total. All 37 canonical calls additionally carry their pinned-ROM start/end frames, elapsed T-cycles, and crossed-frame count; the exporter fingerprints both resource order and exact body-cycle total before attaching a sample, and an altered program remains inspectable but cannot be loaded as a playable Rust pack with mismatched timing. The generic timed cursor fails closed if the boundary count is absent, reports the work performed, and suspends immediately after the decompressor for each of the 88 observed crossed frames before executing the following operation. All 39 `Request2bpp` calls now carry their own ROM start/end frames, start phase, elapsed T-cycles, and 497 crossed-frame total. This includes the two direct one-tile calls as well as the 37 decompression pairs. For every paired call, the oracle proves exactly that `Intro_DecompressRequest2bpp_* crossings = Decompress crossings + Request2bpp crossings`; the previous aggregate “transfer chunks plus wrapper residual” representation is removed. Rust schedules the measured request duration directly and retains the nominal normal/mobile chunk rates only as the source lower bound. The sprite scheduler carries 23 pinned-ROM `(dispatcher_entry, dispatch_tick, elapsed_t_cycles)` crossings, validated in strict call order and consumed at the actual `PlaySpriteAnimations` boundary. Scene advancement now precedes that scheduler exactly as it does in the outer ASM loop, so tick one belongs to the newly selected scene instead of the handler that just returned. Together these move the live completion boundary from frame 2312 to 2440 without scene-end padding. The canonical pack also carries source-certified LCD, inactive timer, complete normal-VBlank tail, state-dependent `_UpdateSound` timing components, and the exact 21/48/49-machine-cycle non-interrupt bodies between the outer loop's four routine hooks. Rust requires and retains all three outer-body costs; stale packs now fail before play instead of silently assuming the missing mainline time is free. The ROM enters its 28 scenes on frames `1,66,195,240,369,435,564,667,763,770,963,1012,1205,1288,1418,1485,1634,1700,1797,1868,2022,2026,2035,2036,2069,2133,2180,2309` and completes on 2442; the remaining two-frame net deficit is phase-sensitive setup/mainline work and still requires the shared SM83 clock before the intro can be classified faithful.
+- The intro timing oracle now captures the actual PyBoy frame-cycle origin instead of treating elapsed routine time and crossed host frames as unrelated measurements. The pinned ROM enters `CrystalIntro` 2,980 T-cycles into a 70,224-T-cycle frame. Before emitting a timing trace, the runner derives each call's start phase from that one origin and proves that `floor((start_phase + elapsed_t_cycles) / 70,224)` equals the recorded crossed-frame count for all 37 decompressions and all 10,949 instrumented intro helper calls. It now also composes all 1,752 completed outer-loop iterations from `JoyTextDelay` entry through the central `DelayFrame` return, retaining each call offset and each intervening CPU/interrupt gap. Those intervals cross exactly 2,441 frame boundaries: 1,717 cross one, twenty cross two, two cross none, and the setup iterations account for the larger values. The three inter-call gaps reduce exactly to their source bodies of 84, 192, and 196 T-cycles after subtracting only source-certified 27/49-machine-cycle LCD and 48-machine-cycle timer interrupts. The preceding entry-to-first-input interval independently reduces to 59 source machine cycles plus one callback-zero LCD interrupt, advancing the shared phase from 2,980 to the observed 3,324 T-cycles. All 1,753 no-input `JoyTextDelay` calls now retain their in-call LCD/timer positions and reduce uniquely to the two reachable source bodies: 1,395 repeat-suppression calls at 107 machine cycles and 358 repeat restarts at 110; the exporter also certifies the 101-cycle pressed-input path. Its common instruction sequence and all three source tails are exported independently. The oracle replays them against all 1,753 calls and reproduces every instruction-boundary LCD/timer admission, LCD-before-timer priority, callback branch, interrupt count, and total elapsed T-cycle count. The source-initialized 4,096-Hz timer requests every 262,144 T-cycles beginning 258,428 T-cycles after intro entry; five calls contain a timer interrupt, and two defer it behind an active LCD handler. Rust parses that exact epoch and executes the same instruction-aware interrupt scheduler. Wiring it into the live loop together with VBlank admission remains part of the shared-clock step. The exporter and Rust pack boundary retain the entry/input anchors, and `RuntimeIntroFrameClock` accepts checked machine-cycle advances directly. This proves directly that the remaining host runner cannot map one dispatcher invocation to one frame; notably, Scene 10 dispatcher ticks 43 and 75 must execute another iteration before the next VBlank. Rust requires the same frame length and entry phase in the playable pack's fail-closed interrupt timing contract. This establishes the phase input needed to replace the remaining aggregate waits with one shared CPU/VBlank clock.
+- `RuntimeIntroFrameClock` is now the executable Rust form of that frame lattice. Exact `Decompress` and `Request2bpp` operations require the exported start phase and elapsed T-cycles, advance the clock, and reject any declared crossed-frame count that is not the clock's derived quotient. The timed setup cursor cannot consume either exact timing scope without an explicit frame duration; generic non-intro transfers retain their source chunk calculation. These are the first live timing paths whose scheduling counts are computed from phase and CPU duration rather than merely copied from the ROM trace.
+
+- The intro interrupt contract now includes the emulator-backed hardware event lattice rather than only handler costs: 456 T-cycles per scanline, HBlank request at scanline T-cycle 250, 144 visible HBlank requests, VBlank request at frame T-cycle 65,664, and a 70,224-T-cycle frame. Rust validates those relationships and computes the next HBlank/VBlank distance from the persistent live phase. The enriched ROM trace retains LY, LCD registers, callback identity, and OAM identity at every `JoyTextDelay` LCD/timer admission; the first call demonstrates instruction-boundary admission directly, with phase 3,324 crossing the line-7 request at 3,442 during the instruction ending at 3,444 and reaching the `LCD` hook at 3,480 after the certified 36-T-cycle hardware/vector prefix. The instruction scheduler reproduces that first call at phase 3,872 after one callback-zero handler, a callback-active sample from phase 534 to 1,366 after two 49-machine-cycle handlers, and all five timer-interrupted samples exactly. It now admits VBlank at the same instruction boundary with hardware VBlank-before-LCD-before-timer priority, adds the certified hardware/vector prefix to a state-supplied VBlank body, advances the one persistent clock through that body, and coalesces repeated masked LCD/timer requests before servicing them after `reti`. A focused long-handler regression crosses 78 HBlank requests and correctly services one pending LCD interrupt. Supplying the live state-dependent body and wiring this scheduler through the outer loop remain required before it becomes the single production clock.
+- The optional full-VBlank intro oracle captures exactly one sample for each ROM frame 1 through 2,441 before completion, including the pre-update audio state and registers, `_UpdateSound` duration, complete handler duration, and scene/frame-counter identity. Those samples contain 159 distinct sound durations and 292 distinct complete VBlank-handler durations (3,972 through 37,248 T-cycles), proving that neither a constant nor an average sound cost can close the clock. The nine music/SFX programs reachable from `CrystalIntro` already carry the exact parsed ASM channel program in their canonical MIDI sequencer-specific payloads. Rust now extracts that payload into typed channels and decodes the exact 18-command intro surface into a closed instruction enum. Command arity, booleans, pitches, octave/duration domains, signed-magnitude envelope nibbles, drum/duty fields, and 11-bit pulse frequencies fail closed before execution; channel programs must begin at a label and terminate with `sound_ret`, and auxiliary source graphs are rejected because none is reachable in this source corpus. Canonical coverage decodes all nine real programs, while mutations reject invented wait/no-op commands, invalid hardware frequencies, and unterminated streams. The next shared-clock step is to execute those commands as the ASM channel state machine and admit the resulting state-dependent `_UpdateSound` cost at every VBlank; the current host PCM queue is not timing authority.
 
 | Rust location | Behavior | ASM evidence | Classification | Required repair and parity test |
 | --- | --- | --- | --- | --- |
@@ -85,7 +101,7 @@ existing Rust tests are implementation evidence only.
 | `crates/crystal-core/src/systems/script_runtime.rs`, `script_objects.rs`; saved delay/emote payloads; Bevy script callbacks | Script timing no longer treats source delay parameters as literal LCD frames or forces zero to one. `pause` consumes two frames per wrapping byte-counter tick, `wait` consumes six, and `showemote` retains its source duration byte while presenting the nested `pause 0` for two frames per tick. Saved queues carry both the original byte parameter and derived frame count and reject forged combinations; values above `0xff` fail before mutation. Special-phone `pause 30` therefore presents 60 frames instead of 30. | `engine/overworld/scripting.asm::Script_pause`, `Script_wait`, `Script_showemote`, `ShowEmoteScript`; `engine/phone/phone.asm::CheckSpecialPhoneCall`; `macros/scripts/events.asm`. | faithful | Core tests cover factors, zero-wrap, overflow, emote derivation, and saved-state validation; special-phone and Bevy runtime tests assert source parameters separately from presentation frames. |
 | `crates/crystal-bevy/src/main.rs` release argument surface | Production accepts only help, an exact `.crystalpack`, an optional `.crystalsave` to load, and an optional save destination. Smoke, spawn, list, repository, and arbitrary-state controls are rejected. | No Game Boy CLI/debug command surface exists; desktop packaging still needs pack/save selection. | faithful | `release_argument_surface_contains_only_pack_and_save_configuration` and `release_api_has_no_direct_new_game_or_arbitrary_tile_entry` cover the release boundary. |
 | `crates/crystal-bevy/src/bevy_shell/deterministic_session.rs` keyboard routing | Desktop keys map only to the eight Game Boy controls; modifier chords, function keys, Space, Escape, and the removed developer dispatcher cannot mutate gameplay. Visible screens consume the same configured controls. | `home/joypad.asm:16-105` samples A/B/Select/Start/Right/Left/Up/Down. | faithful | Release-source tests reject forbidden aliases, direct special invocation, developer shortcuts, and partial idle-frame paths; integrated live-input tests cover title, menus, overworld, and battle. |
-| `crates/crystal-bevy/src/bevy_shell.rs` `Visible*` title/intro/Oak/time/name/credits state machines | Handwritten presentation state and transitions run beside the core script/runtime. | `engine/movie/intro.asm`, `engine/menus/intro_menu.asm`, `engine/movie/credits.asm`, naming/menu ASM. | divergent | Export typed presentation commands/data and replace shell state machines with generic interpreter. Differential frame-boundary scenarios against ASM. |
+| `crates/crystal-bevy/src/bevy_shell.rs` `Visible*` title/intro/Oak/time/name/credits state machines | Handwritten presentation state and transitions run beside the core script/runtime. The title entrance/timer/input/fade subprogram is now authoritative for its visible phase, Start selection, SCX, timer, clock-reset latch, crystal OAM Y, and Suicune animation byte. The shell derives these directly from interpreter memory, executes the exported `SuicuneFrameIterator` operations each visible tick, and no longer stores a parallel phase/frame/register copy, fabricates `wTitleScreenSelectedOption`, or sets the jumptable completion bit. `Intro_MainMenu` now begins from its exported block and fixes the music stop → one-frame delay → `MUSIC_MAIN_MENU` ordering before exposing the menu. The preceding exported title teardown now runs from its decoded operation range: palette/OAM clearing, LCD/OBJ and scroll/window writes, tilemap clears, palette restoration, and all four four-frame waits complete before the option-tail dispatch; input remains title-owned during the transition, and the cleared LCD surface renders as source-white. The invented TypeScript-derived main-menu fade and vertically bobbing cursor are removed: ASM's `STATICMENU_CURSOR` and cleared tilemap display immediately without a host animation clock, and `RunMenuItemPrintingFunction` supplies the exact two-tile row stride instead of Rust's former one-row packing. The decoded `MainMenu` phase now owns display preparation, Diploma/default palettes, game-timer unpausing, exact save/Mystery Gift variant selection, its `GetScrollingMenuJoypad` A/B boundary, `wMenuJoypad`/`wMenuSelection`, CloseWindow, cancel return, selection-table validation, and the `.loop@MainMenu` return after Continue, Options, or Mystery Gift. Its static cursor wraps vertically and returning subprograms reload the source default row. The intro/Oak/time/name/credits machines remain. | `engine/movie/intro.asm`, `engine/menus/intro_menu.asm`, `engine/movie/credits.asm`, naming/menu ASM. | divergent | Replace the remaining intro/Oak/time/name/credits duplicated visible state with the generic interpreter. Differential frame-boundary scenarios against ASM. |
 | `crates/crystal-bevy/src/bevy_shell.rs:823-11080+` | `VisibleIntroScreen`, `VisibleTitlePhase`, `VisibleTimeSetScreen`, `VisibleOakIntroSequence`, `VisibleCreditsScreen`, `VisibleGenderSelection`, `VisibleNameChoice`, and `VisibleScreenFade` encode game flow in handwritten Rust states and hard-coded text/timing. | `engine/movie/intro.asm`, `engine/menus/intro_menu.asm:627+ (OakSpeech), 966+ (title)`, `engine/movie/credits.asm`, plus the relevant text/menu/naming source tables. | divergent | Replace with exported bytecode/tables and a generic screen interpreter. One scenario must compare each stable scene boundary and input wait against ASM; no shell-only transition allowed. |
 | `crates/crystal-bevy/src/bevy_shell.rs:490-608,1205-1265,28054-28144,41696-42009` | Ordinary `PlayMusic` replacement and music fades preserve active SFX/cry playback, matching Crystal's separate channels 1–4 and 5–8; only the explicit `MUSIC_NONE`/`_InitSound` boundary clears both. `MUSIC_NONE` is carried as a typed stop/reset request through script resolution and save validation, is forbidden from the stored playback queue, and has no PCM file or fake sink. That full-reset request is latched independently, so a following music request cannot erase it before the backend runs. The live Magnet Train `PlayMusic2` call now stops music without clearing transient channels, consumes its source `DelayFrame`, and starts `MUSIC_MAGNET_TRAIN` only on the following frame. `musicfadeout` retains the old track, applies the source `wMusicFadeCount` cadence to each of the seven volume steps, performs `_InitSound` and loads the target only on the following zero-volume update, and reproduces the bicycle-only zero-to-seven fade-in. The bicycle fade-in is rate zero because `MusicFadeRestart` clears the old rate/counter before setting only `MUSIC_FADE_IN_F`. Native Rodio and browser WebAudio apply the same retained volume. Every exported SFX carries its exact source-table byte, and queued/active SFX follows `PlaySFX`: a request interrupts only when its byte is less than or equal to `wCurSFX`; cries replace the transient channels unconditionally. Accepted music, SFX, and cry calls now reach the backend in source order instead of being reduced to the last music/transient pair; an asynchronous PCM preparation miss defers that command and the complete remaining suffix so a later cue cannot overtake it. Both authored `special WaitSFX` uses and the `waitsfx` opcode remain blocked through pending and active transient playback. The host still represents channels 5–8 as one Rodio/WebAudio transient sink, so independent per-channel evolution remains incomplete. | `audio/engine.asm::FadeMusic` decrements `wMusicFadeCount`, mirrors the 0–7 right-volume nibble, restarts at zero, and sets `MUSIC_FADE_IN_F` only for `PLAYER_BIKE`; `constants/sfx_constants.asm` defines sequential priority bytes with `00` highest. `home/audio.asm::PlaySFX` rejects a request when active `wCurSFX` is numerically lower, while `_PlaySFX` clears channels 5–8 before starting an accepted request. `home/audio.asm::PlayMusic` branches on zero before `_PlayMusic`: nonzero ids reload music channels without clearing channels 5–8, while `MUSIC_NONE` calls `_InitSound` and clears all audio state. `home/audio.asm::PlayMusic2` calls `_PlayMusic(MUSIC_NONE)`, `DelayFrame`, then `_PlayMusic` with the replacement; `engine/events/magnet_train.asm` uses it for `MUSIC_MAGNET_TRAIN`. | partially faithful | Replace the single transient sink with an exported four-channel mixer/command stream. Differential traces must cover intro→title, map warp, SFX/cry overlap rules, battle and credits and assert active channel/program state at every command boundary; exact accepted-call ordering, `MUSIC_NONE`, live `PlayMusic2`, fade cadence, and a real `PlayersHouseRadioScript` request/event path now have focused coverage. |
 | `crates/crystal-bevy/src/bevy_shell.rs` intro compositor | The extracted compositor retains one complete LCD surface. Tilemap, attrmap, palette, signed `$8800` tile addressing, mixed-resource BG tiles, OBJ graphics, and OBJ tile bases now come from source-ordered exported VRAM ownership. Focused tests prove settled scenes are nonblack and the complete sequence never loses its LCD surface, but scene state transitions remain handwritten and have no ROM checkpoint proof. | `engine/movie/intro.asm:CrystalIntro`, `IntroSceneJumper`, `IntroScene1..28` and their referenced graphics/palette/OAM resources. | partially faithful | Execute the exported scene/palette-effect commands instead of handwritten transitions and compare fixed scene checkpoints to an ASM/ROM oracle. No startup bypass. |
@@ -276,7 +292,7 @@ above are therefore semantic, not keyword-only.
 | Fishing on an occupied water tile | Vanilla `FishFunction` checks surfing mode and the facing tile's water permission but never calls `CheckFacingObject`. A visible NPC standing on that water tile therefore does not block the cast or encounter. | The runtime cast boundary already followed the bug: it samples terrain without consulting occupied-object tiles. Added an integrated regression so a future collision cleanup cannot normalize this cartridge behavior away. | Direct comparison against `engine/events/overworld.asm::FishFunction` and the documented bug; the runtime scenario places a visible object on the exact facing water tile and still starts the fishing battle. |
 | Swimming NPC movement-radius bug | `CanObjectMoveInDirection` checks `NOCLIP_TILES_F` before the movement-box boundary and jumps past that boundary for swimming movement data. Swimmers remain water/collision constrained but ignore their declared X/Y movement radius. | Autonomous `SPRITEMOVEDATA_SWIM_WANDER` now bypasses only the origin-radius test while retaining water terrain, player/object occupancy, directional collision, stride, duration, and RNG behavior. | Direct comparison against `engine/overworld/npc_movement.asm::CanObjectMoveInDirection` and the documented Lapras bug; the red-first zero-radius swimmer regression now leaves its origin on the first valid water direction. |
 | ASM turn-priority and Quick Claw parity | Player item/switch/run choices return player-first before move-priority, held-item, or Speed checks. Link double-switch order instead uses one 50/50 roll whose interpretation follows serial-clock ownership; a link enemy switch against a player move goes first. Crystal invokes `PursuitSwitch` from the switch routine before recall; Rust's abstract turn list preserves the same outcome by ordering Pursuit ahead of a switch and passing the switching flag for doubled damage. On equal move priority, a single Quick Claw holder consumes one roll. With two holders, the external-clock side is sampled first: enemy first in ordinary/external-clock play, player first for the internal-clock link player, and the first activation returns immediately. Parameter zero is a valid never-activate chance that still consumes its roll. | Added the pre-move player-action and link-switch gates, retained structural Pursuit interception, allowed zero Quick Claw parameters, and replaced unconditional player-then-enemy sampling with the exact serial-clock-dependent branch and short-circuit RNG consumption. | `engine/battle/core.asm::DetermineMoveOrder`, `PursuitSwitch`, and `BattleMonEntrance`; focused regressions cover non-move no-RNG ordering, link double-switch clock inversion, dual-holder ordinary/internal-clock order, and exact RNG consumption. |
-| ASM battle badge-stat parity | Outside link and Battle Tower battles, the player's Zephyr/Mineral/Plain/Glacier badges boost Attack/Defense/Speed/Special Attack by `floor(base/8)` before stages and Burn/Paralysis; enemies never receive badge boosts. Crystal's clobbered accumulator bug makes Glacier Badge boost Special Defense only when unboosted Special Attack is 206–432 or at least 661. | Persisted the explicit enable flag, mapped the exact badge bits at shared damage/confusion/Beat Up/turn-order boundaries, disabled boosts for link and Battle Tower construction, and replaced the unconditional TypeScript-shaped Special Defense boost with the cartridge's exact Special Attack-dependent boundary. | Direct comparison against `engine/battle/core.asm::BadgeStatBoosts` and the source's documented bug; focused boundary coverage checks 205/206, 432/433, and 660/661. |
+| ASM battle badge-stat parity | Outside link and Battle Tower battles, the player's Zephyr/Mineral/Plain/Glacier badges boost the already stage- and status-modified loaded Attack/Defense/Speed/Special Attack by `floor(live_stat/8)`; enemies never receive badge boosts. Crystal's clobbered accumulator bug makes Glacier Badge boost Special Defense only when unboosted Special Attack is 206–432 or at least 661. | Persisted the explicit enable flag, mapped the exact badge bits at shared damage/confusion/Beat Up/turn-order boundaries, disabled boosts for link and Battle Tower construction, and replaced the unconditional TypeScript-shaped Special Defense boost with the cartridge's exact Special Attack-dependent boundary. Damage, wild-enemy Beat Up, and Speed now apply the badge after stat levels and applicable status penalties. | Direct comparison against `engine/battle/core.asm::ApplyStatLevelMultiplierOnAllStats`, `ApplyStatusEffectOnPlayerStats`, and `BadgeStatBoosts`; focused ordering and boundary coverage checks a staged damage quotient, staged/paralyzed Speed, wild-enemy Beat Up defense, and Special Attack boundaries 205/206, 432/433, and 660/661. |
 | Bug-Catching Contest score byte width | `ContestScore` reads only the low byte of max HP, all five battle stats, and current HP. It adds four copies of low max HP plus those low stat bytes, the DV term, low current HP divided by eight, and the held-item point through the two-byte `hProduct` accumulator. | Replaced full-width saturating host arithmetic with the exact low-byte inputs and wrapping 16-bit accumulator. High-byte stat changes can no longer alter the player's contest score. | Direct comparison against `engine/events/bug_contest/judging.asm::ContestScore`; a red-first high-byte regression expected the cartridge score 35 and observed Rust's former 4931. |
 | Bug-Catching Contest caught provenance rewrite | Both party insertion and box insertion call the source caught-data writer before forcing the National Park landmark. The box-full bug applies that same rewrite to the first existing boxed Pokémon: level, current time, and player gender are overwritten along with location. | Contest finalization now writes the live time and player gender instead of preserving stale caught provenance or fabricating an absent time/male identity. The box-full corruption path updates all four modeled caught-data fields. | Direct comparison against `engine/pokemon/caught_data.asm::CheckPartyFullAfterContest`, `SetCaughtData`, and `SetBoxMonCaughtData`; focused party and full-box regressions cover newly created and overwritten provenance. |
 | Wild flee-attempt byte overflow | `TryToRunAwayFromBattle` increments `wNumFleeAttempts` with an 8-bit `inc a` before comparing Speed, so attempt 255 wraps the stored counter to zero even when the faster-player shortcut succeeds without `BattleRandom`. | Both Rust escape entry points now use wrapping byte increment instead of saturating at 255. The ordinary and exact DIV-traced paths retain the same no-RNG fast escape while reporting/persisting counter zero. | Direct comparison against `engine/battle/core.asm::TryToRunAwayFromBattle`; the red-first boundary regression observed the former saturated 255 and now covers both public RNG adapters. |
@@ -490,14 +506,14 @@ not evidence of either fidelity or divergence.
 | Enemy move slot sampling | Wild `ParseEnemyAction` repeatedly samples `BattleRandom & 3` against the original four move slots, rejecting blanks, disabled slots, and zero PP; it reaches Struggle without this sample when no move is usable. Trainer AI scores all nonblank slots, marks unusable moves at 80, and repeatedly samples `Random & 3` among the tied lowest original slots. | Core owns wild original-slot sampling and committed-move/Struggle zero-read shortcuts. `GameDataSet` owns the complete trainer score passes over effective combat moves. Live play and replay invoke the same authorities and replay rejects forged slots, actions, and phase call counts. | Preserve original slots, source layer order, and masked rejection sampling without renderer-derived selection state. | Wild rejection/Disable/Struggle/commit, all-ten-layer trainer selection, switch/item boundaries, and forged replay regressions pass. |
 | Focus Band activation threshold | ASM loads Focus Band's held parameter (`30`) into `c` and survives only when `BattleRandom < c` | Rust ignored exported item data and hard-coded `<32`, increasing activation odds and allowing malformed zero-parameter payloads to work | Validate the held parameter as an exact nonzero byte and compare the battle byte directly against it, matching Quick Claw's data-driven boundary | Static ASM comparison complete; final validation deferred |
 | Focus Band survival narration and Beat Up handling | ASM distinguishes Endure's `ENDURED the hit!` from Focus Band's named `hung on with <item>!`; Beat Up runs each participant through the ordinary held-power and lethal-hit survival boundaries | Rust represented both survival paths with one event and always displayed Endure text, while Beat Up skipped the attacker's held type-power boost and the defender's Focus Band check | Carry the activating held item on survival events, project the item-specific source message, and apply the shared held-power and Focus Band authorities to every Beat Up participant | Static ASM/TypeScript comparison complete; final validation deferred |
-| Beat Up per-participant damage command | Player/trainer Beat Up selects each healthy, status-free party member, uses that member's level and species base Attack against the target species' base Defense, and performs hit/critical RNG for each loop. Wild-enemy Beat Up instead enters `EnemyAttackDamage` for the active enemy. Both paths retain quotient item boost, cap, variation, Substitute, survival, faint, and Rage boundaries while skipping STAB, weather, and type matchup. | Rust fed every participant through ordinary Dark-move damage using live stats and stages, STAB/type/weather/screens/Metal Powder, rolled accuracy once for the whole move, and disabled critical hits entirely. | Give the player/trainer loop its source base-stat formula and give the wild-enemy branch its active special-stat DamageStats path; sample accuracy, critical, and variation for every participant and retain a neutral matchup result. | Static ASM comparison complete; final validation deferred |
-| Multi-hit command ordering | Crystal runs `checkhit`, effect-chance where applicable, critical, and variation inside each Multi Hit, Double Hit, Twineedle, and Triple Kick iteration. Random hit count is sampled only after the first successful iteration reaches `endloop`; Triple Kick rejection-samples one through three hits and multiplies capped pre-STAB damage by the kick index. Lock-On is consumed by the first check. King’s Rock and Twineedle poison resolve once after a completed loop; faint or miss exits before that tail. | Rust checked accuracy once, sampled count before first-hit critical/damage RNG, made later hits automatic, reduced Triple Kick to one unscaled hit, and rolled King’s Rock plus secondary status after every hit. | Move accuracy/effect-chance into the loop, sample counts at the post-first-hit boundary, carry Triple Kick's 1x/2x/3x pre-STAB multiplier, and defer King’s Rock/Twineedle poison to the single source tail. | Static ASM comparison complete; final validation deferred |
+| Beat Up per-participant damage command | Player/trainer Beat Up performs one initial `checkhit`, then selects each healthy, status-free party member and uses that member's level and species base Attack against the target species' base Defense. `EndLoop` resumes at `critical`, so critical and variation RNG repeat per party slot but accuracy does not. Wild-enemy Beat Up instead enters `EnemyAttackDamage` for the active enemy. Both paths retain quotient item boost, cap, variation, Substitute, survival, faint, and Rage boundaries while skipping STAB, weather, and type matchup. | Rust fed every participant through ordinary Dark-move damage using live stats and stages, STAB/type/weather/screens/Metal Powder and disabled critical hits entirely. | Give the player/trainer loop its source base-stat formula and give the wild-enemy branch its active special-stat DamageStats path; sample accuracy once before the loop, sample critical and variation for every party slot, and retain a neutral matchup result. | Static ASM comparison complete; final validation deferred |
+| Multi-hit command ordering | Crystal runs `checkhit` only on the first iteration. The initial script then reaches effect chance where applicable, critical, and variation; `EndLoop` explicitly resumes at `critical`, so later hits repeat critical and variation without another accuracy or effect-chance sample. Random hit count is sampled only after the first successful iteration reaches `endloop`; Triple Kick rejection-samples one through three hits and multiplies capped pre-STAB damage by the kick index. Lock-On is consumed by the first check. King’s Rock and Twineedle poison resolve once after a completed loop; faint or miss exits before that tail. | Rust sampled count before first-hit critical/damage RNG, reduced Triple Kick to one unscaled hit, and rolled King’s Rock plus secondary status after every hit. | Retain the single pre-loop accuracy/effect-chance boundary, sample counts at the post-first-hit boundary, carry Triple Kick's 1x/2x/3x pre-STAB multiplier, and defer King’s Rock/Twineedle poison to the single source tail. | Static ASM comparison complete; final validation deferred |
 | Multi-hit effectiveness narration | Crystal runs `supereffectivelooptext`, which prints matchup text only on the first completed iteration, while `criticaltext` can still print independently for every critical hit. | The visible Rust projection emitted super-effective/not-very-effective text for every `Damage` event, making multi-hit moves repeat the same result message several times. | Deduplicate effectiveness text per acting side/move within the resolved event batch while retaining every critical-hit message. | Static ASM/presentation comparison complete; final validation deferred |
 | King's Rock activation threshold | `BattleCommand_HeldFlinch` loads King's Rock's held parameter (`30`) and applies flinch only when a separate `BattleRandom` byte is below it | Rust hard-coded `<32`, increasing the activation odds and accepting malformed zero-parameter held-item data | Validate the exact nonzero byte parameter and compare the source battle byte directly against it before applying flinch | Static ASM comparison complete; final validation deferred |
 | Held Berry/BrightPowder parameter authority | ASM consumes exact exported nonzero parameters for HP Berries and BrightPowder; malformed content is a pack error, not an alternate one-point or clamped effect | Rust converted zero/negative Berry healing to 1 HP and clamped BrightPowder into a byte, silently inventing fallback behavior | Reject invalid held parameters through `InvalidHeldItemParameter` and apply only exact authoritative values | Static data-boundary comparison complete; final validation deferred |
 | Berserk Gene timing, confusion counter, and RNG | `HandleBerserkGene` runs at the start of `BattleTurn`, consumes the active holder's item, raises Attack two stages, then sets confusion without initializing the byte counter: a zero counter wraps for 256 turns, while an existing side count is preserved; this path consumes no battle RNG | Rust activated the Gene immediately during switch resolution, called the ordinary confusion helper, always sampled a fresh 2–5-turn duration, and advanced the deterministic battle RNG stream | Move activation to the shared next-turn start boundary, widen the internal confusion counter to represent 256 exactly, preserve an existing Baton Pass count, initialize only a zero count to 256, and emit visible activation/stat/confusion events without sampling RNG | Static ASM comparison complete; final validation deferred |
 | Rage counter and visible feedback | Crystal stores Rage buildup in a dedicated side counter. Each damaging hit while Rage is active increments that counter, displays `RAGE is building!`, and later Rage attacks multiply post-effectiveness damage by `counter + 1`; switching clears both active state and counter. At 255, `inc a` wraps to zero and `ret z` leaves the stored counter unchanged without displaying another building message. | Rust converted each incoming hit into an ordinary Attack-stage increase, changing every physical move, interacting incorrectly with stage caps/critical hits, and displaying generic Attack text. Rage itself never consumed a buildup multiplier. Its later dedicated counter saturated at 255 but still emitted a source-impossible extra narration event. | Persist the separate counter, increment it without touching stat stages, feed it only into Rage damage at the source boundary, clear it with Rage volatile state, and emit dedicated battle narration only when the wrapping increment is nonzero. | Static ASM/TypeScript comparison and focused ordinary/terminal-counter regressions pass; final validation deferred |
-| Substitute damage before survival effects | Crystal's shared `applydamage` boundary sends a successful damaging hit into Substitute first. Endure/Focus Band concern lethal damage to the real battler, while `buildopponentrage` still runs after a successful Substitute hit; Beat Up repeats this boundary for each participant. | Rust evaluated Endure and Focus Band before checking Substitute, and Beat Up bypassed Substitute entirely. Ordinary Substitute hits also returned before building the target's active Rage counter. | Route ordinary and each Beat Up hit into Substitute before lethal-survival logic, build Rage on a successful Substitute hit, and let later Beat Up participants reach the battler only after the doll breaks. | Static ASM command-order comparison complete; final validation deferred |
+| Substitute and survival-effect ordering | Crystal's shared `applydamage` checks Endure first or samples a held Focus Band, calls `BattleCommand_FalseSwipe` after a successful survival check, and only then dispatches the retained damage through `DoEnemyDamage`/`DoPlayerDamage`, where Substitute is selected. A lethal-to-the-real-battler hit can therefore be clamped before reaching the doll, and Focus Band samples even for nonlethal or Substitute hits; `buildopponentrage` remains later in the effect stream. | Rust returned through Substitute before either survival branch, so the doll always received full damage and a held Focus Band skipped its source RNG byte. Beat Up had previously bypassed Substitute entirely. | Run Endure/Focus Band before the shared Substitute/HP split, retain the source damage-then-survival-text event order, build Rage after Substitute, and let later Beat Up participants reach the battler only after the doll breaks. | Direct comparison against `BattleCommand_ApplyDamage`, `DoEnemyDamage`, `DoPlayerDamage`, and `DoSubstituteDamage`; lethal Endure/Focus Band Substitute and nonlethal Focus Band RNG regressions pass. |
 | Substitute target-effect protection | Crystal's individual effect commands reject direct major status, direct/secondary confusion, direct stat drops, Leech Seed, Nightmare, Lock-On, Pain Split, and Sketch while the opponent has a Substitute, while unrelated commands that intentionally omit `CheckSubstituteOpp` retain their source behavior. | Rust modeled Substitute only as damage HP and a few isolated effect checks, allowing common status and control moves to mutate the protected battler directly. These failures could be silent or display success text. | Add a shared Substitute-block event at only the source-verified command boundaries, leave intentional bypasses alone, and project the refusal through the visible battle queue. | Static per-command ASM comparison complete; final validation deferred |
 | Future Sight stored damage and delayed application | Future Sight runs `damagestats` and `damagecalc` when queued, including live calculated Special Attack/Special Defense, stages, Light Screen, Light Ball, Metal Powder, and the held type-power command, but stores the result before `damagevariation`. When its counter reaches the source boundary, the hit announcement precedes `DoMove`, which resumes at variation and sends the hit through Substitute, Focus Band, held healing, retained-damage, Bide, Rage, and faint handling. Turn-limited Protect/Endure/Destiny Bond have already cleared at the action boundaries. | Rust originally rebuilt damage from species base stats, sampled variation on the queue turn, and later subtracted the stored number directly from real HP, shifting RNG and bypassing nearly every shared damage mechanic at landing. Its announcement was coupled to real-HP settlement and therefore disappeared against Substitute. | Calculate and store the pre-variation value from live combat stats with the source item/screen transformations, emit a distinct landing boundary, sample variation only there, then route the delayed hit through the still-live shared damage authorities. | Static ASM comparison complete; delayed RNG, announcement, Substitute, and expired-Endure landing regressions added; final validation deferred |
 | Minimize and Stomp | Crystal stores a distinct minimized flag only after Minimize successfully raises evasion, clears it with ordinary switch volatiles, preserves it through Baton Pass, and doubles Stomp's already-varied damage before hit settlement. Double Team shares the evasion effect but does not set this flag. | Rust previously collapsed both moves to the exported `EVASION_UP` effect and therefore never applied Stomp's Minimize interaction. | Preserve a per-side minimized volatile keyed by the actual `MINIMIZE` move name, clear it on ordinary switch, retain it on Baton Pass, and saturating-double Stomp damage before Substitute, Endure, Focus Band, HP, and event settlement. | Static comparison against `data/moves/effects.asm`, `engine/battle/effect_commands.asm`, and `move_effects/baton_pass.asm`; regression added and final validation deferred. |
@@ -514,7 +530,7 @@ not evidence of either fidelity or divergence.
 | X Accuracy sure-hit substatus | `XAccuracyEffect` sets `SUBSTATUS_X_ACCURACY`; repeated use fails, switching clears the volatile bit, and `BattleCommand_CheckHit` returns after Fly/Dig eligibility but before perfect-accuracy handling, stat modifiers, BrightPowder, or `BattleRandom`. It is not an Accuracy-level increase. | Rust routed X Accuracy through its generic X-item stage helper, raising Accuracy by one stage and leaving low-accuracy moves subject to BrightPowder and RNG. Battle state had no X Accuracy substatus. | Added side-specific persistent X Accuracy state, dedicated item handling with no stage mutation in both the turn resolver and visible-runtime bag boundary, repeated-use rejection, switch clearing, and the exact sure-hit gate for ordinary, per-hit, and OHKO moves. X Accuracy does not make Fissure hit a flying target. | Four focused core regressions prove the Pokemon-only item helper and turn resolver leave Accuracy unchanged, repeated use fails, switching clears the flag, a 1%-accuracy move hits through BrightPowder without a miss event, and the OHKO Fly gate remains first; grouped core/assets/Bevy checks pass. |
 | Foresight accuracy/evasion interaction | In `CheckHit.StatModifiers`, when the target's Evasion level is at least the user's Accuracy level and the target is identified, the routine returns before both multiplier lookups and retains the move's base accuracy byte. When Accuracy is higher, the advantageous modifiers still apply. | Rust used Foresight only for Normal/Fighting type effectiveness and always applied the net accuracy/evasion stage, so identified targets retained their evasion advantage. | Pass the live identified substatus into ordinary and OHKO accuracy calculation and skip both multipliers only at the exact non-advantageous comparison boundary. | Focused regression covers extreme negative and positive stage differences with an identified target. |
 | Bide release `CheckHit` and damage tail | `storeenergy` ends the initial and storing turns before `checkhit`. On release it clears Bide, prints the unleashed-energy text, builds doubled retained damage, skips to `unleashenergy_command`, then runs reset-type, shared `checkhit`, animation/failure, ordinary damage, faint, Rage, and King's Rock. | Bide phase advancement now precedes the common hit boundary: start/store return directly, while release clears retained state, emits a distinct source-ordered `BideUnleashed` narration event, and alone enters Protect/Lock-On/airborne/accuracy. Successful doubled damage now uses Substitute, Endure, Focus Band, retained-damage, Rage, opposing Bide storage, faint/Destiny Bond, and King's Rock processing instead of direct HP subtraction. | The Bide-specific prepared damage retains its narration event but otherwise follows the same post-`checkhit` authorities as ordinary application. | Five focused Bide regressions cover start/store/release, protected Lock-On preservation, Substitute/Rage/King's Rock, Endure/retained damage/opposing Bide, and Destiny Bond; core and Bevy production compilation pass. |
-| OHKO shared damage handling | A successful Crystal OHKO supplies maximum damage to the ordinary application command, so Substitute receives the hit first and Endure/Focus Band can preserve one real HP; surviving hits continue through held recovery, retained damage, Rage/Bide, and Destiny Bond ordering. The OHKO script ends after `buildopponentrage` and has no King's Rock command. | Rust directly assigned the target's HP to zero and emitted faint, bypassing every shared damage mechanic and its visible narration. | Feed maximum OHKO damage through Substitute and the ordinary survival/item/bookkeeping/faint tail while retaining level, immunity, and special accuracy checks, without inventing a King's Rock tail. | Focused execution now proves Substitute break, Endure survival, and Destiny Bond retaliation; the existing OHKO path also records retained damage, Rage, and Bide through the shared authorities. Focus Band and between-turn held recovery remain covered by their shared helper regressions. |
+| OHKO shared damage handling | A successful Crystal OHKO supplies `$ffff` damage to the ordinary `applydamage` command. Endure or a successful Focus Band check clamps that value against real HP before `DoEnemyDamage`/`DoPlayerDamage` routes it to Substitute or HP; surviving hits continue through retained damage, Rage/Bide, and Destiny Bond ordering. The OHKO script ends after `buildopponentrage` and has no King's Rock command. | Rust originally assigned target HP to zero directly. Its first shared-tail migration still sent `$ffff` to Substitute before checking Endure/Focus Band, reversing the actual `applydamage` order and skipping Focus Band RNG. | Feed maximum OHKO damage through the exact survival-before-Substitute/HP boundary while retaining level, immunity, special accuracy, bookkeeping, and faint handling, without inventing a King's Rock tail. | Focused execution proves plain Substitute break, combined Endure/Focus Band plus Substitute clamping, Focus Band RNG, ordinary Endure survival, and Destiny Bond retaliation. |
 | OHKO `CheckHit` integration | After immunity and the higher-level rejection, Crystal writes the level-adjusted accuracy byte and calls shared `CheckHit`: Protect precedes Lock-On consumption, Lock-On normally guarantees the hit, Fissure retains its flying exception, Fly/Dig precedes X Accuracy, and unlocked attempts use Foresight-aware accuracy/evasion plus BrightPowder before one battle byte. | Rust originally returned through a standalone OHKO branch before the shared checks. Its dedicated boundary now mirrors Protect, Lock-On, airborne exceptions, X Accuracy, Foresight, stages, BrightPowder, and RNG ordering without weakening the level gate. | Keep the special level-adjusted accuracy byte but reproduce every shared hit gate in source order. | Focused OHKO regressions cover ordinary hit, level rejection, immunity, Lock-On/Fly behavior, and X Accuracy versus grounded/flying targets. |
 | Damaging stat effects after KO | AncientPower-class boosts and damaging stat drops apply after `checkfaint`; a knockout terminates the effect stream before those mutations. Their pre-damage `effectchance` command has already consumed its RNG byte, however. | Rust mutated stats before faint resolution, visibly granting effects that Crystal skips on a KO. Simply moving the whole helper after faint would instead lose the source RNG draw. | On a lethal hit, consume only the pre-damage chance sample and suppress the post-faint stat mutation/events; on a surviving hit, retain normal effect application. | Focused AncientPower regressions cover both the surviving-target boost and knockout suppression paths; chance-failure and immunity cases separately prove no mutation while preserving their source gates. |
 | Rapid Spin and Hyper Beam pre-faint commands | Rapid Spin's `clearhazards` and Hyper Beam's `rechargenextturn` both precede `checkfaint`. Rapid Spin therefore clears even when its damage KOs, and a successful Hyper Beam requires recharge after either a KO or a Substitute hit. | Rust grouped Rapid Spin with post-faint stat effects and conditioned recharge on a surviving real-HP target, suppressing both source commands at common terminal boundaries. | Keep Rapid Spin clearing before faint termination and set recharge after every successful Hyper Beam damage application, including Substitute, without setting it on misses/immunity/Protect. | Focused regressions now prove Rapid Spin clears before a target-KO event and Hyper Beam starts recharge on both target KO and Substitute damage. Existing miss/immunity/Protect coverage proves recharge is not set without successful application. |
@@ -2550,3 +2566,2158 @@ not evidence of either fidelity or divergence.
   one only on a later matching input after `CheckTurning` has completed. Rust
   now preserves that two-frame turn/activate boundary instead of warping on
   the landing step or the initial facing-change frame.
+
+# Hidden Power high-DV weighting (2026-09-03)
+
+- `HiddenPowerDamage` constructs its power nibble in Attack, Defense, Speed,
+  Special order from most- to least-significant bit, yielding weights
+  `8, 4, 2, 1`. Rust had reversed those weights to `1, 2, 4, 8`; the symmetric
+  zero and maximum test vectors therefore passed while ordinary asymmetric DV
+  spreads produced the wrong base power.
+- The core now assembles the source nibble explicitly before multiplying by
+  five, adding `Special & 3`, halving, and adding 31. Regression coverage locks
+  every isolated high-DV bit as well as an asymmetric Electric-type case.
+
+# Reversal/Flail two-byte HP division (2026-09-03)
+
+- The `.reversal` branch of `BattleCommand_ConstantDamage` cannot pass a
+  two-byte maximum HP value to the cartridge's one-byte `Divide` divisor. When
+  the maximum HP high byte is nonzero, it shifts both `HP * 48` and maximum HP
+  right twice, truncating each independently before division. Rust previously
+  used one direct wide division, which is mathematically close but crosses
+  source power-table boundaries for valid battle stats.
+- `reversal_power` now retains the direct source branch only for one-byte
+  maximum HP and reproduces the paired two-bit truncation otherwise. The
+  regression locks `HP=91, maxHP=257`, where Crystal obtains ratio 17 and power
+  40; the former direct division obtained ratio 16 and power 80.
+
+# Jump Kick retained-damage crash (2026-09-03)
+
+- `EFFECT_JUMP_KICK` uses the source `NormalHit` stream, which runs `critical`,
+  `damagestats`, `damagecalc`, `stab`, and `damagevariation` before `checkhit`.
+  Rust previously performed the accuracy check first, so a miss skipped both
+  damage RNG bytes and had no cartridge-equivalent `wCurDamage` to retain.
+- `GetFailureResultText` shifts that retained damage right three times and
+  applies at least one HP of crash damage. Rust instead removed half the
+  user's maximum HP. Damage preparation is now reusable, allowing Jump Kick
+  to preserve the exact calculated damage across Protect, airborne avoidance,
+  and ordinary accuracy failure without duplicating the damage formula.
+- The same failure routine checks `wTypeModifier` and skips crash damage when
+  effectiveness is zero. Jump Kick into an immune Ghost target now emits the
+  no-effect result without damaging or fainting its user. Regressions lock the
+  critical/variation/accuracy RNG order, exact one-eighth crash amount, and
+  type-immunity exception.
+
+# `NormalHit` damage-before-accuracy ordering (2026-09-03)
+
+- The shared `NormalHit` effect stream runs `critical`, `damagestats`,
+  `damagecalc`, `stab`, and `damagevariation` before `checkhit`. Rust's global
+  accuracy gate previously ran first, so an ordinary missed attack consumed
+  only its accuracy byte instead of consuming critical and variation first.
+- Every exported effect that points directly to `NormalHit` (`NORMAL_HIT`,
+  `ALWAYS_HIT`, `JUMP_KICK`, and `PRIORITY_HIT`) now uses the reusable
+  prepared-damage path.
+  Protect and other `checkhit` failures still preempt accuracy and Lock-On,
+  while preserving the earlier damage calculation performed by the source
+  command stream.
+- A scripted Tackle miss regression locks the exact three-byte order:
+  critical, damage variation, then accuracy. The existing Jump Kick
+  regressions independently lock the same ordering plus its retained-damage
+  failure behavior.
+
+# Damaging effect-stream pre-`checkhit` ordering (2026-09-03)
+
+- The damage-before-accuracy ordering is not limited to `NormalHit`. The ASM
+  streams for damaging status, stat-change, drain, recoil, charge-release,
+  Hyper Beam, Snore, Thief, Rapid Spin, Return/Frustration, Hidden Power, and
+  several other ordinary single-hit effects all finish critical calculation,
+  damage calculation, STAB, and variation before `checkhit`.
+- Those source-reviewed streams now prepare and retain their first damage hit
+  before the shared accuracy/Protect/Lock-On gate. Streams with a materially
+  different boundary remain separate: MultiHit/PoisonMultiHit/TripleKick,
+  TrapTarget, Present, Rage/Rollout/Fury Cutter, the remaining final-damage
+  variants, Thunder, Future Sight, and Beat Up are not collapsed into this
+  ordering. Magnitude and Pursuit are staged separately below.
+- A Poison Sting miss regression proves that the two damage RNG bytes precede
+  accuracy while the post-`checkhit` `effectchance` byte is skipped. The Sky
+  Attack release regression was corrected to the same source order and still
+  proves that its zero-percent effect-chance command samples only after a
+  successful accuracy check.
+
+# Magnitude command staging and Dig damage (2026-09-03)
+
+- The `Magnitude` stream runs `critical`, `damagestats`, `getmagnitude`,
+  `damagecalc`, `stab`, `damagevariation`, and only then `checkhit`. Rust
+  previously resolved dynamic power after the global accuracy gate and, on a
+  hit, sampled the magnitude byte before the critical byte.
+- Magnitude preparation now preserves the exported placeholder through the
+  critical roll, samples and announces the magnitude level next, calculates
+  variation, and then reaches accuracy. A scripted miss locks the exact four
+  random bytes: critical, magnitude, variation, accuracy; it also proves the
+  magnitude announcement occurs even when the later accuracy check fails.
+- `doubleundergrounddamage` occurs after `checkhit` and doubles the already
+  rounded `wCurDamage`. Rust formerly doubled Magnitude's base power before
+  the damage formula, which can differ at integer truncation boundaries and
+  also ran on a miss. The Dig bonus now runs only after a successful check and
+  doubles final damage. A paired-roll regression requires the underground
+  result to be exactly twice the ordinary result.
+
+# Pursuit retained-damage switch bonus (2026-09-03)
+
+- The `Pursuit` stream calculates critical damage, STAB, and variation before
+  its `pursuit` command, which doubles the two-byte `wCurDamage` with `$ffff`
+  saturation when the opponent is switching. Only after that does `checkhit`
+  run. Rust previously doubled base power inside the damage formula after a
+  successful accuracy check.
+- Pursuit now joins pre-`checkhit` preparation and applies the switch bonus to
+  the final rounded damage. Its doubled-power event is emitted before accuracy
+  and therefore remains visible on a later miss, just as the command itself
+  still executes in the source stream.
+- A scripted switching-target miss locks critical/variation/accuracy RNG and
+  the pre-miss bonus event. A paired-roll damage regression requires switching
+  Pursuit to deal exactly twice ordinary Pursuit damage, covering formula
+  truncation that base-power doubling cannot reproduce.
+
+# Airborne retained-damage doubling (2026-09-03)
+
+- Gust, Twister, and Earthquake run their `doubleflyingdamage` or
+  `doubleundergrounddamage` commands after damage variation but before
+  `checkhit`. These commands shift the completed two-byte `wCurDamage` and
+  saturate overflow; they do not double the move-table base power.
+- Rust formerly doubled base power inside damage calculation and reached that
+  work only after accuracy. The three effects now prepare damage before
+  `checkhit` and share the retained final-damage modifier used by Pursuit.
+  Gust/Twister require the target's Fly state, while Earthquake requires Dig;
+  the two airborne substates are no longer treated interchangeably by the
+  bonus calculation.
+- An Earthquake miss regression proves critical and variation occur first and
+  that the underground-damage command executes before the later failed
+  accuracy check. A paired-roll regression requires Dig-target Earthquake to
+  deal exactly twice its already-rounded ordinary damage. Existing Gust and
+  Twister airborne-hit coverage passes through the same source-stage helper.
+
+# Thunder split `checkhit` staging (2026-09-03)
+
+- Thunder's source stream is intentionally unlike the other damaging status
+  effects: `critical`, `damagestats`, and `damagecalc` precede
+  `thunderaccuracy`/`checkhit`, while `effectchance`, `stab`, and
+  `damagevariation` follow a successful check. Rust previously used the
+  generic accuracy-first path and then sampled critical, variation, and effect
+  chance in that order.
+- Critical results can now be staged independently from a complete prepared
+  damage hit. Thunder samples and retains its critical byte before the shared
+  check, samples effect chance immediately after a hit, and passes both into
+  damage application so variation is sampled last. Miss, Protect, and
+  airborne-avoidance paths retain the early critical read but skip the later
+  effect-chance and variation reads.
+- A four-byte scripted hit distinguishes every slot: critical 200, accuracy
+  0, effect chance 200, and raw variation 221 (rotated to 238). A protected
+  Thunder regression separately proves that only Protect's own roll and
+  Thunder's pre-check critical roll occur; accuracy, effect chance, and
+  variation do not.
+
+# Rage/Rollout/Fury Cutter split staging (2026-09-03)
+
+- Rage, Rollout, and Fury Cutter run `critical`, `damagestats`, `damagecalc`,
+  and `stab` before `checkhit`, but perform their power command and
+  `damagevariation` afterward. Rust previously used its global accuracy gate
+  first, so a miss skipped the source's critical RNG read.
+- These effects now retain a staged critical result across `checkhit`; a hit
+  continues into the move-specific escalation and variation stages, while a
+  miss still performs the appropriate Rollout/Fury Cutter chain cleanup
+  without sampling variation.
+- A scripted regression covers all three streams and requires exactly two RNG
+  reads on a miss: critical, then accuracy. Rampage is deliberately excluded
+  because its source stream places `checkhit` before `critical`.
+
+# Fixed-damage `constantdamage` staging (2026-09-03)
+
+- Super Fang, Psywave, Static Damage, and Level Damage share the source stream
+  `constantdamage`, `checkhit`, then `resettypematchup`. Rust previously
+  created the fixed amount only after its shared Protect and accuracy gates.
+- The family now retains its fixed damage before `checkhit`. In particular,
+  Psywave completes its rejection loop before a later accuracy miss or
+  Protect interception, and it samples the amount before type immunity is
+  evaluated by the equivalent of `resettypematchup`.
+- Scripted regressions lock all three boundaries: rejected and accepted
+  Psywave bytes before an accuracy miss, the same loop after Protect succeeds
+  but before Protect is observed, and accepted damage followed by accuracy
+  and then a Psychic-to-Dark immunity failure.
+
+# Present critical/STAB staging (2026-09-03)
+
+- Present's stream runs `checkhit`, `critical`, and `damagestats` before the
+  `present` command. That command itself runs STAB/type matching before it
+  samples the power/heal byte. Rust previously selected Present's branch
+  first and therefore skipped critical RNG entirely for healing and immunity.
+- Present now stages its critical result before entering branch selection and
+  reuses it if the move continues into damage calculation. Healing consumes
+  critical then the Present byte and ends without variation; immunity
+  consumes critical but no Present byte.
+- Scripted regressions distinguish the heal-byte order and the immunity exit.
+  Existing damage, heal, failed-heal, breakpoint, and link-colosseum glitch
+  tests now use the corrected `critical -> present -> variation` byte order.
+
+# Beat Up slot loop and wild branch (2026-09-03)
+
+- Beat Up's loop returns to `critical`, not to its eligibility logic. Every
+  visited party slot therefore consumes a critical byte before `beatup`
+  rejects a fainted or statused member; only eligible members proceed to
+  damage variation. Rust previously prefiltered the party and skipped all RNG
+  for rejected slots.
+- Rust now visits slots in source order, retains each critical result, and
+  applies the existing HP/status selection bug only after the critical read.
+  A scripted three-slot regression requires critical/variation for the first
+  eligible member and critical-only reads for poisoned and fainted members.
+- `EndLoop` sends a one-member party directly to `EndMoveEffect`, even when
+  its only member was rejected, so King's Rock is skipped. Larger failed
+  parties still reach the shared tail. A regression locks the one-member
+  critical read while leaving a guaranteed-flinch byte unused.
+- Wild-enemy Beat Up bypasses OT-party HP/status checks, uses the active
+  attacker, and takes the one-attacker exit. Rust now follows that branch even
+  if stored enemy-party data contains additional members; a statused-wild
+  regression proves exactly one critical/variation pair and one participant.
+
+# Future Sight setup and delayed `checkhit` (2026-09-03)
+
+- Future Sight's setup stream calculates and stores unvaried damage, then its
+  `futuresight` command jumps to `EndMoveEffect`. The following
+  `damagevariation` and `checkhit` are unreachable on setup. Rust previously
+  ran its global accuracy/Protect gates first, allowing setup to miss or be
+  blocked.
+- CheckHit execution is now explicitly gated for the whole shared path, so a
+  no-check effect does not calculate accuracy, consume Lock-On, consult X
+  Accuracy, or test airborne state. Scripted setup regressions prove 1%-
+  accuracy Future Sight consumes no RNG and queues through Protect.
+- When the countdown lands, `CheckFutureSight` restores the stored damage and
+  resumes after the `futuresight` command. Rust now reloads Future Sight move
+  data and runs variation before the delayed Protect/Lock-On/airborne/X
+  Accuracy/ordinary-accuracy gates. A two-byte regression proves maximum
+  variation is consumed before a later accuracy miss discards the attack.
+- Pending-state tests now provide canonical Future Sight move data explicitly;
+  missing landing data remains an error rather than using a fallback accuracy.
+
+# TrapTarget after Substitute damage (2026-09-03)
+
+- Bind, Wrap, Fire Spin, and Whirlpool run `traptarget` after `applydamage`,
+  `checkfaint`, and `buildopponentrage`. The command first rejects an existing
+  WrapCount, then checks the target's live Substitute state before sampling its
+  duration. A trapping hit that breaks the Substitute can therefore apply the
+  trap, while a hit that leaves it intact cannot.
+- Rust formerly returned immediately after redirecting any damaging hit into
+  a Substitute, skipping the later TrapTarget command even when that damage
+  had just broken the decoy. Substitute damage now continues through the
+  source-ordered rage and trapping commands, and TrapTarget performs its own
+  live Substitute check before consuming RNG.
+- Scripted regressions cover both sides of the boundary: breaking a one-HP
+  Substitute consumes the duration byte and stores `BattleRandom & 3 + 3`,
+  while a surviving Substitute leaves the target untrapped and consumes no
+  duration byte.
+
+# Wild ForceSwitch and Teleport level checks (2026-09-03)
+
+- The underleveled wild-battle paths for Roar/Whirlwind and player Teleport
+  preserve the opponent's level in register `b`, rejection-sample a byte below
+  `attacker_level + target_level + 1`, shift `b` twice, and succeed only when
+  the byte is at least `target_level / 4`. Rust formerly compared against the
+  attacker's quarter-level, increasing success odds whenever the attacker was
+  lower-level.
+- Both routines now compare the accepted byte with the target's quarter-level.
+  Scripted level-20-versus-level-40 regressions use byte 6 to distinguish the
+  correct threshold 10 from the former threshold 5 and require failure.
+- Wild enemy Teleport retains Crystal's separate control-flow bug: an
+  underleveled enemy still executes the same rejection loop and comparison but
+  falls through to success regardless of the resulting flags. The existing
+  always-success regression now also requires that RNG byte, after the
+  source-positioned `TryEnemyFlee` read, so the escaped state and random stream
+  both match the cartridge.
+
+# Swagger and direct-confusion command boundaries (2026-09-03)
+
+- Swagger's `attackup2` sets `wAttackMissed` when the target is already at
+  maximum Attack. Its following `failuretext` then jumps to `EndMoveEffect`,
+  so `confusetarget` is never reached and no confusion-duration byte is read.
+  Rust formerly continued into confusion even though the stat command failed.
+- Swagger now stops when Attack did not change and routes successful raises
+  through the silent `ConfuseTarget` semantics shared by secondary confusion:
+  Safeguard, Substitute, or existing confusion simply prevents the effect.
+  Scripted regressions prove maximum Attack leaves confusion clear with zero
+  RNG reads and that an already-confused target produces no direct-confusion
+  failure event.
+- The standalone `Confuse` command has a deliberately different order after
+  its stream-level Safeguard check: it reports existing confusion before it
+  checks Substitute. Rust's direct path now preserves that precedence; a
+  target with both states produces the existing-confusion result and consumes
+  no duration RNG.
+
+# Conversion2 persistent source-move register (2026-09-03)
+
+- `BattleCommand_Conversion2` reads `BATTLE_VARS_LAST_COUNTER_MOVE_OPP`, a
+  persistent used-move register. It does not consult the same-turn damage
+  buffer: the opponent's prior move remains eligible across turn boundaries,
+  and a move need not have dealt damage to supply its type.
+- Rust formerly sourced Conversion2 from `BattleLastDamageState`, required the
+  recorded source to be the opponent, and lost that state at every turn-end
+  clear. Conversion2 now reloads move data from the opponent's exact persistent
+  last-counter-move field before running the existing numeric type-slot
+  rejection loop.
+- A scripted regression starts with no last-damage record but retains Tackle
+  in the opponent register, samples numeric slot 8, and requires Conversion2
+  to become Ghost and consume exactly that one RNG byte. The separate failure
+  regression now names the actual missing-register condition.
+
+# Copy/called-move history clearing (2026-09-03)
+
+- Mirror Move, Mimic, Metronome, and Sleep Talk begin their effect commands
+  with `ClearLastMove`, zeroing both the user's ordinary last-move and
+  last-counter-move registers on success and failure. Mirror Move, Metronome,
+  and Sleep Talk then invoke their selected move through `ResetTurn`, whose
+  charging guard makes `DisplayUsedMoveText` leave those registers clear.
+- Rust formerly retained the wrapper move in both registers. All four paths
+  now clear the shared history at the command boundary, with successful and
+  failed tests asserting the state observed later by Encore, Disable, Spite,
+  Mirror Move, and Conversion2.
+- `CheckUserMove` makes Mirror Move fail when the user already knows the
+  opponent's last move. Mimic likewise scans all four effective battle move
+  slots and additionally rejects Struggle. Rust previously rejected only a
+  recursive copy of the wrapper itself, allowing duplicate learned moves.
+  Dedicated regressions now preserve the full moveset checks. The former
+  successful Mirror Move fixture was corrected because it already included
+  Tackle and therefore contradicted the source rule.
+
+# Spite low-PP reduction text (2026-09-03)
+
+- Spite samples a nominal 2–5 PP loss, then compares it with the target move's
+  remaining PP and keeps the smaller value in register `b`. The same clamped
+  byte is used both for subtraction and `_SpiteEffectText`'s displayed number.
+- Rust already saturated the stored PP at zero but retained the unclamped
+  random amount in `BattleEvent::SpiteApplied`, so a one-PP move could visibly
+  claim it lost two through five PP. The event now carries the exact applied
+  reduction used by the cartridge text path.
+- A scripted maximum-roll regression starts Tackle at one PP and requires
+  `pp_before: 1`, `pp_after: 0`, `reduction: 1`, and exactly one RNG read.
+  Existing ordinary and transformed-target Spite coverage passes unchanged.
+
+# Mimic battle-only move and PP persistence (2026-09-03)
+
+- Mimic replaces only the selected battle move with the copied move at five
+  PP. The permanent party slot remains Mimic: `BattleCommand_DoTurn` consumes
+  Mimic's party PP before the effect, while `CheckMimicUsed` suppresses later
+  party-PP writes whenever that slot holds Mimic but the battle slot does not.
+- Rust formerly copied the complete active combat Pokemon over its party slot
+  at turn end and on switch-out. This permanently taught the copied move and
+  discarded Mimic, while also storing the copied move's temporary five PP.
+- Ordinary PP consumption now mirrors the post-consumption battle PP into the
+  matching party slot, except for the exact Mimic mismatch guarded by the
+  cartridge. Active-to-party synchronization and switch-out preserve that
+  permanent Mimic slot. Regressions cover the initial copy (`Mimic` at four PP
+  in party, copied move at five PP in battle), using the copied move without
+  consuming party PP, switching out without teaching it permanently, and
+  Sketch continuing to replace the party move permanently.
+- The outer `GameState` commit formerly performed a second active-Pokemon
+  overwrite after committing the correct combat party snapshot, reintroducing
+  the copied move in saved storage. Commit now writes party-snapshot moves to
+  persistent storage while retaining battle-active moves only in resumable
+  combat state. A commit-level regression verifies both representations and
+  their distinct PP values survive together.
+
+# Thief mail immunity (2026-09-03)
+
+- Both sides of `BattleCommand_Thief` pass the prospective held item through
+  `ItemIsMail` and return immediately on carry. This happens before either the
+  active battle item or corresponding party item is cleared or assigned.
+- Rust formerly took any target item unconditionally once the attacker had an
+  empty held-item slot, allowing either side to steal all ten mail items.
+- Thief now identifies mail before mutating either combatant. A symmetric
+  player/enemy regression requires Flower Mail to remain on its holder, the
+  attacker to remain empty-handed, and the command to report the precise
+  no-transfer outcome. Ordinary held-item theft still passes unchanged.
+
+# Curse hidden-target gate and stat-command order (2026-09-03)
+
+- Ghost Curse owns a branch-local `CheckHiddenOpponent` before its Substitute
+  and existing-Curse checks. A target in Fly or Dig therefore makes the move
+  fail before the Curse bit is set or half of the user's maximum HP is paid.
+  Rust formerly omitted this private hidden check and applied the full effect.
+- Non-Ghost Curse runs its three stat commands in the fixed order Speed down,
+  Attack up, then Defense up. Rust reached the same final stages but emitted
+  and processed them as Attack, Defense, Speed.
+- The Ghost branch now rejects an airborne target without spending HP, while
+  the self-targeted non-Ghost branch remains unaffected by opponent hiding.
+  Regressions cover the hidden failure and the exact stat-command event order;
+  all pre-existing Curse state, residual, duplicate, and switch tests pass.
+
+# Branch-local hidden checks and StatDown ordering (2026-09-03)
+
+- Nightmare, Foresight, Transform, Attract, Mimic, and ArenaTrap/Mean Look
+  each call `CheckHiddenOpponent` inside their own command. This is distinct
+  from `CheckHit`: commands without `checkhit` still reject Fly/Dig, while
+  Lock-On can pass `CheckHit` only for the later command-local check to fail.
+- Rust formerly relied on shared hit handling and let these direct effects
+  apply when their target was hidden. Each handler now performs its private
+  gate in source order. Transform also restores its leading `ClearLastMove`,
+  clearing both history registers on success and every failure path.
+- `BattleCommand_StatDown` has the same second hidden check after its Mist,
+  lower-bound, enemy-random-failure, and Substitute logic. Rust now preserves
+  that order: Lock-On is consumed but cannot lower a hidden target's stat, and
+  an enemy's 25% failure byte is consumed before Substitute is consulted.
+- Regressions cover all six direct commands, Transform history on success and
+  failure, the Lock-On/stat-down double gate, and both outcomes of the enemy
+  AI roll in front of Substitute.
+
+# Heal Bell ignores abilities (2026-09-03)
+
+- `BattleCommand_HealBell` unconditionally clears the user's active Nightmare
+  bit, active status byte, and all six status bytes in that side's party. Its
+  only side-dependent behavior is selecting the player or OT party base and
+  recalculating that side's active stats; Crystal has no Soundproof exception.
+- Rust had imported a later-generation rule into both the live combat handler
+  and the persistent player-party commit, leaving Soundproof users and
+  Soundproof benched members afflicted after Heal Bell.
+- Both ability gates are removed. Regressions cover a Soundproof active user,
+  a Soundproof benched member across `GameState` commit, and the enemy path's
+  active Nightmare, full-party status, and loaded paralysis-penalty clearing.
+
+# Ability gates cannot preempt Crystal move commands (2026-09-03)
+
+- Crystal's Perish Song sets the Perish bit and count to four on each battler
+  that does not already have it. Roar/Whirlwind enter the protected-battle,
+  wild-level, or trainer-replacement branches directly. Selfdestruct always
+  reaches its damage stream and then clears the user's HP/status. None of
+  these commands consult abilities.
+- Rust had later-generation Soundproof, Suction Cups, and Damp gates in those
+  paths. It also applied a shared Soundproof pre-effect rejection to Crystal
+  sound moves including Growl, Sing, Screech, Snore, Supersonic, and Roar,
+  preventing their authored command streams from executing.
+- Those gates are removed while the existing Crystal context, accuracy, RNG,
+  and failure rules remain unchanged. End-to-end regressions require Perish
+  Song to affect two Soundproof battlers, guaranteed wild Whirlwind to remove
+  a Suction Cups target, Selfdestruct to execute in Damp's presence, and Growl
+  to lower a Soundproof target's Attack.
+
+# Psych Up baseline failure (2026-09-03)
+
+- `BattleCommand_PsychUp` scans all `NUM_LEVEL_STATS` opponent stage bytes
+  before copying them. If every byte equals `BASE_STAT_LEVEL`, it animates a
+  failed move, prints `But it failed!`, and leaves the user's stages intact.
+- Rust unconditionally copied the opponent stage map and emitted success. An
+  unmodified target therefore erased the user's boosts and displayed the
+  two-page copied-stats message even though the cartridge rejects the move.
+- Psych Up now returns a typed failure event before mutation when all target
+  stages are baseline. The battle-message projection renders the authored
+  failure page, and the event journal distinguishes player/enemy failures.
+  A red-first end-to-end regression preserves the user's Attack and Defense
+  stages while proving no success event is emitted.
+
+# Weather-command replay asymmetry (2026-09-03)
+
+- `BattleCommand_StartRain` and `BattleCommand_StartSun` always overwrite the
+  current weather and reset `wWeatherCount` to five, even when that same
+  weather is already active. `BattleCommand_StartSandstorm` uniquely compares
+  the current weather first and runs the failed-move path on a repeat.
+- Rust used one unconditional weather helper for all three moves, so a second
+  Sandstorm incorrectly refreshed its remaining duration and replayed the
+  brewed-storm success text.
+- The shared helper now preserves the exact Sandstorm-only rejection. A typed
+  failure event produces `But it failed!`, the existing storm continues
+  through its ordinary between-turn decrement, and companion coverage locks
+  in Rain Dance and Sunny Day's intentional five-turn refresh behavior.
+
+# Belly Drum owns its complete result text (2026-09-03)
+
+- `BattleCommand_BellyDrum` invokes `AttackUp2` internally but never calls a
+  stat-up message command. Success prints only `BellyDrumText` (`<USER> cut
+  its HP and maximized ATTACK!`). Both maximum-Attack and insufficient-HP
+  failures print only `But it failed!`; the latter still retains Crystal's
+  preliminary +2 Attack glitch.
+- Rust exposed successful and glitched stage mutations as ordinary
+  `StatStageChanged` events, so the renderer displayed an invented Attack-rise
+  page. Failure additionally used a generic heal result rather than owning the
+  command's exact outcome.
+- Belly Drum now emits dedicated success/failure events containing its HP and
+  Attack-stage mutations for deterministic journaling. The renderer maps them
+  to the two authored text paths, while no generic stat message can leak from
+  the internal command. Regressions cover success, the half-HP +2 glitch, and
+  the maximum-Attack no-mutation failure.
+
+# Capped non-Ghost Curse names ABILITY (2026-09-03)
+
+- Before running Speed down, Attack up, and Defense up, non-Ghost
+  `BattleCommand_Curse` tests whether both raisable stats are already capped.
+  Its failure branch deliberately asks `GetStatName` for the eighth synthetic
+  entry and prints `<USER>'s ABILITY won't rise anymore!`.
+- Rust represented this as an ordinary unchanged Attack stage. The visible
+  message therefore named `ATTACK`, losing a cartridge-specific text oddity.
+- The capped branch now emits a dedicated typed outcome and the renderer uses
+  the exact three-line `ABILITY` message. An end-to-end regression starts with
+  capped Attack/Defense and boosted Speed, proves all three stages remain
+  untouched, and excludes the former generic stat event.
+
+# Leech Seed owns EvadedText (2026-09-03)
+
+- After `checkhit`, `BattleCommand_LeechSeed` sends an accuracy miss, a target
+  behind Substitute, and an already-seeded target to the same `EvadedText`:
+  `<TARGET> evaded the attack!`. A protected target first receives
+  `ProtectingItselfText` from `CheckHit`, then the Leech Seed command still
+  prints `EvadedText`. Grass immunity remains the distinct doesn't-affect path.
+- Rust returned at shared hit gates and projected the three failures as an
+  attacker-owned generic miss, `It didn't affect`, or `But it failed`; Protect
+  also omitted the command's required second page.
+- Leech Seed now emits its command-owned failed outcome after Protect and an
+  accuracy miss, and uses that outcome directly for Substitute/existing-seed
+  rejection. The renderer suppresses only the redundant generic accuracy
+  page and maps the shared outcome to the exact target-owned evasion text.
+  Regressions cover all three command branches, Protect's two-result order,
+  and unchanged accuracy RNG consumption.
+
+# Rest ignores abilities (2026-09-03)
+
+- `BattleCommand_Heal` compares current and maximum HP before its Rest branch,
+  then clears toxic state, overwrites the user's status with
+  `REST_SLEEP_TURNS + 1`, and restores HP. It never consults an ability.
+- Rust inserted a later-generation sleep-immunity gate before the source HP
+  comparison, allowing Insomnia or Vital Spirit to reject Rest on a damaged
+  user. That changed both the resulting HP/status and the visible result.
+- The non-ASM gate is removed. An end-to-end regression requires both ability
+  labels to leave a damaged user fully healed and asleep for the exact stored
+  count of three; the existing full-HP failure regression keeps Crystal's
+  intentionally HP-first rule locked independently.
+
+# Pain Split owns its post-CheckHit failure (2026-09-03)
+
+- Pain Split's effect stream runs `checkhit` and then always enters
+  `BattleCommand_PainSplit`. A Protect, Fly/Dig avoidance, or accuracy failure
+  leaves `wAttackMissed` set, and the command prints `PrintDidntAffect2`;
+  Substitute reaches the same text through the command's private check.
+- Rust returned from all three shared `CheckHit` gates before Pain Split and
+  rendered their generic miss/evasion result. Substitute emitted the generic
+  blocked-effect event. Protected Pain Split consequently omitted the second
+  source page after `<TARGET>'s PROTECTING itself!`.
+- All four paths now emit one typed `PainSplitFailed` outcome. Accuracy and
+  airborne journal events remain available but their superseded generic pages
+  are suppressed for this move; Protect retains its first page and is followed
+  by exact `It didn't affect <TARGET>!`. Regressions lock Protect ordering,
+  one-byte miss RNG, Fly avoidance, Substitute routing, and no HP mutation.
+
+# Mimic still clears history after CheckHit failure (2026-09-03)
+
+- Mimic's stream reaches `BattleCommand_Mimic` after `checkhit` regardless of
+  the flag result. The command begins with `ClearLastMove` and only afterward
+  reads `wAttackMissed`, so Protect, Fly/Dig avoidance, and ordinary accuracy
+  misses all clear both of the user's used-move registers before failing.
+- Rust returned from the shared hit gate first. Failed Mimic therefore remained
+  recorded as the user's last move and last counter move, contradicting the
+  command behavior later consumed by Encore, Disable, Spite, Mirror Move, and
+  Conversion2. It also rendered a generic miss/evasion page.
+- All three shared failure paths now execute Mimic's history clear and emit its
+  typed failure without sampling any extra RNG. Generic miss/evasion text is
+  suppressed for Mimic. A protected use retains `<TARGET>'s PROTECTING itself!`
+  and then selects `FailMimic`'s Protect-specific `It failed!` instead of the
+  ordinary `But it failed!`. End-to-end regressions lock both registers, event
+  order inputs, the one-byte accuracy path, and the zero-byte Fly path.
+
+# Encore and Spite own PrintDidntAffect2 (2026-09-03)
+
+- Both effect streams run `checkhit` and then their command. Every Encore
+  failure, including `wAttackMissed`, reaches `PrintDidntAffect2`; Spite has
+  the same terminal failure path. Their authored result is therefore
+  `It didn't affect <TARGET>!`, not `But it failed!` or an attacker-owned miss.
+- Rust returned at Protect, Fly/Dig avoidance, or ordinary accuracy failure and
+  never emitted either command's typed result. Even non-hit-related Encore and
+  Spite failures were projected as the wrong generic failure text.
+- The shared post-`CheckHit` dispatcher now carries Protect, airborne, and
+  accuracy failure kinds and emits the correct Encore/Spite result without
+  changing their random stream. The renderer suppresses only the superseded
+  miss/evasion page and always uses the exact target-owned text; Protect keeps
+  its preceding protection page. End-to-end regressions cover both commands
+  across all three gates, including one-byte accuracy and zero-byte Fly paths.
+
+# Post-CheckHit FailMove command family (2026-09-03)
+
+- Conversion 2, Attract, Disable, and Foresight run their own command after
+  `checkhit` and route `wAttackMissed` to `FailMove`. Ordinary accuracy or
+  Fly/Dig rejection therefore prints `But it failed!`; Protect first prints
+  its protection page and makes `FailMove` select `It failed!` instead.
+- Force Switch likewise observes `wAttackMissed` inside its later command, but
+  its private `.fail` routine always calls `PrintButItFailed`, including after
+  Protect. Rust formerly returned from the shared gate before all five command
+  outcomes and exposed the generic accuracy/evasion text instead.
+- The typed post-hit dispatcher now emits each command's existing failure
+  variant for Protect, airborne rejection, and accuracy misses. Presentation
+  correlates those events by actual `(side, move_name)` rather than assuming an
+  effect id is also a move id; this is required for `ROAR` and `WHIRLWIND`
+  sharing `FORCE_SWITCH`. Four `FailMove` variants select the Protect-specific
+  wording, while Force Switch retains `But it failed!`. Table-driven
+  regressions cover all five commands at the accuracy and Protect gates, all
+  four ordinary-priority commands against Fly, and an isolated zero-RNG Roar
+  versus Fly boundary. Whirlwind's authored ability to hit Fly remains intact.
+
+# Lock-On and Mind Reader own PrintDidntAffect (2026-09-03)
+
+- Both moves share `BattleCommand_LockOn`. After its Substitute check, the
+  command reads `wAttackMissed`; either rejection enters the same `.fail`
+  branch, runs `AnimateFailedMove`, and prints `PrintDidntAffect`. Protect and
+  Fly/Dig avoidance reach that command with the missed flag already set, just
+  like an ordinary accuracy miss.
+- Rust returned from those shared `CheckHit` gates before the command and used
+  a generic blocked-effect result for Substitute. That split one authored
+  failure into several projections and omitted Lock-On's second page after the
+  target's Protect message.
+- A typed `LockOnFailed` result now joins all four failure routes for both
+  actual move names. Presentation correlates the event by `(side, move_name)`,
+  suppresses only the superseded generic miss/evasion page, preserves the
+  failed-move animation, and renders exact `It didn't affect <TARGET>!` text.
+  Regressions cover Lock-On and Mind Reader across accuracy, Protect, and Fly,
+  plus Lock-On against Substitute; they lock one-byte ordinary accuracy use,
+  zero-byte airborne rejection, and Protect's own single random byte.
+
+# Attract ignores abilities (2026-09-03)
+
+- `BattleCommand_Attract` rejects only a missed attack, a genderless or
+  same-gender pairing, a hidden opponent, or an already-attracted opponent.
+  Crystal predates abilities and has no Oblivious check in this command.
+- Rust added a later-generation target-ability immunity after the source's
+  hidden-opponent check, causing an otherwise valid opposite-gender Attract to
+  fail against an ability-bearing imported battler.
+- The non-ASM gate is removed. An end-to-end regression gives the target
+  `OBLIVIOUS` and requires the normal `AttractApplied` result and volatile
+  attraction state, while the existing opposite-gender success and same-gender
+  failure coverage continues to lock the actual Crystal checks.
+
+# Status, stat, confusion, and flinch commands ignore abilities (2026-09-03)
+
+- Crystal's status target commands consult existing status, type immunity,
+  enemy-command failure, Substitute, Safeguard, and weather where authored.
+  Confuse/ConfuseTarget, StatDown, FlinchTarget, HeldFlinch, and `effectchance`
+  likewise contain no ability branches; the last compares its one byte only
+  with the move's stored chance.
+- Rust let later-generation abilities preempt these commands: Insomnia/Vital
+  Spirit/Immunity/Limber/Water Veil/Magma Armor blocked status, Own Tempo
+  blocked confusion, Inner Focus blocked both flinch paths, four defensive
+  abilities blocked stat drops, Serene Grace rewrote effect chance, and Shield
+  Dust cancelled successful secondary effects. Several checks also ran before
+  the source's Safeguard, Substitute, hidden-target, or RNG boundary.
+- Crystal move commands now bypass those ability gates while retaining their
+  exact native checks and random consumption. Ability-originated extension
+  hooks remain isolated at their own call sites rather than leaking into the
+  ASM move-command path. Regressions cover all six status-blocking abilities,
+  direct and secondary confusion, built-in and King's Rock flinch, all four
+  stat-drop abilities, and source-threshold effect-chance outcomes against
+  both Serene Grace and Shield Dust.
+
+# CheckHit and Critical ignore abilities (2026-09-03)
+
+- `BattleCommand_CheckHit` derives its accuracy byte from the move record,
+  Accuracy/Evasion stages, Foresight, the authored Thunder weather branches,
+  BrightPowder, X Accuracy, and Lock-On before its single `BattleRandom`
+  comparison. `BattleCommand_Critical` similarly stores the result of its
+  move/item/Focus Energy threshold roll without consulting the target.
+- Rust additionally scaled accuracy for Compound Eyes, Hustle, and Sand Veil,
+  and discarded successful critical rolls against Battle Armor or Shell Armor.
+  The latter affected both the ordinary damage path and Beat Up's private hit
+  loop.
+- Both source commands are now ability-neutral. Regressions require an exact
+  unchanged 127 accuracy byte for a 50%-accuracy move under all three ability
+  cases, and require the same known Focus Energy critical roll to remain
+  critical against both defensive abilities. Existing Foresight, weather,
+  BrightPowder, Lock-On, critical-stage, and RNG-order tests retain the actual
+  Crystal modifiers.
+
+# Damage and OHKO commands ignore abilities (2026-09-03)
+
+- Crystal's `DamageCalc`, STAB/type commands, and `BattleCommand_OHKO` operate
+  only on battle stats, move data, types, items, screens, weather, badges, and
+  the source critical/random registers. There are no ability absorption,
+  damage-ratio, type-immunity, or Sturdy branches.
+- Rust fed live abilities through the shared damage calculator, allowing
+  Pure Power, Thick Fat, Levitate, and Wonder Guard to change otherwise
+  identical damage. Flash Fire, Water Absorb, and Volt Absorb returned before
+  the authored effect stream, while Sturdy invented a third typed OHKO failure
+  reason and presentation path.
+- The Crystal damage boundary now passes ability-neutral combat snapshots,
+  removes the pre-effect absorption exit, and removes the unconstructible
+  Sturdy OHKO reason. Paired identical-RNG regressions require exact neutral
+  damage under offensive, defensive, and immunity abilities; end-to-end tests
+  require all three absorb abilities to receive damage and a successful
+  level-checked OHKO to faint a Sturdy target.
+
+# Post-damage commands ignore abilities (2026-09-03)
+
+- After `ApplyDamage`, Crystal proceeds through only the commands present in
+  the selected effect stream: Rage/Bide bookkeeping, secondary effects,
+  draining, recoil, faint checks, and later authored commands. No generic
+  contact or defender-type callback exists. `DrainTarget` always heals half
+  the dealt damage (rounded up), and recoil always subtracts one quarter.
+- Rust appended a shared contact callback for Rough Skin, Cute Charm, Effect
+  Spore, Flame Body, Poison Point, and Static, then applied Color Change after
+  every surviving hit. Liquid Ooze inverted drain healing and Rock Head
+  suppressed recoil. These hooks added mutations and RNG bytes between source
+  commands.
+- The generic post-hit callback and its now-unreachable implementation are
+  removed, as are the Liquid Ooze and Rock Head branches. Regressions require
+  identical attacker HP/type state after Rough Skin and Color Change targets,
+  exact drain healing against Liquid Ooze, and exact recoil against Rock Head.
+
+# Action timing and between-turn flow ignore abilities (2026-09-03)
+
+- Crystal's `CheckTurn` has no Truant branch, `DoTurn` subtracts one PP, Sleep
+  decrements its counter once, and action order uses the loaded Speed plus
+  stages, badges, paralysis, priority, and its tie byte. The between-turn
+  sequence contains no generic ability phase.
+- Rust could cancel alternating actions with Truant, spend two PP against
+  Pressure, decrement Sleep twice for Early Bird, double Speed under Swift Swim
+  or Chlorophyll weather, raise Speed at end of turn, or cure status through
+  Shed Skin. Those paths also mutated extension counters and consumed
+  Emerald-style random words outside the source sequence.
+- The gates, PP multiplier, extra Sleep tick, Speed multiplier, Truant-cycle
+  mutation, and entire end-turn ability phase are removed. Regressions require
+  a Truant user to act and spend exactly one PP against Pressure, Early Bird to
+  retain the one-tick sleeping result, weather abilities to preserve neutral
+  Speed, and Speed Boost/Shed Skin to leave state and RNG untouched.
+
+# Battle start, switching, and running ignore abilities (2026-09-03)
+
+- Crystal initializes held battle items without a switch-in ability phase.
+  Ordinary switching commits the outgoing battle Pokémon exactly as authored,
+  loads the selected party member, and checks only Wrap/Mean Look-style source
+  traps. Wild running uses the loaded Speed formula and failed-attempt count.
+- Rust ran Trace, weather setters, Forecast, Intimidate, status self-cures, and
+  Natural Cure around battle entry or switching. Shadow Tag/Magnet Pull could
+  block switches, and Run Away bypassed the cartridge escape calculation.
+  Trace additionally required battle-local restoration state during commits.
+- All switch-in/out and escape ability gates are removed. Trace restoration
+  fields/helpers are deleted, and the former `abilities_initialized` boundary
+  is now the accurately named `battle_start_items_initialized` boundary that
+  performs only the retained held-item initialization. Regressions preserve an
+  outgoing Natural Cure status, ignore an incoming weather ability, permit
+  switches against both ability traps, and require Run Away to consume and
+  obey the ordinary failed escape roll.
+
+# Remaining live battle ability dispatch removed (2026-09-03)
+
+- Crystal weather reads the battle weather byte directly, weather commands do
+  not transform species, status commands do not reflect ailments, and victory
+  does not run a party item-generation pass. None of these boundaries reads a
+  species ability field.
+- Rust still let Air Lock suppress weather, Forecast rewrite Castform's types,
+  Synchronize reflect status, and Pickup consume Emerald-style random words to
+  create an item after victory. Stale Flash Fire flags also remained serialized
+  and could modify Fire power despite the absorption entry point being gone.
+- Those final live battle dispatches, Pickup tables/event, Forecast helper,
+  Synchronize recursion, and Flash Fire fields are removed. The status helper
+  no longer accepts a synthetic ability argument. Regressions require weather
+  and status to ignore Air Lock/Forecast/Synchronize and require a winning
+  Pickup battler to retain an empty item slot without consuming that post-win
+  extension path. A source search now finds no ability read in `turn.rs`; the
+  shared damage calculator is audited separately below.
+
+# Shared damage calculator and AI ignore abilities (2026-09-03)
+
+- Crystal's `DamageCalc`, `DamageStats`, weather modifier, burn penalty, STAB,
+  and type-matchup routines have no ability branches. The battle AI estimates
+  damage with the same source arithmetic rather than a separate ruleset.
+- Rust's shared calculator still applied Pure Power, Hustle, Marvel Scale,
+  Thick Fat, Torrent/Blaze/Overgrow/Swarm, Air Lock, Guts, Levitate, Wonder
+  Guard, and elemental absorption abilities. The live turn path had been
+  neutralizing cloned battlers as a boundary workaround, but direct callers
+  such as AI scoring continued to observe the extension mechanics.
+- All ability reads and modifiers are removed from the shared calculator, and
+  the turn workaround is deleted. Direct regressions lock offensive stat,
+  defensive reduction, immunity/absorption, low-HP, weather suppression, and
+  burn cases; every caller now receives the same ability-neutral Gen II damage.
+
+# Walking encounters ignore abilities (2026-09-03)
+
+- Crystal's `TryWildEncounter` derives its threshold from the map encounter
+  rate, music, and Cleanse Tag before making the source `Random` call. It does
+  not inspect the lead party member or species metadata.
+- Rust passed a `lead_ability` option from the asset facade and doubled or
+  halved the threshold for Illuminate and Stench. That changed both the
+  encounter result and the carry supplied to the exact RNG emulation.
+- The option, party-ability lookup, facade plumbing, and modifiers are removed
+  end-to-end. The walking-rate regression now locks the unmodified 20-percent
+  source threshold of 51; Cleanse Tag retains its separate cartridge behavior.
+
+# Dead runtime ability library removed (2026-09-03)
+
+- After the battle and encounter call sites became ability-neutral, the core
+  still publicly exposed a standalone module implementing the removed Gen III
+  mechanics. Its own tests could pass despite no longer representing any
+  executable Crystal behavior.
+- The module and public export are deleted. The optional Gen III pack's exact
+  assigned-ability vocabulary remains only as a private data-integrity catalog
+  beside that pack's verifier; it no longer claims those values are implemented
+  runtime mechanics.
+
+# False Swipe one-HP and Substitute ordering (2026-09-03)
+
+- `BattleCommand_FalseSwipe` runs after damage variation and before
+  `checkhit`/`applydamage`. Whenever retained damage is at least the target's
+  HP, it replaces `wCurDamage` with target HP minus one. At one HP this is
+  exactly zero; an ordinary critical marker remains an ordinary critical.
+- Rust applied the clamp only during final HP settlement and only when target
+  HP exceeded one. False Swipe could therefore faint a one-HP target, and a
+  Substitute received the unclamped retained damage because its damage path
+  returned before the late clamp.
+- The clamp now lives at the pre-`checkhit` final-damage command boundary.
+  Regressions require a critical False Swipe at one HP to report zero damage,
+  preserve the target and critical result, and leave an existing Substitute
+  at the same HP while still routing through its zero-damage narration and
+  `ResetDamage` tail.
+
+# Endure/Focus Band precede Substitute damage (2026-09-03)
+
+- `BattleCommand_ApplyDamage` checks Endure first; without Endure it inspects
+  and samples Focus Band. A successful survival check calls False Swipe's
+  lethal clamp before `DoEnemyDamage`/`DoPlayerDamage` decides whether the
+  retained damage goes to Substitute or real HP. Focus Band's byte is sampled
+  whenever the item reaches this command, even if damage is nonlethal.
+- Rust returned through its Substitute helper before either survival branch.
+  This skipped Focus Band RNG and let a doll receive full damage where the ASM
+  had already reduced a lethal-to-the-battler value to HP minus one. The older
+  audit description incorrectly endorsed that implementation order and is
+  corrected above.
+- Shared settlement now performs the survival phase before the Substitute/HP
+  split and emits survival narration after the damage event, matching the
+  source call/return order. Regressions cover Endure and Focus Band against a
+  Substitute plus the otherwise invisible nonlethal Focus Band RNG read. One
+  shared prelude now owns this behavior for ordinary damage, Beat Up, Future
+  Sight, Counter/Mirror Coat, Bide, and OHKO. In particular, OHKO's `$ffff` is
+  clamped before the Substitute split, with combined Endure and Focus Band
+  coverage.
+
+# Drain/recoil consume retained `wCurDamage` (2026-09-03)
+
+- `SapHealth` halves the two-byte `wCurDamage` with right shifts, rounds down,
+  and raises only a zero result to one. `BattleCommand_Recoil` likewise takes
+  one quarter with a one-HP minimum. Both commands run after `applydamage`, so
+  a real-HP overkill retains the full calculated damage rather than the HP
+  actually removed.
+- `DoSubstituteDamage` ends at `ResetDamage`. Drain and recoil still execute
+  later in their effect streams, but now see zero and therefore heal or hurt
+  the user by exactly one HP. Rust instead rounded drain upward, based both
+  effects on capped HP loss, and returned from Substitute settlement before
+  either command ran.
+- Post-damage HP commands now receive survival-modified retained damage for
+  real targets and the reset zero value after Substitute damage. Regressions
+  lock odd-damage drain rounding, overkill drain/recoil amounts, and the
+  one-HP drain/recoil results after a Substitute hit. The ordinary settlement
+  path also moved `buildopponentrage` after the post-damage HP command and
+  `checkfaint` boundary, preserving the source narration/state order for a
+  surviving Rage target. SapHealth's command/text boundary remains observable
+  at full HP as a zero-amount drain event instead of being silently skipped.
+
+# Counter/Mirror Coat retain AI damage scratch (2026-09-03)
+
+- `BattleTurn` clears `wCurDamage` and then calls `AIChooseMove` before either
+  battler acts. The last `AIDamageCalc` executed by the trainer scoring layers
+  leaves its result in that shared register. Counter and Mirror Coat read it
+  independently from the opponent's persistent `LAST_COUNTER_MOVE`, producing
+  the documented cartridge glitch when the opponent uses an item instead of
+  overwriting the scratch value with a move.
+- Rust previously returned only the selected move slot from AI and represented
+  Counter input solely as a same-turn damage record. The leaked register was
+  discarded, item turns always made Counter fail, and the source's separate
+  `CheckOpponentWentFirst` condition was only inferred from damage existence.
+- Enemy move selection now returns the selected slot plus the final AI damage
+  register through core, asset replay, and live Bevy boundaries. Counter and
+  Mirror Coat combine that amount with the persistent move identity and the
+  actual source order flag. `CheckHit` failure paths reset the shared scratch
+  exactly as `ResetDamage` does, except for Jump Kick's explicit retained-
+  damage branch; `DoSubstituteDamage` also clears it for every damage family,
+  including a zero-damage hit. Regressions cover the player-item glitch, the
+  went-first gate, a damaging miss clearing the leak, and an Aggressive AI pass
+  exposing its last calculated value.
+
+# FailureText/CriticalText own the shared critical register (2026-09-03)
+
+- `BattleCommand_FailureText` returns immediately when `wAttackMissed` is
+  clear. On a failed move it calls `GetFailureResultText`, which always clears
+  `wCriticalHit` after choosing the failure text. On a successful move,
+  `BattleCommand_CriticalText` clears a nonzero byte after displaying the
+  critical-hit or one-hit-KO message. Scripts that omit or jump around that
+  command can intentionally carry the byte across turns into later AI scoring.
+- Rust correctly retained the shared byte, but also retained a freshly rolled
+  critical after an accuracy miss. It likewise left `$ff` after a failed OHKO
+  and retained prior values through failed Counter, Mirror Coat, Swagger, and
+  delayed Future Sight resolution.
+- Failure cleanup is now gated by an exhaustive effect-to-`failuretext`
+  inventory checked against every ASM effect script, rather than being applied
+  to all failed commands. This preserves source exceptions such as Snore,
+  whose own failure jumps directly to `EndMoveEffect`. Regressions cover a
+  critical roll followed by a miss, fixed-damage type immunity, OHKO and
+  Counter failures, Swagger at the Attack cap, and both successful and missed
+  delayed Future Sight register lifetime.
+- Successful damage cleanup is independently gated by an exhaustive
+  effect-to-`criticaltext` inventory. Ordinary criticals and successful OHKOs
+  now finish at zero, while successful fixed damage, Future Sight, Counter,
+  and Bide retain the incoming marker because their scripts omit the command.
+  Present healing likewise jumps directly to `EndMoveEffect` and retains its
+  sampled critical; Present damage and immune failure clear it. Beat Up clears
+  after each eligible hit but preserves the last critical roll when a trailing
+  ineligible party slot skips directly to `EndLoop`.
+
+# Command-local `ResetDamage` owns Counter scratch lifetime (2026-09-03)
+
+- `wCurDamage` is one shared two-byte register, not a durable per-target damage
+  record. Besides ordinary damage calculation and `checkhit`, the ASM clears it
+  at several command-local boundaries that can run between trainer AI scoring
+  and a later Counter or Mirror Coat in the same turn.
+- Rust retained the seeded AI value through an awake Snore failure, the start
+  of a two-turn charge, failed duplicate Future Sight, OHKO failure, recharge
+  and other `EndTurn` action-prevention paths. It also retained real damage
+  across an ineligible trailing Beat Up party slot. Those leaks let the second
+  battler reflect damage the cartridge had already erased.
+- The turn engine now mirrors each relevant source write: all action-prevention
+  exits that jump to `EndTurn` clear the shared scratch; Snore and OHKO perform
+  their explicit resets; every Beat Up iteration resets before eligibility;
+  and charge setup resets before ending its first phase. Successful Pain Split
+  clears the averaging workspace after updating both battlers.
+- Future Sight now models both source paths. A duplicate queue calls
+  `ResetDamage`; a successful queue clears the register while copying its
+  calculated value into delayed storage. Regressions exercise each boundary
+  with Counter/Mirror Coat after the enemy acts, including the AI scratch
+  glitch as the control case where no intervening ASM reset occurs. Present's
+  healing exit also now observes the `ResetDamage` at the start of its earlier
+  `DamageStats` command instead of leaking AI scratch around `ApplyDamage`.
+
+# Charge setup writes both move-history registers (2026-09-03)
+
+- Charge-effect streams place `usedmovetext` after `charge`. On the first
+  phase, `BattleCommand_Charge` therefore writes the current move directly to
+  both `LAST_MOVE` and `LAST_COUNTER_MOVE` before its `ResetDamage`; it does
+  not preserve the previous move. On release, `CheckCharge` clears the flag
+  and the ordinary used-move text command performs the same update.
+- Rust intentionally skipped both history writes while beginning Fly, Dig,
+  Razor Wind, Sky Attack, Skull Bash, and non-sunny Solarbeam. First-turn
+  charge setup now installs the charging move in both registers. A Solarbeam
+  regression starts with stale Tackle history and requires both bytes to
+  become Solarbeam without dealing first-turn damage.
+
+# Trainer items clear only enemy counter history (2026-09-03)
+
+- After a successful `AI_TryItem` callback, Crystal clears the enemy's Bide,
+  Fury Cutter, Protect, and Rage state and zeros `wLastEnemyCounterMove`. It
+  deliberately does not clear `wLastEnemyMove`, and the equivalent player
+  item path does not perform this trainer-AI cleanup.
+- Rust previously merged player and trainer items into one action branch, so
+  a trainer item could leave stale enemy counter history paired with the live
+  AI damage scratch. A player Counter acting second could then reflect damage
+  after an item turn. Trainer items now apply the exact enemy-only cleanup;
+  regressions prove the stale reflection fails while preserving the separate
+  cartridge glitch where an enemy Counter follows a player item.
+
+# Switch entry resets both counter-history bytes (2026-09-03)
+
+- `NewBattleMonStatus`/`SendOutPlayerMon` clear player `LAST_MOVE` and both
+  battlers' `LAST_COUNTER_MOVE` registers while preserving enemy `LAST_MOVE`.
+  `NewEnemyMonStatus`/`ResetEnemyBattleVars` perform the mirrored operation.
+  Rust previously cleared only the switching battler's two history fields.
+- Ordinary menu switches, forced Roar/Whirlwind switches, forced faint
+  replacements, Shift-style player changes, link opponent replacements, and
+  trainer-party advancement now share an explicit normal-switch entry that
+  performs the complete volatile reset before the raw battler swap. This also
+  closes the former gap where battle-start APIs bypassed all combat-volatility
+  cleanup by calling the low-level swap directly.
+- Baton Pass intentionally retains its raw swap path. Its source
+  `ResetBatonPassStatus` clears only the incoming battler's `LAST_MOVE`, so the
+  regression separately requires `LAST_COUNTER_MOVE` to retain Baton Pass.
+
+# IgnoreSleepOnly preserves history and Encore (2026-09-03)
+
+- A disobedient sleeping Pokémon ordered to use Snore or Sleep Talk takes the
+  special `IgnoreSleepOnly` exit. That routine calls `EndMoveEffect` directly,
+  before `usedmovetext`, and never reaches `.EndDisobedience`; prior
+  `LAST_MOVE`, `LAST_COUNTER_MOVE`, and Encore state therefore remain intact.
+- Rust grouped this result with ordinary loafing, napping, and disobedience
+  self-damage, clearing both history registers and Encore. Only the special
+  sleeping exit now preserves them; the other disobedience outcomes retain
+  their source `.EndDisobedience` cleanup. The regression uses the exact
+  swapped obedience byte that selects this path and locks all three fields.
+
+# Jump Kick crash rewrites the shared damage register (2026-09-03)
+
+- `CheckHit` uniquely preserves `wCurDamage` on a missed Jump Kick or Hi Jump
+  Kick. `GetFailureResultText` then divides that retained value by eight,
+  raises zero to one, writes the crash amount back to `wCurDamage`, and routes
+  it through the ordinary self-damage routine. The rewritten global register
+  remains visible to a Counter acting later in the same turn.
+- Rust applied the correct crash HP loss but left the trainer AI's older
+  scratch amount in its Counter model. Counter could therefore reflect an
+  unrelated scoring value instead of the crash-sized register. Crash
+  settlement now replaces the opponent's observable Counter scratch with the
+  divided amount. A same-turn regression distinguishes a three-HP crash from
+  the seeded twelve-point AI value and requires Counter to consume three.
+
+# Held-item inventory and stat-up timing match Crystal (2026-09-03)
+
+- An exhaustive comparison of Rust held-effect tokens with
+  `constants/item_data_constants.asm` found one Rust-only effect:
+  `HELD_WHITE_HERB`. The optional Generation III pack had injected White Herb
+  and TM01 solely for a removed Pickup ability path, and the turn engine ran
+  White Herb after every action. Crystal has neither item nor behavior. The
+  handler, battle-start initialization state/event, Pickup validation table,
+  and both synthetic items are removed; a full-turn regression proves an
+  unknown modpack White Herb has no hidden runtime activation.
+- Crystal does define seven otherwise-unused entries in
+  `HeldStatUpItems`. `HandleBetweenTurnEffects` runs them after screens and
+  before HP/status berries, raises the selected stage by one, consumes the
+  item only on success, and preserves it when the stage is capped. Rust now
+  implements that complete table at the same boundary and in link-dependent
+  side order, with coverage for Attack, Defense, Speed, both Special stats,
+  Accuracy, Evasion, and the capped case.
+- `HandleBerserkGene` identifies the one special item by the
+  `BERSERK_GENE` item byte. Rust had instead treated every hypothetical
+  `HELD_ATTACK_UP` item as Berserk Gene, giving two stages and confusion at
+  turn start. It now keys that special routine by exact item ID, leaving
+  generic Attack-up effects for the one-stage end-turn table. The source
+  ordering also means a Berserk Gene switched in after the turn-start check is
+  caught by that generic table: it grants one Attack stage and is consumed
+  without confusion before the next turn. Ordinary and Baton Pass switch-in
+  regressions lock this cartridge edge case separately from the normal
+  start-of-turn +2/confusion behavior.
+
+# Between-turn screen and Mystery Berry writes are source-ordered (2026-09-03)
+
+- `HandleScreens` checks Light Screen before Reflect for each battler. Rust
+  iterated those two counters in the opposite order, reversing the two expiry
+  messages when both reached zero together. The screen pass now follows the
+  table-free ASM sequence exactly, with a simultaneous-expiry event-order
+  regression.
+- `HandleMysteryberry` finds the first zero-PP slot and performs a raw byte add:
+  one for Sketch and five for every other move. It never loads base PP and
+  never clamps the result to a calculated maximum. Rust looked up move data
+  and capped the write, producing three PP for a hypothetical three-PP move
+  where the cartridge writes five. The runtime now performs the literal
+  one-or-five write and no longer introduces a move-catalog failure absent
+  from this ASM routine. The source search also starts in the permanent party
+  move list, then mirrors the PP into the active BattleMon slot only when its
+  move ID matches and the user is not transformed. Rust had searched and
+  restored Transform's copied move list instead; it now restores the original
+  party move while leaving copied PP untouched, with explicit split-storage
+  coverage.
+
+# Post-Transform stat commands mutate the live copied levels (2026-09-03)
+
+- Crystal's Transform copies the target's seven stat-level bytes into the
+  user's live BattleMon stat-level region. Every later stat command reads and
+  writes that same region until switching clears Transform. Rust represented
+  copied levels in `BattleTransformState` but continued routing stat commands
+  through the base Pokémon map, so their events and cap checks described one
+  set of levels while damage and accuracy consumed another.
+- A single live-stage accessor now owns the representation split. Ordinary and
+  secondary stat effects, Swagger, Belly Drum, non-Ghost Curse, AncientPower,
+  held stat boosts, Haze, Psych Up, Transform copying, and Baton Pass all read
+  or mutate the effective copied map when Transform is active, while the
+  persistent base map stays untouched. The regression starts from a copied
+  +2 Attack level, applies a +2 command, and requires the live map and event to
+  reach +4 while the base Pokémon remains at zero.
+- X Items now use that same accessor. `XItemEffect` calls `RaiseStat` against
+  the loaded BattleMon stat levels, but Rust's item helper had continued to
+  raise the dormant base map after Transform. Both direct pack mutation and
+  full-turn execution now raise the copied level, preserve the party/base
+  level, and still apply the party happiness change. Core and integrated
+  regressions start from copied Attack +2 and require consecutive X Attacks to
+  reach +3/+4 while the base level remains zero.
+
+# Held status-prevention command family is implemented (2026-09-03)
+
+- Crystal's item-effect vocabulary includes six otherwise-unused prevention
+  effects: poison, burn, freeze, sleep, paralysis, and confusion. Their checks
+  are live in `SleepTarget`, `Poison`/`PoisonTarget`, `BurnTarget`,
+  `FreezeTarget`, `Paralyze`/`ParalyzeTarget`, and
+  `Confuse`/`ConfuseTarget`; Rust had catalogued the tokens only in capture
+  validation and allowed every corresponding battle effect through.
+- Direct commands now report the held item's protection without consuming it.
+  Damaging target commands remain silent, as in the source, and perform the
+  prevention check after their existing-status/type/weather gates but before
+  Safeguard. Direct sleep retains its unusual item-before-already-asleep
+  ordering, while direct poison still reports an already-poisoned target
+  before consulting the item and consults the item before rejecting a
+  different existing status.
+- Regressions cover narrated direct poison, the sleep ordering branch, all
+  four damaging status variants with Safeguard simultaneously active, and
+  silent secondary confusion. Existing status-focused coverage remains green
+  across the full command family.
+
+# Amulet Coin activation follows the held-effect byte (2026-09-03)
+
+- Crystal's `CheckAmuletCoin` passes the sent-out player's item through
+  `GetItemHeldEffect` and compares the result with `HELD_AMULET_COIN`. Rust
+  instead compared the item ID directly with `AMULET_COIN`, which made the
+  battle flag depend on one catalog name rather than the cartridge's held
+  effect and gave modified catalogs the wrong behavior.
+- The sticky `wAmuletCoin` equivalent now travels with the active combat
+  state, is seeded from the authoritative game-state byte, activates from the
+  held-effect catalog on initial resolution and every in-turn player send-out
+  path, and is committed back for Pay Day and trainer-prize doubling. Runtime
+  battle-start and out-of-turn replacement paths consult the same catalog so
+  the flag is visible at the same send-out boundary as ASM. Regressions prove
+  both an arbitrarily named effect-bearing item and a menu switch into one.
+
+# Replacement dialogue preserves SendOutMonText and WithdrawMonText arithmetic (2026-09-03)
+
+- Crystal does not calculate the opposing battler's ordinary HP percentage
+  for the replacement line. `SendOutMonText` multiplies current HP by 25,
+  shifts max HP right twice, and only then divides so the divisor fits in one
+  byte. Rust used `HP * 100 / max HP`, erasing the source's pre-division
+  truncation and selecting a different line at threshold-adjacent values.
+- The visible Rust path now performs the exact shifted-divisor calculation.
+  A 2/21-HP target produces the cartridge quotient 10 and `Go for it,` rather
+  than the conventional quotient 9 and `Your foe's weak! Get'm,`. A nonzero-HP
+  target whose max HP is below four is rejected as the source's non-terminating
+  divide state instead of being assigned an invented percentage; valid
+  cartridge Pokémon cannot reach that malformed boundary.
+- After `BattleTurn` clears `wBattleHasJustStarted`, a link-battle replacement
+  bypasses the HP calculation and always selects `GoMonText`. Rust previously
+  applied the ordinary HP thresholds to link replacements. The replacement
+  helper now keys off the actual link-mode byte and returns `Go!` before even
+  inspecting the divisor, including for the malformed sub-four-max-HP state.
+  Battle entry passes the source's still-set `wBattleHasJustStarted` state,
+  so an initially damaged link opponent continues through the HP-dependent
+  selection exactly as ASM does instead of being flattened to `Go!`.
+- `WithdrawMonText` uses the same truncated divisor but subtracts the current
+  enemy HP from the HP captured at send-out in a wrapping 16-bit operation,
+  then branches on only the quotient's low byte. Rust had saturated that
+  subtraction and used a conventional percentage. The withdrawal path now
+  preserves the wrapping subtraction, shifted divisor, and low-byte branch;
+  regressions cover the 30-percent dialogue boundary, healing above captured
+  HP, and the same documented non-terminating divide state.
+
+# Weather countdown preserves raw-byte underflow (2026-09-03)
+
+- Crystal's `HandleWeather` unconditionally decrements `wWeatherCount` after
+  confirming that a weather type is active. A raw active-weather/count-zero
+  state therefore wraps the count to `$ff`, prints the continuation message,
+  and (for Sandstorm) performs its ordinary damage pass. Rust instead treated
+  zero as a special indefinite state: Rain and Sun returned silently, while
+  Sandstorm dealt damage without advancing or narrating the counter.
+- The end-turn weather boundary now uses byte-wrapping decrement before the
+  ordinary zero-expiry check. A focused raw-state regression requires Rain at
+  count zero to remain active at 255 and emit the matching continuation event;
+  all existing start, continuation, terminal-expiry, and Sandstorm tests stay
+  green.
+
+# Future Sight retains the cartridge countdown register (2026-09-03)
+
+- `BattleCommand_FutureSight` writes `4` to the attacking side's
+  `w*FutureSightCount`. The same turn's `HandleFutureSight` pass decrements it
+  to `3`; later passes land the attack specifically when a decrement produces
+  `1`, after which `BattleCommand_CheckFutureSight` clears the register to
+  zero. Rust instead stored `3` and landed at zero. This kept the usual
+  three-turn delay superficially correct while exposing the wrong register at
+  every boundary and making a raw count-one state attack when ASM silently
+  decrements it inactive.
+- The queued combat state now starts at four, reports three after its queuing
+  turn, lands only on the source's post-decrement-one boundary, and canonicalizes
+  inactive zero as no queued record. Regressions cover queue-turn state,
+  count-two landing, and count-one silent cancellation; all delayed accuracy,
+  variation, Substitute, survival, dual-side ordering, and residual-effect
+  tests remain green.
+
+# Confusion and attraction use the full `$80` RNG split (2026-09-03)
+
+- Both player and enemy `CheckTurn` paths call `BattleRandom` and compare the
+  complete byte with `50 percent + 1`, which assembles to `$80`. Confusion
+  self-damage occupies `$00..$7f`; attraction immobilization occupies
+  `$80..$ff`. Rust masked the low bit instead, retaining a 50-percent frequency
+  but producing different decisions for most cartridge RNG bytes and exposing
+  only `0` or `1` in typed events.
+- The action boundary now records and compares the unmodified random byte.
+  Regressions use `$01` to prove confusion self-damage despite a set low bit
+  and `$02` to prove an attracted battler acts despite a clear low bit. Existing
+  confusion, ordering, Baton Pass/Berserk Gene, Heal Bell, rampage, and Attract
+  integrations were reseeded around the corrected source boundary, and the
+  full core suite remains green.
+
+# Full paralysis preserves RGBDS's literal-percent boundary (2026-09-03)
+
+- Both `CheckTurn` paths compare their random byte with `25 percent`, which
+  RGBDS assembles as `$3f`; unlike the four AI random-failure checks, these
+  comparisons do not add one. Full paralysis therefore occupies only
+  `$00..$3e`, while `$3f` allows the move to continue.
+- Rust used a conventional 64-of-256 threshold and incorrectly stopped the
+  boundary roll `$3f`. The action check now compares against 63, and a raw-byte
+  regression distinguishes it from the nearby source `25 percent + 1`
+  branches that correctly retain a threshold of 64.
+
+# Encore and Wrap preserve their distinct zero-count branches (2026-09-03)
+
+- `HandleEncore` first tests the separate Encore substatus bit, then
+  unconditionally decrements `w*EncoreCount`. An active raw count of zero
+  consequently wraps to `$ff` and remains active when the selected move still
+  has PP. Rust saturated the decrement and ended Encore immediately; its
+  represented active-zero state now performs the cartridge byte wrap.
+- `HandleWrap` does the opposite: it tests `w*WrapCount` itself before any
+  Substitute, animation, release-text, or damage work. A represented trap with
+  count zero is now canonicalized as inactive without emitting the invented
+  release event that Rust previously produced. Focused regressions lock both
+  opposing zero-count boundaries.
+
+# Stage-three critical hits use the ROM's integer quotient (2026-09-03)
+
+- `CriticalHitChances` encodes its +3 entry as `1 out_of 3`. The source macro
+  is `* $100 /`, so RGBDS integer division emits 85 (`$55`), not a rounded 86.
+  `BattleCommand_Critical` succeeds only when the random byte is strictly
+  below that table byte.
+- Rust's handwritten table used 86 and incorrectly treated boundary roll 85
+  as critical. The table now contains the literal ROM value, with a focused
+  Focus Energy + Slash regression requiring `(critical=false, roll=85,
+  threshold=85)`.
+
+# Magnitude retains the inclusive first table boundary (2026-09-03)
+
+- `MagnitudePower` begins with `5 percent + 1`, which emits 13, and
+  `BattleCommand_GetMagnitude` compares that table byte against the sampled
+  byte before taking its `nc` branch. Equality is accepted, so rolls 0 through
+  13 select Magnitude 4; Magnitude 5 begins at 14.
+- Rust advanced roll 13 into the second entry. The exact-breakpoint test now
+  covers both sides of this unusual source boundary, while all later table
+  thresholds remain unchanged and match their inclusive ASM comparisons.
+
+# Zero Disable count is inactive before the action decrement (2026-09-03)
+
+- Both `CheckTurn` branches load the packed `w*DisableCount`, return through
+  `.not_disabled` when it is zero, and only then decrement a nonzero byte.
+  Consequently a raw zero count produces neither state expiry nor
+  `DisabledNoMoreText`.
+- Rust decremented its represented zero with saturation and emitted a
+  `DisableEnded` event. The split state is now canonicalized to no Disable
+  record at that early boundary without an event; ordinary count-one expiry
+  remains unchanged and narrated.
+
+# BrightPowder precedes the ordinary `$ff` accuracy shortcut (2026-09-03)
+
+- `BattleCommand_CheckHit` returns early for Lock-On, rain-boosted Thunder,
+  X Accuracy, and `EFFECT_ALWAYS_HIT`. Every ordinary move instead completes
+  stat modification and the opponent-item lookup first. BrightPowder can
+  therefore subtract its held parameter from a naturally computed `$ff`
+  accuracy byte; only after that subtraction does the command compare the
+  byte with `-1` and potentially skip accuracy RNG.
+- Rust treated every computed `$ff` as equivalent to those explicit early
+  branches and skipped the BrightPowder lookup. An ordinary 100%-accuracy
+  move is now reduced before the `$ff` check, while the source's four genuine
+  sure-hit paths still bypass both the item and RNG. Future Sight's delayed
+  continuation likewise resumes at damage variation and then enters this
+  ordinary item-before-`$ff` boundary. Red-first scripted-RNG regressions use
+  a roll equal to the reduced byte to lock both immediate and delayed misses,
+  including their distinct preceding RNG order.
+
+# Accuracy and Evasion retain two independently floored table passes (2026-09-03)
+
+- `CheckHit.StatModifiers` does not combine the two stat levels into a single
+  net stage. It multiplies the move byte by the user's exact Accuracy table
+  row, divides and floors, then uses that quotient as the input to the inverse
+  Evasion row and floors again. The approximate cartridge ratios therefore do
+  not cancel: base `$ff` at +1 Accuracy against +1 Evasion becomes `$fe`
+  (`floor(floor(255 * 133 / 100) * 75 / 100)`).
+- Rust previously reduced the pair to `accuracy_stage - evasion_stage`, making
+  equal stages an exact identity and using a different table row for every
+  unequal pair. Ordinary, delayed Future Sight, multi-hit/Beat Up's initial
+  check, and OHKO accuracy now share the source's two-pass calculation while
+  retaining Foresight's early bypass. Red-first arithmetic coverage and an
+  OHKO boundary roll lock both the intermediate floor and the resulting RNG
+  decision.
+- OHKO's dedicated Rust path also sampled accuracy RNG unconditionally after
+  those modifiers. The shared ASM `CheckHit` checks the finalized byte for
+  `$ff` first, so an OHKO that still has `$ff` consumes no random byte and
+  cannot fail on roll `$ff`. A zero-read regression now locks that shortcut.
+- A move-table accuracy byte of zero is not another sure-hit sentinel. No
+  canonical Crystal move uses it, but if exact or modified source data does,
+  the first `StatModifiers` division produces zero and the routine raises that
+  quotient to its explicit minimum of one. Rust's invented zero-to-`$ff`
+  fallback is removed; a focused regression requires the source result of one.
+
+# Species critical items short-circuit the remaining tally (2026-09-03)
+
+- `BattleCommand_Critical` checks Chansey/Lucky Punch and Farfetch'd/Stick by
+  their raw species and item bytes. Either match writes critical level two and
+  jumps directly to `.Tally`; it deliberately skips the intervening Focus
+  Energy, high-critical-move, and Scope Lens branches.
+- Rust added the species-item bonus to every later bonus, allowing a focused
+  Chansey using Slash (or the Farfetch'd equivalent) to reach the terminal
+  one-half threshold instead of the source's one-quarter threshold. The tally
+  now preserves the jump and does not require held-effect catalog lookup on
+  either raw special-item branch. A red-first paired regression distinguishes
+  threshold `$40` from the former `$80` result.
+
+# Equal offensive and defensive stages take the critical bypass (2026-09-03)
+
+- `CheckDamageStatsCritical` compares the defender's stage with the attacker's
+  using `cp b` and retains boosted live stats only when that comparison sets
+  carry—that is, only when Defense is strictly lower than Attack. Equal stages
+  take the same unboosted-stat branch as a defensive advantage, despite the
+  nearby source comment describing only a “higher” defensive stage.
+- Because Reflect or Light Screen doubles the live defense before this check
+  and the bypass reloads the unboosted party defense afterward, an equal-stage
+  critical also discards the screen. Rust used `defense > attack`, incorrectly
+  retaining both live stages and screens at equality. Ordinary damage and the
+  wild-enemy Beat Up damage path now use `>=`; red-first coverage proves the
+  equality bypass while a separate offensive-advantage test keeps the source
+  case where a screen still affects a critical hit.
+- The audit descriptions for Beat Up and the multi-hit family were also
+  corrected to reflect `BattleCommand_EndLoop`: only the first iteration runs
+  `checkhit`; later iterations resume at `critical`.
+
+# Critical raw-stat reload discards status and badge modifications (2026-09-03)
+
+- Player and enemy damage first select the already loaded battle stats, which
+  include stat levels, applicable burn, and the player's badge boosts. When
+  `CheckDamageStatsCritical` chooses its bypass, the command replaces both
+  selected words with their raw party-stat counterparts. That reload therefore
+  discards all three live-stat modifications as well as the previously applied
+  screen; species-specific Thick Club, Light Ball, and Metal Powder handling
+  remains later in the command and still applies.
+- Rust's equal-stage bypass reloaded values that had already received badge
+  boosts and then reapplied the attacker's burn penalty. A red-first regression
+  observed those criticals changing from the raw-stat baseline. The bypass now
+  begins from unmodified party stats and gates all stage, status, badge, and
+  screen work together. Wild-enemy Beat Up shares the same equal-stage raw
+  Special Attack/Special Defense rule.
+
+# Badge stat boosts operate on post-stage, post-status live stats (2026-09-03)
+
+- Active-player stat calculation calls `ApplyStatLevelMultiplierOnAllStats`,
+  then `ApplyStatusEffectOnPlayerStats`, and finally `BadgeStatBoosts`. The
+  badge's one-eighth increment is therefore computed from the already staged
+  and, for Attack or Speed, status-penalized battle stat. Initial loading uses
+  the same last-two ordering with neutral stat levels.
+- Rust previously boosted the raw stat before applying its level multiplier
+  and applied Speed's badge before paralysis. A staged Attack regression
+  distinguished damage 597 from the source's 613, and a staged/paralyzed Speed
+  regression distinguished 7 from 6. Damage and turn ordering now follow the
+  source call sequence. The wild-enemy Beat Up specialization also includes
+  the player's eligible Glacier-badge Special Defense before Light Screen,
+  while its qualifying critical bypass still reloads the raw defense.
+
+# Thick Club and Light Ball test the original user through Transform (2026-09-03)
+
+- `SpeciesItemBoost` obtains the player's species with `BattlePartyAttr` and
+  the enemy's from `wTempEnemyMonSpecies`. Neither is the copied
+  `wBattleMonSpecies`/`wEnemyMonSpecies` byte that Transform changes, so the
+  boost follows the user's original species while using its transformed live
+  attacking stat. The held item remains the user's own item.
+- Rust inferred eligibility from the effective transformed Pokémon. A Ditto
+  holding Light Ball and transformed into Pikachu therefore dealt 45 damage
+  instead of the source's unboosted 23. The battle boundary now evaluates the
+  original battler identity and passes only that exact activation into damage;
+  confusion and Present retain their separate source paths that skip or
+  overwrite this boost.
+
+# Future Sight queues from effective live special stats (2026-09-03)
+
+- Future Sight reaches `BattleCommand_DamageStats` and `DamageCalc` before it
+  stores `wCurDamage`. Transform has already copied the target's live species,
+  Special Attack/Special Defense, and stat levels into the battle-mon records;
+  the ordinary player badge and screen modifications are present at that same
+  queue-time boundary. Light Ball and Metal Powder still consult the original
+  species/item authorities described above.
+- Rust's specialized pre-variation calculation read the untransformed stored
+  Pokémon and omitted both sides' player badge-stat contribution. Red-first
+  tests showed a copied Special Attack producing the same stored damage as the
+  original stat and Glacier Badge producing no change. The queue now uses the
+  effective battle Pokémon, applies eligible badges after stat levels, retains
+  Light Screen, and uses original-species item checks before paired truncation.
+
+# Type-boost item multiplier addition retains byte overflow (2026-09-03)
+
+- After matching `TypeBoostItems`, `DamageCalc` loads the held parameter into
+  the eight-bit accumulator and executes `add 100` before storing the
+  multiplier. Parameters above 155 therefore wrap; for example, 200 produces
+  multiplier 44 rather than 300. The following multiply and divide by 100 use
+  that wrapped byte.
+- Rust widened the parameter before addition in ordinary damage, both Beat Up
+  paths, and Future Sight, turning the same parameter into a threefold boost.
+  A red-first regression observed 107 damage instead of the source's 17. One
+  shared quotient helper now performs the byte addition for ordinary turns,
+  trainer AI estimates, party/wild Beat Up, and queued Future Sight damage.
+
+# Type effectiveness is an ordered sparse ASM program (2026-09-03)
+
+- `BattleCommand_Stab` scans `TypeMatchups` in source order and applies every
+  matching row immediately. Each half or double therefore floors the current
+  damage before the scan continues; it is not equivalent to multiplying both
+  defender-type ratios together and flooring once. With an odd intermediate
+  damage of 3, Ground against Grass/Poison executes `3 / 2 = 1` and then
+  `1 * 2 = 2`; Rust's former combined rational left the damage at 3.
+- The table's `db -2` is executable control data, not a second override map.
+  An unidentified target scans through it into the two Normal/Fighting versus
+  Ghost `NO_EFFECT` rows, while an identified target stops at the sentinel and
+  therefore treats those absent pairs as neutral. The old exhaustive-map
+  export erased row order and inverted this Foresight meaning.
+- The exporter and Rust pack schema now preserve the exact pre-sentinel and
+  post-sentinel row arrays. Damage applies matching rows sequentially, absent
+  pairs are neutral, AI/reporting derives its aggregate multiplier by scanning
+  the same ordered data, and pack validation rejects duplicate pairs without
+  demanding invented neutral cells. A red-first dual-type flooring regression,
+  2,118 core tests, 842 assets tests, and the exact-pack Bevy runtime accessor
+  test pass against regenerated canonical packs.
+
+# Transform copies raw and already-loaded battle stats separately (2026-09-04)
+
+- `BattleCommand_Transform` copies both the opponent's five raw BattleMon stat
+  words and the independent `wPlayerStats`/`wEnemyStats` live array. The live
+  copy already contains the opponent's current stages, status penalties, and
+  eligible badge modifications; the transforming user's existing Burn or
+  Paralysis is not reapplied at the copy boundary.
+- Rust previously stored only the copied raw words and reconstructed live
+  values from the transformer's status and badges. A paralyzed Ditto therefore
+  received Speed 10 instead of the copied 43, and a burned Ditto dealt 4 damage
+  where the copied Attack deals 8. Transform now copies the target's
+  first-class per-side loaded array alongside its raw transform image. Speed,
+  ordinary and confusion damage, Future Sight, and trainer-AI damage consume
+  that array, while a qualifying critical still reloads the copied raw words.
+- Burn and Paralysis commands mutate the copied loaded word in place. Haze,
+  Psych Up, Rest, Heal Bell, held status recovery, and successful stat commands
+  replace the array exactly where the source calls `CalcPlayerStats` or
+  `CalcEnemyStats`. Red-first regressions cover copy-time Paralysis and Burn, a
+  post-Transform Speed stage change, in-place Paralysis, and held-cure
+  recalculation.
+
+# Player badge/status order follows the owning stat-load command (2026-09-04)
+
+- Initial `InitBattleMon` loading and the active level-up path apply the major
+  status penalty before `BadgeStatBoosts`. In contrast, the effect-command
+  `CalcPlayerStats` routine first calculates all five staged stats, applies
+  badges, switches turn, and only then applies Paralysis and Burn. Because
+  every step floors integer words, these orders are observably different.
+- Rust previously used stage → status → badge for every read. Combat state now
+  records when a stat command, direct Burn/Paralysis mutation, Haze, Psych Up,
+  Rest, Heal Bell, or held status recovery establishes the badge-before-status
+  live-word order. Speed, damage, confusion, and Transform snapshots honor that
+  state while untouched initial loads retain status-before-badge behavior.
+- A red-first case with raw Attack 23, stage −1, Zephyr Badge, and Burn produced
+  7 under the former order. The source sequence produces staged 15, badge 16,
+  then burned 8; the focused regression and all 2,124 core tests pass.
+
+# Raw-limit stat failures preserve the one-stage rollback bug (2026-09-04)
+
+- `RaiseStat` and `LowerStat` write the requested stage change before testing
+  the corresponding unmodified party-stat word. If that raw word is already
+  999 for a raise or 1 for a drop, the failure branch undoes exactly one stage
+  and skips `CalcPlayerStats`/`CalcEnemyStats`.
+- A one-stage command therefore restores the original stage, but a sharp
+  two-stage command reports failure while leaving a hidden +1 or −1 stage.
+  The already-loaded battle-stat word remains unchanged. Rust formerly accepted
+  the stage change and dynamically exposed it as a successful command.
+- The stat-command boundary now checks the effective raw word (including the
+  raw image copied by Transform), performs the source's single-stage rollback,
+  emits the failure event, and preserves Transform's loaded-stat snapshot.
+  Red-first regressions cover raw 999/1 one-stage failures and both sharp-change
+  rollback directions; all 2,126 core tests pass.
+
+# Loaded battle-stat words are authoritative combat state (2026-09-04)
+
+- Crystal keeps each battler's five underlying raw words separate from the five
+  mutable words used by turn order and damage. Those loaded words are not a
+  pure derived view: commands overwrite or mutate them at specific boundaries,
+  and several source omissions intentionally leave them stale.
+- Rust formerly recalculated most reads from the Pokémon record, with a second
+  temporary cache only for Transform. `BattleCombatState` now owns required
+  player and enemy loaded-stat arrays. Speed, ordinary damage, confusion,
+  Future Sight, Transform, trainer AI, and the wild-enemy Beat Up branch all
+  read them directly. The temporary Transform cache and its invalidation rules
+  have been removed. Wild Beat Up still takes the critical raw-shadow bypass
+  when its stage comparison qualifies, exactly like `EnemyAttackDamage`.
+- Initial player loading performs status then badges. Ordinary switch-in loading
+  preserves the player order and the source's ordinary-enemy status omission;
+  link and Battle Tower enemy loads apply status. Direct Burn and Paralysis
+  mutate the current live word, while source `CalcPlayerStats`/`CalcEnemyStats`
+  boundaries rebuild all five words from exported stage tables in their exact
+  badge/status order. This also preserves the trainer-AI status-heal stale-word
+  behavior until a later calculation command replaces it.
+
+# Belly Drum preserves RaiseStat's hidden raw-limit failure (2026-09-04)
+
+- `BattleCommand_BellyDrum` first invokes the ordinary two-stage Attack command.
+  At raw Attack 999, that command raises the level twice, detects the raw limit,
+  rolls back only once, and returns failure before Belly Drum tests or spends
+  HP. The hidden final level is therefore +1 and the loaded Attack word remains
+  untouched.
+- Rust's bespoke Belly Drum path skipped that preliminary command. It now uses
+  the shared stat-command boundary and suppresses the nested stat event exactly
+  as the parent effect does. The existing low-HP glitch still retains its +2
+  stage, while a successful use finishes at +6.
+
+# Baton Pass's final stage calculation erases status and badges (2026-09-04)
+
+- Both player and enemy Baton Pass paths load the replacement and then call
+  `ApplyStatLevelMultiplierOnAllStats` with the passed levels. That routine
+  reads the untouched raw-stat shadow and overwrites every live word. It thereby
+  erases the switch-in status and badge adjustments, even when a passed level is
+  neutral.
+- Rust now performs this stage-only overwrite after restoring the passed state.
+  A regression passes Speed −2 into a paralyzed replacement and proves the final
+  loaded Speed is the raw stage result rather than the quartered status result.
+  The complete core suite passes with 2,128 tests.
+
+# Active level-up refreshes the five loaded words in source order (2026-09-04)
+
+- After an active participant gains a level, Crystal copies the new level, HP,
+  maximum HP, and (unless transformed) raw stats into the battle records. It
+  then applies current stat levels, major-status penalties, and player badge
+  boosts in that order. A transformed battler instead retains Transform's raw
+  stat image and copied levels while still receiving the new level for damage.
+- Trainer reward synchronization previously replaced the entire Rust combat
+  Pokémon from storage, silently resetting volatile battle fields and leaving
+  the authoritative loaded-stat array stale. The reward boundary now preserves
+  stages, confusion, rampage, Perish Song, Focus Energy, flinching, and battle
+  participation while updating persistent data. It rebuilds loaded stats only
+  when the active recipient actually levels, using the exported multiplier
+  table and the source's status-before-badge order. A focused regression covers
+  a burned, Zephyr-boosted participant at Attack +1.
+
+# Stat experience does not recalculate party stats without a level (2026-09-04)
+
+- `GiveExperiencePoints` writes the five stat-experience accumulators before it
+  checks the recipient's derived level. If that level is unchanged, it jumps to
+  the next participant without invoking `CalcMonStats`. The new stat experience
+  is persistent immediately, but maximum HP and all five calculated stat words
+  legitimately remain stale until a later recalculation boundary.
+- Rust refreshed calculated stats before checking for a level, changing party
+  and battle values after every experience award. That eager refresh is removed;
+  the existing per-level loop remains the only reward path that recalculates.
+  Saved-Pokémon validation now accepts nonzero calculated words at or below the
+  current derivable ceiling rather than rejecting this cartridge-valid stale
+  state, while still rejecting impossible zero or above-ceiling values.
+
+# Level-up move replacement preserves battle state and clears exact Disable (2026-09-04)
+
+- `LearnMove` compares the forgotten move with `wDisabledMove` during an active
+  battle. Only an exact match clears both the disabled-move byte and its count;
+  this happens before the transformed-battler move-copy gate, so Transform does
+  not suppress the clear.
+- Rust's pending replacement synchronized the stored Pokémon by replacing the
+  whole active combat record, erasing stages, confusion, rampage, Perish Song,
+  Focus Energy, flinching, and participation while leaving Disable active. The
+  synchronization boundary now updates persistent data and moves while retaining
+  those volatile fields and the authoritative loaded-stat words, then clears
+  Disable only when its exact move was forgotten. Focused coverage replaces a
+  disabled Growl while retaining a staged, confused live battler.
+
+# Battle level-up happiness precedes evolution and runs once (2026-09-04)
+
+- After `GiveExperiencePoints` has detected and applied any number of gained
+  levels, Crystal calls `LevelUpHappinessMod` exactly once. It compares the low
+  seven bits of the caught-location byte with the current world-map landmark,
+  selecting `HAPPINESS_GAINLEVEL` or `HAPPINESS_GAINLEVELATHOME`, then applies
+  the ordinary below-100, below-200, or high happiness tier.
+- Rust formerly omitted this battle reward entirely, which also prevented a
+  level gain from crossing 220 in time for the immediately following happiness
+  evolution check. Battle reward calls now receive both exact exported change
+  rows and the current exported landmark. The adjustment happens once after all
+  level/stat/move processing and before evolution, while a reward without a
+  level leaves happiness unchanged.
+- An absent caught-data record represents Crystal's zeroed caught-location byte
+  for this comparison rather than a failed match. Regressions cover the zero
+  representation, an at-home multi-level gain receiving only one adjustment,
+  and an Eevee crossing from 219 to 221 before evolving during the day.
+
+# Trainer level evolutions wait for the winning battle exit (2026-09-04)
+
+- `GiveExperiencePoints` does not evolve a Pokémon after each defeated foe. It
+  sets that party slot in `wEvolvableFlags`; only the winning `ExitBattle` path
+  later invokes `EvolveAfterBattle`, which scans the flagged party slots in
+  order. This lets a Pokémon retain its old species through every remaining
+  opponent in a multi-Pokémon trainer battle.
+- Rust previously called `check_and_evolve` inside every individual trainer
+  reward, changing species in the middle of the battle. Game state now carries
+  the exact battle-lifetime evolvable-slot projection, clears it at battle
+  initialization/cleanup, and trainer rewards only set its slot bit. Once no
+  living enemy remains, the flagged party slots are checked and the flags are
+  consumed; wild and standalone single-battle reward paths retain their final
+  battle evolution boundary.
+- A red-first two-opponent regression levels Chikorita on the first Pidgey,
+  proves it remains Chikorita for the second opponent, and then observes the
+  stored flag evolve it into Bayleef only after the final reward.
+
+# Experience recipients follow party-memory order (2026-09-04)
+
+- Each `GiveExperiencePoints` pass initializes `wCurPartyMon` to slot zero and
+  scans upward through the party. The active battler receives no ordering
+  preference; this controls the sequence of experience text, level-up pages,
+  move-learning prompts, happiness changes, and evolvable-flag writes.
+- Rust previously rewarded the active slot first and only then visited the
+  other participants in ascending order. Both active trainer and wild reward
+  paths now execute their participant pass in exact party-slot order while
+  retaining the active recipient as the top-level result. The separate Exp.
+  Share pass remains its own subsequent ascending party scan.
+- Red-first trainer and wild regressions put the active battler in slot one and
+  another eligible participant in slot zero; both now report and queue slot
+  zero before slot one.
+
+# Wild Exp. Share completes both reward passes before evolution (2026-09-04)
+
+- When any fit party member holds Exp. Share, Crystal first halves the enemy
+  reward record and runs `GiveExperiencePoints` for battle participants. It
+  then restores the backup record and runs the routine again for Exp. Share
+  holders. Crucially, that backup is copied only after the record has already
+  been halved, so both scans consume halved base EXP and base stats.
+  `EvolveAfterBattle` is reached only later from the winning
+  `ExitBattle` path, after both complete scans.
+- Rust formerly evolved each wild-battle recipient inside its individual
+  reward call. A holder that had also participated could therefore evolve
+  after the first pass, causing the second pass to use the evolved species'
+  growth curve and learnset. Wild rewards now set the battle-lifetime
+  evolvable slot flags during both passes and scan them only after distribution
+  is complete.
+- A red-first synthetic case starts a level-15 Medium Fast species one point
+  below level 16, gives it Exp. Share, and evolves it into a Slow-growth
+  species. Retaining the original species through two equal 1,814-point reward
+  passes produces the ASM-correct level 19 and only then evolves it. The former
+  unhalved holder pass incorrectly produced level 21.
+
+# Exp. Share restores the already-halved enemy reward record (2026-09-04)
+
+- `GiveExperiencePoints` halves every byte from `wEnemyMonBaseStats` through
+  `wEnemyMonEnd` when any eligible party member holds Exp. Share, then copies
+  that modified range to `wBackupEnemyMonBaseStats`. The holder scan restores
+  the already-halved backup rather than the original enemy record.
+- Rust formerly divided participant EXP/stat experience by two but gave the
+  holder pool the unhalved values. A Pokémon belonging to both scans received
+  150% of the source reward, and a holder outside the participant set received
+  a full rather than half share.
+- Trainer and wild holder scans now retain the initial factor-of-two divisor
+  before dividing among holders. A truncation-sensitive regression with base
+  EXP 65, level 7, two participants, one separate holder, and six base stats of
+  65 produces ordered EXP/stat-exp gains of 16, 16, and 32.
+
+# Evolution stones fail on the selected Pokémon's Everstone (2026-09-04)
+
+- `EvoStoneEffect` reads the selected party Pokémon's held-item byte and jumps
+  to its no-effect path when it equals `EVERSTONE`, before setting
+  `wForceEvolution` or calling `EvolvePokemon`. The item-evolution branch inside
+  `EvolvePokemon` consequently has no separate Everstone check.
+- Rust previously entered its forced item-evolution path directly, so a
+  Pikachu holding Everstone evolved with Thunderstone and reported the stone as
+  consumed. The core item-effect boundary now performs the exact caller-owned
+  check and returns no target change without mutating the Pokémon.
+- A red-first regression observed the incorrect Raichu mutation, HP increase,
+  and consumed result; it now proves the complete Pokémon record remains
+  unchanged.
+
+# Rare Candy applies level-up happiness before evolution (2026-09-04)
+
+- After writing the next level and exact curve EXP, refreshing stats, and
+  preserving the HP deficit, `RareCandyEffect` calls `LevelUpHappinessMod`.
+  Only afterward does it run current-level move learning and `EvolvePokemon`.
+- Rust previously performed the level/stat/move/evolution sequence without any
+  happiness mutation. Rare Candy now receives the same exported
+  `HAPPINESS_GAINLEVEL`/`HAPPINESS_GAINLEVELATHOME` tables and current landmark
+  context used by battle rewards, applies exactly one threshold-selected
+  change, and then evaluates evolution.
+- Core coverage proves a normal level-up changes happiness from 70 to 75 and a
+  high-band 218 Pokémon reaches 220 before the happiness-evolution check. The
+  field transaction regression also proves the loaded pack and current map
+  supply the five-point change while the Candy is consumed normally.
+- The source also overwrites all three party EXP bytes with `CalcExpAtLevel`.
+  Rust formerly kept an anomalously larger saved value with `max`; a red-first
+  level-9/2,000-EXP case now lands at the exact level-10 Medium Fast value of
+  1,000, matching the unconditional cartridge write.
+- `RareCandyEffect` has no level-gain operand: it executes one `inc a` after the
+  max-level check. Definitive item payload validation and runtime application
+  now accept only the exported source increment `1`; positive host values such
+  as `2` no longer create a multi-level Candy mechanic absent from ASM.
+
+# Vitamins mutate only the stat-experience high byte (2026-09-04)
+
+- `VitaminEffect` points at the high byte of the selected two-byte stat-exp
+  field, rejects it only when that byte is at least 100, and otherwise adds 10
+  to that byte while preserving the low byte. The result is not a 16-bit value
+  clamped to 25,600.
+- Rust previously used a saturating 16-bit addition followed by `min(25600)`.
+  At source state `$63ff`, it produced `$6400`; the cartridge produces `$6dff`
+  (28,159). The runtime now performs the literal byte test/write and then runs
+  the existing complete stat refresh.
+- Definitive vitamin payloads are restricted to the source encodings 2,560
+  (`10 << 8`) and 25,600 (`100 << 8`), preventing host-defined arithmetic from
+  replacing the fixed ASM routine. The red-first `$63ff` regression now proves
+  both the overshoot and low-byte preservation.
+
+# HP Up recalculates maximum HP without healing current HP (2026-09-04)
+
+- `VitaminEffect` calls `UpdateStatsAfterItem`, which points `de` at maximum HP
+  and lets `CalcMonStats` overwrite the six calculated stats. It never touches
+  the separate current-HP field.
+- Rare Candy calls that same helper but then explicitly subtracts the old
+  maximum HP from the new maximum and adds the two-byte delta to current HP.
+  Rust previously folded that Rare Candy-only follow-up into the vitamin stat
+  refresh, causing HP Up to heal by the gained maximum HP.
+- Vitamin recalculation now leaves current HP byte-for-byte unchanged while
+  still updating maximum HP and all five other calculated stats. The HP Up
+  regression begins damaged and asserts that only its maximum changes.
+
+# Successful vitamins and bitter medicines apply exported happiness changes (2026-09-04)
+
+- After `VitaminEffect` updates stats and prints the result, it calls
+  `ChangeHappiness` with `HAPPINESS_USEDITEM` before consuming the vitamin.
+  Rust previously left happiness unchanged.
+- The field-item transaction now resolves that exact three-band row from the
+  compiled happiness table and applies it only after a successful vitamin
+  mutation. Preview and committed use share the same path, while a rejected
+  maxed vitamin remains entirely atomic and unconsumed.
+- Successful Heal Powder and EnergyPowder use similarly applies
+  `HAPPINESS_BITTERPOWDER`, Energy Root applies `HAPPINESS_ENERGYROOT`, and
+  Revival Herb applies `HAPPINESS_REVIVALHERB`. Ordinary Potion, status-heal,
+  and Revive paths do not acquire an invented happiness effect.
+- The shared core helper reproduces `ChangeHappiness`'s `<100`, `<200`, and
+  high-band selection, clamps positive and negative overflow to 255 and zero,
+  and returns without changing Eggs. Focused coverage proves all three bands,
+  the upper clamp, Egg exclusion, and an integrated Protein change from 70 to
+  75, while integrated EnergyPowder coverage proves the low-band 70-to-65
+  decrease.
+
+# Stat-raising X Items are consumed at the cap and change happiness (2026-09-04)
+
+- `XItemEffect` calls `UseItemText` before `RaiseStat`, never branches on the
+  stat-up failure flag, and always follows it with `HAPPINESS_USEDXITEM`.
+  Consequently X Attack, X Defend, X Speed, and X Special are consumed even
+  when their target stage is already +6. X Accuracy, Guard Spec, and Dire Hit
+  use separate routines and do not receive this happiness change.
+- Rust previously rejected a capped stat-raising X Item as having no effect and
+  never changed happiness on any X Item path. A capped use now succeeds with no
+  stage delta, consumes the item, and applies the compiled three-band row.
+- The same ASM routine invokes the fixed one-stage `RaiseStat`; it has no
+  payload-controlled magnitude. Definitive validation and runtime application
+  now require `battle_stat_boost_stages == 1`, rejecting host-authored values
+  from 2 through 6 that previously created a stronger non-cartridge X Item.
+- The full battle-turn path stages the happiness mutation immediately before
+  the player item action, after enemy action selection but before the enemy
+  response. This preserves the source ordering for Return/Frustration power and
+  any later faint happiness in the same turn. Direct and recorded battle-item
+  regressions prove the active party/combat copies remain synchronized.
+- X Items now enter the same live `RaiseStat` authority as move commands.
+  Rust formerly changed only the represented stage map and left the five
+  loaded BattleMon stat words untouched, even though damage and turn order
+  consume those words; the apparent boost could therefore be mechanically
+  inert. Successful use now rebuilds the source-loaded words with the exact
+  badge/status ordering. A raw stat already at 999 follows `RaiseStat`'s
+  one-stage rollback and skips recalculation while the item and happiness
+  effects still complete. Focused regressions cover both the rebuilt loaded
+  state and the raw-maximum failure boundary.
+- The exported X Accuracy record retains an `ACCURACY`/one-stage table payload
+  for source provenance, but `XAccuracyEffect` never calls `XItemEffect` or
+  `ChangeHappiness`. Runtime behavior is now classified by its dedicated
+  routine before interpreting that payload: use sets only
+  `SUBSTATUS_X_ACCURACY`, leaves both party and live Accuracy levels at zero,
+  applies no happiness change, and rejects a repeat transaction atomically.
+
+# TMs change happiness after learning; HMs do not (2026-09-04)
+
+- After `LearnMove` succeeds, `AskTeachTMHM` checks `IsHM` and returns
+  immediately for an HM. Only a TM then calls `ChangeHappiness` with
+  `HAPPINESS_LEARNMOVE` and consumes its inventory flag.
+- The Rust TM/HM wrapper now applies the compiled `HAPPINESS_LEARNMOVE` row
+  after a successful consumable TM mutation. Failed compatibility, already
+  known, cancelled/full-moveset, and protected-HM replacement paths remain
+  atomic; successful nonconsumable HMs remain happiness-neutral.
+- Integrated TM/HM regressions distinguish the same learned-move result with
+  happiness 70-to-71 for the TM and unchanged 70 for the HM.
+
+# Gym-leader-class battles change the whole usable party's happiness at start (2026-09-04)
+
+- `InitEnemyTrainer` checks the opponent class against the exact concatenated
+  `GymLeaders` and `KantoGymLeaders` tables. For a match it walks the party in
+  slot order and applies `HAPPINESS_GYMBATTLE` to every Pokémon whose two-byte
+  current HP is nonzero; fainted members are skipped.
+- The runtime now performs that mutation after a new trainer battle is
+  materialized and before its combat snapshot is activated. The exact source
+  class set includes the Johto and Kanto leaders, Elite Four, Champion, and
+  Red; already-defeated trainer requests do not reapply it.
+- An integrated start regression uses Falkner's class and proves 70-to-73 for
+  the living lead while a fainted reserve remains at 70; the later lazy combat
+  snapshot is built from that already-updated party authority.
+
+# Evolution default-nickname replacement is an exact display-byte comparison (2026-09-04)
+
+- `UpdateSpeciesNameIfNotNicknamed` compares the old species name returned by
+  `GetPokemonName` with the stored nickname byte for byte. It replaces the
+  nickname only on an exact match, using the new species' displayed name.
+- Rust previously trimmed the nickname, compared it case-insensitively against
+  the internal species ID, and uppercased the target ID. That renamed a
+  deliberate lowercase nickname such as `bulbasaur`, while failing to update
+  canonical punctuation names whose internal IDs differ from display text.
+- Evolution now compares exact Rust string representations of the canonical
+  display names and writes the canonical target display name. Red-first cases
+  preserve lowercase `bulbasaur` and correctly change default `MR.MIME` to
+  `HO-OH` in a synthetic evolution.
+
+# Successful evolution registers the target as seen and caught (2026-09-04)
+
+- After committing the evolved party structure and running its same-level move
+  learning, `EvolveAfterBattle` calls `SetSeenAndCaughtMon` for the new species.
+  The same evolution routine owns level, stone, and trade evolutions.
+- Rust previously changed species without touching Pokédex state. State-owning
+  battle, deferred move-learning, field-item, and link-trade evolution
+  boundaries now record the evolved species as both seen and caught only after
+  a successful evolution. Cancellable level evolutions retain their provisional
+  Pokémon mutation without Pokédex writes while the visible animation can still
+  be cancelled. Accepting the initial prompt does not register the target: a
+  no-move evolution waits through the evolved text, while an evolution with
+  same-level moves waits through the final learned/did-not-learn result, matching
+  the return from `LearnLevelMoves`. Pressing B restores the source Pokémon
+  without ever registering the target. Forced stone/trade evolutions register
+  immediately. All paths use the
+  full evolved Pokémon record so the source's following `UpdateUnownDex`
+  behavior is also retained; the pure Pokémon transformation remains free of
+  unrelated global state.
+- Link trade application also records the received non-Egg before invoking
+  evolution, matching `AddTempmonToParty`; a resulting target is then recorded
+  by the evolution boundary as a second species.
+- Red-first battle and deferred-evolution regressions assert that cancellable
+  targets remain absent while provisional, including the path that immediately
+  queues a same-level move replacement. Bevy regressions separately prove the
+  no-move, declined-move, replacement-move, and cancellation boundaries.
+
+# Post-battle evolution presentation follows the complete EXP phase (2026-09-04)
+
+- The winning battle path completes `GiveExperiencePoints`, including its
+  participant and Exp. Share scans, before `EvolveAfterBattle` walks every bit
+  retained in `wEvolvableFlags`. A party member flagged against an earlier
+  trainer Pokémon can therefore evolve even when it did not receive EXP from
+  the final opponent.
+- Rust previously attached evolution reports only to the final opponent's
+  reward recipients. The stored Pokémon evolved, but an earlier participant
+  absent from that recipient list had no visible evolution event. Evolution
+  reports are now a separate party-ordered post-battle phase. The Bevy
+  projection emits all recipient EXP, level, and move events first, then every
+  flagged evolution, while retaining the active evolution in the legacy
+  top-level result.
+- A focused regression seeds slot zero as an earlier evolvable participant and
+  lets active slot one alone receive the final opponent's EXP. Slot zero now
+  evolves and is reported with its pre-evolution nickname after the reward
+  recipient phase.
+
+# Trade evolution requires its explicit held-item operand (2026-09-04)
+
+- Every `EVOLVE_TRADE` entry contains a held-item byte. `$ff` is the source's
+  explicit no-item requirement; the exported table represents that exact byte
+  as `-1`.
+- Rust previously interpreted an absent `held_item` field as the `$ff` case,
+  allowing malformed pack data to acquire valid trade-any-item behavior. Table
+  verification now diagnoses the missing operand, and runtime candidate lookup
+  rejects it rather than supplying the sentinel implicitly.
+- Focused coverage distinguishes a missing operand from the explicit `-1`
+  representation while retaining item-specific and Time Capsule behavior.
+
+# Guard Spec is a persistent Mist bit, not a five-turn effect (2026-09-04)
+
+- `GuardSpecEffect` checks and sets `SUBSTATUS_MIST`. It does not initialize,
+  decrement, or inspect a turn counter; the bit persists until the protected
+  battler's volatile state is reset, including on switch.
+- The exporter previously invented a five-turn payload, while a parallel
+  GameState counter neither protected the battler nor expired. Both host-only
+  fields have been deleted from the TypeScript/Rust item schemas, serialized
+  state, runtime projections, verification, and generated pack data.
+- Direct and full-turn item paths now reject a second Guard Spec while Mist is
+  active without consuming it. The direct path materializes and updates the
+  same authoritative combat state used by turns; normal volatile-state switch
+  cleanup clears it. Runtime snapshots expose that boolean directly. Core and
+  integrated regressions cover exact payload validation, repeat rejection,
+  persistence, and volatile-state clearing.
+
+# Trainer substatus items retain their asymmetric repeat behavior (2026-09-04)
+
+- The player-facing `XAccuracyEffect`, `GuardSpecEffect`, and `DireHitEffect`
+  each inspect the corresponding player substatus bit and branch to the
+  not-used path when it is already set.
+- The separate trainer routines `EnemyUsedXAccuracy`, `EnemyUsedGuardSpec`,
+  and `EnemyUsedDireHit` do not perform those checks. Each unconditionally
+  sets the enemy bit and completes the selected inventory-slot use, even when
+  a previous item already set it.
+- Rust previously reused the player's repeat rejection for both battle sides.
+  Full-turn item execution now preserves the player rejection while allowing
+  redundant trainer uses for all three bits. A focused regression starts with
+  every enemy bit set and proves all three trainer items still resolve.
+
+# `ITEMMENU_CLOSE` battle items cannot target reserve Pokémon (2026-09-04)
+
+- `BattlePack.BattleOnly` calls `DoItemEffect` directly and never opens
+  `UseItem_SelectMon`. The source item attributes route X Accuracy, Guard
+  Spec, Dire Hit, and the four stat-raising X Items through this path, so each
+  effect necessarily applies to `wBattleMon`; only `ITEMMENU_PARTY` items
+  expose a selectable party target.
+- Rust's visible Pack already sent those items to the active battler, but both
+  its public pack-backed party mutation and the core full-turn `PartyItem`
+  action accepted an arbitrary reserve index. Either path could consume an X
+  Item and write a transient stage to a reserve record even though no
+  equivalent cartridge input can select that Pokémon.
+- Both authoritative boundaries now reject a reserve target whose exported
+  battle menu is `ITEMMENU_CLOSE` before inventory, RNG, or battle-state
+  changes. Focused core/runtime regressions prove the rejection is atomic and
+  that the same X Attack still succeeds against the active battler afterward.
+- The inverse action-schema boundary is enforced as well: a player's direct
+  `Item` action cannot forge an `ITEMMENU_PARTY` Potion or status healer onto
+  the active battler without selecting a party slot. Trainer-item actions keep
+  their separate source-owned dispatch.
+
+# PP Up cannot be used on Sketch (2026-09-04)
+
+- `RestorePPEffect` names the selected move and then compares its move byte
+  with `SKETCH` before inspecting the packed PP-Up count. Sketch takes the same
+  `PPIsMaxedOutText` retry path as a move that already has three PP Ups, and
+  the item is not consumed.
+- Rust previously treated Sketch like any other one-PP move, incrementing its
+  PP-Up stage even though integer rounding left current and maximum PP at one.
+  The authoritative PP-item helper now rejects the exact `SKETCH` token before
+  mutation. Core and integrated field-item regressions prove the Pokémon and
+  Bag remain byte-for-byte unchanged.
+
+# Forty-base-PP moves cap at 61 PP after three PP Ups (2026-09-04)
+
+- `ComputeMaxPP` divides base PP by five, but caps that per-PP-Up quotient at
+  seven before applying the packed two-bit PP-Up count. The comment names the
+  motivating case explicitly: a 40-PP move must reach 47, 54, then 61 rather
+  than 48, 56, then 64, because 64 would overlap the PP-Up flag bits.
+- Rust's shared `max_move_pp` helper omitted the cap. It now implements the
+  exact quotient boundary, correcting PP restoration, PP Up application,
+  move-use validation, and all field/battle PP displays through their existing
+  common authority. The focused regression also retains the ordinary 35-base-
+  PP maximum of 56.
+- Each use of the sole `PP_UP` item adds exactly `PP_UP_ONE`; the three-stage
+  value is a per-move packed cap, not an item payload. Rust formerly accepted
+  a declared two- or three-stage PP Up and could skip packed progression in a
+  single use. Payload validation and execution now require exactly one stage,
+  with a mutation-atomic two-stage rejection regression.
+- `RestorePP` has only a five-point MysteryBerry branch, a ten-point ordinary
+  Ether/Elixer branch, and full-restoration Max branches. The five-point path
+  always selects one move; party-wide restoration is ten points or full only.
+  Rust formerly accepted any nonzero point count and even a party-wide
+  five-point payload. Validation/execution now enforce the exact point/scope
+  combinations, with focused atomic rejections for seven-point and
+  party-wide-five-point inventions.
+
+# Sacred Ash gates on a fainted member, then fully heals the party (2026-09-04)
+
+- `_SacredAsh` first runs `CheckAnyFaintedMon`, which ignores Eggs and merely
+  decides whether the item can start. Its queued script then calls the ordinary
+  `HealParty`: every non-Egg has major status/sleep cleared, HP copied from
+  maximum HP, and every move restored through `RestoreAllPP` to its
+  PP-Up-adjusted maximum.
+- Rust previously interpreted the exported whole-party percentage as a revive-
+  only operation. It restored only fainted slots, left living party members
+  injured or poisoned, left all PP untouched, and could treat a fainted Egg as
+  an eligible target. The payload also accepted invented partial-heal values.
+- The core now requires the source's exact 100-percent declaration, uses a
+  fainted non-Egg only as the atomic eligibility gate, and records complete HP,
+  status/sleep, and PP recovery for every affected non-Egg. The same shared
+  `HealParty` authorities now honor PP Ups and clear the modeled sleep byte.
+  Core and integrated runtime regressions cover living-member healing,
+  PP-Up-expanded restoration, Egg exclusion, and no-target inventory atomicity.
+- `HealParty` also preflights every non-Egg move against the compiled catalog.
+  The former missing-move branch silently retained stale PP while healing the
+  rest of the Pokémon; it now returns the typed slot/move error before any
+  party or script-runtime mutation.
+
+# Revive half-HP arithmetic does not clamp a zero result (2026-09-04)
+
+- `ReviveHalfHP` loads the two-byte maximum HP and performs `srl d; rr e`, then
+  writes that shifted value directly to current HP. There is no minimum-one
+  correction after the floor division.
+- Rust previously clamped every positive revive percentage to at least one HP.
+  The item authority now preserves the direct floor result; a synthetic
+  one-maximum-HP target therefore remains at zero while the otherwise-valid
+  Revive is consumed, matching the source instruction sequence. Ordinary
+  cartridge species retain their unchanged half-HP outcomes.
+- `RevivePokemon` has only two source branches: `REVIVE` shifts maximum HP
+  right once, while Max Revive and Revival Herb copy maximum HP. Rust formerly
+  accepted any percentage from 1 through 100 and could invent quarter-HP or
+  other revive behavior. Payload validation and execution now accept only the
+  source-semantic 50 and 100 values; the invalid-percentage regression proves
+  rejection before mutation.
+
+# Active party status healers rebuild the copied BattleMon stats (2026-09-04)
+
+- Every accepted player status-healing route calls `HealStatus` after changing
+  the party status byte. For the active party slot, that routine also clears
+  the Toxic and Nightmare substatus bits and calls `CalcPlayerStats`; this is
+  true even for a confusion-only Full Heal or an HP-only Full Restore.
+- Rust's `PartyItem` turn path copied the healed party record into the active
+  battler but left its already-loaded Attack/Speed words and substatus state
+  unchanged unless a major status visibly transitioned to none. A paralyzed
+  active battler could therefore remain at quarter Speed after using its cure.
+- Accepted active-slot status healers now set the source's post-status badge
+  ordering, rebuild all five loaded stat words from the healed state, and
+  clear Toxic/Nightmare. The pack-backed runtime mirror now does the same even
+  when Full Restore healed only HP and the major status was already empty. A
+  full-turn regression proves the Speed restoration, and an integrated
+  regression covers the no-major-status Full Restore path.
+
+# Poison-bit cures include Toxic's modeled status token (2026-09-04)
+
+- Crystal stores ordinary and bad poison under the same `PSN` major-status
+  bit; Toxic's escalating behavior lives in a separate substatus/counter.
+  Consequently Antidote, PSNCureBerry, Full Heal, Full Restore, Heal Powder,
+  and MiracleBerry all accept either kind of poisoning through the same mask.
+- Rust models Toxic as the distinct `BAD_POISON` string, but item matching
+  previously compared that string literally against the exported `POISON`
+  mask meaning. Poison-only and all-status cures therefore reported no effect
+  on a badly poisoned Pokémon. The shared status-mask matcher now treats
+  `BAD_POISON` as a member of `POISON` while preserving exact matching for all
+  other status tokens; a focused regression covers the previously rejected
+  cure.
+
+# Status healers reject fainted targets before inspecting status (2026-09-04)
+
+- `UseStatusHealer` begins with `IsMonFainted` and returns the not-used result
+  immediately. This gate covers individual cures, Full Heal, Heal Powder, and
+  their berry equivalents; a fainted Pokémon retains its status and the item.
+- Rust's ordinary and all-status helpers previously skipped that gate, so a
+  poisoned fainted party member could be cured and consume the item. Both
+  helpers now return the existing typed fainted-target error before any major
+  status, sleep, or confusion mutation. The regression covers both an
+  individual poison cure and Full Heal with exact state preservation.
+
+# Single-target party items reject Eggs at the core boundary (2026-09-04)
+
+- `UseItem_SelectMon` rejects `EGG` immediately after party selection, before
+  dispatching the chosen item's effect. This common gate covers HP/status
+  recovery, Revive, PP items, vitamins, Rare Candy, and evolution stones.
+- Rust's field UI adapter had an Egg check, but the shared effect authorities
+  and in-battle party route did not. Alternate callers could therefore heal an
+  Egg or alter its PP. The active-item, PP-item, and party-special entrypoints
+  now return a typed `TargetEgg` error before payload evaluation or mutation.
+  Sacred Ash retains its distinct source behavior of skipping Eggs while
+  healing every non-Egg. Focused tests prove HP and PP attempts are atomic.
+
+# HP restoration accepts only `HealingHPAmounts` values (2026-09-04)
+
+- `GetHealingItemAmount` reads a closed ASM table: 10, 20, 30, 50, 60, 80,
+  100, or 200 HP, plus the `MAX_STAT_VALUE` entries exported as the full-HP
+  sentinel. There is no caller-defined numeric healing amount.
+- Rust previously accepted every positive `i16`, allowing pack data to invent
+  effects such as a 25-HP Potion. The shared restoration authority now accepts
+  only the source table's values and full-HP sentinel. A focused regression
+  proves an unlisted amount fails without changing the target.
+
+# Repel duration and active-effect rejection are source-exact (2026-09-04)
+
+- The three entrypoints load fixed byte durations before `UseRepel`: Repel is
+  100 steps, Super Repel is 200, and Max Repel is 250. `UseRepel` then checks
+  `wRepelEffect` and refuses the item when any earlier repel remains active.
+- Rust accepted every nonzero `u16` duration, and its public mutation helper
+  overwrote an active repel even though the higher-level bag path happened to
+  precheck it. Validation now accepts only 100/200/250, reports the invalid
+  value in its typed error, and the mutation authority rejects replacement
+  while preserving the existing item and counter. Core regressions cover both
+  invariants; integrated encounter tests remain green.
+
+# Escape Rope exposes only the implemented Dig-warp behavior (2026-09-04)
+
+- `EscapeRopeEffect` enters `EscapeRopeFunction`, which selects the shared
+  Escape Rope/Dig path and restores the saved Dig warp. The exported
+  discriminator for that single behavior is `DIG_WARP`.
+- Rust previously accepted any exact-looking catalog and item mode, including
+  `MOD_WARP`, but the runtime ignored the value and always executed the same
+  saved Dig warp. That made arbitrary labels false authorities and silently
+  routed them through an unapproved fallback behavior.
+- Item-payload, compiled catalog, merge, and direct-use validation now accept
+  only `DIG_WARP`. The item ID remains pack-driven, so a renamed item can use
+  the implemented behavior without inventing a new mode. Focused tests prove
+  unsupported modes are rejected and canonical Escape Rope travel still uses
+  the saved Dig destination.
+
+# A zero saved Dig warp is the ASM “no destination” sentinel (2026-09-04)
+
+- `.CheckCanDig` tests `wDigWarpNumber`, `wDigMapGroup`, and `wDigMapNumber`
+  independently and fails as soon as any byte is zero. In particular, warp
+  number zero is never a usable destination.
+- Rust represented absence as `None` but previously also accepted `Some(0)`.
+  Given an unchecked synthetic index-zero warp, the shared destination helper
+  returned a successful Escape Rope/Dig target that the ASM would reject.
+- The destination authority now treats zero exactly like the absent sentinel,
+  and saved-state validation rejects `Some(0)` so invalid state cannot cross a
+  persistence boundary. Regressions cover both paths.
+
+# Escape Rope opens the Kabuto chamber wall before leaving (2026-09-04)
+
+- The Escape Rope branch of `.DoDig` calls `SpecialKabutoChamber` before it
+  queues the departure script. On `RuinsOfAlphKabutoChamber`, that special
+  sets `EVENT_WALL_OPENED_IN_KABUTO_CHAMBER`; Dig does not call it.
+- Rust's shared Escape Rope path previously validated the saved warp and
+  consumed the item without applying this one map-specific source side effect.
+- A core Escape Rope chamber authority now sets the exact event flag only on
+  the exact chamber map, and the pack runtime invokes it after destination
+  validation and before consumption. Core and integrated regressions cover the
+  positive chamber case and ordinary-cave no-op behavior.
+
+# Flash requires live darkness and opens the Aerodactyl chamber wall (2026-09-04)
+
+- `FlashFunction` checks the Zephyr Badge, calls `SpecialAerodactylChamber`,
+  and permits the move only when that special returns carry or
+  `wTimeOfDayPalset` equals `DARKNESS_PALSET`. The special sets
+  `EVENT_WALL_OPENED_IN_AERODACTYL_CHAMBER` on the exact chamber map.
+- Rust previously validated the actor and badge but queued Flash on every map;
+  it also omitted the chamber event entirely. A lit route could therefore use
+  Flash even though the cartridge returns `FieldMoveFailed`.
+- The core now validates the exact exported `dark` palette, implements the
+  Aerodactyl chamber exception and flag, and returns a typed error for ordinary
+  lit maps. The runtime passes the live session map, preserves rejection
+  atomicity, and still defers `STATUSFLAGS_FLASH` to the source
+  `BlindingFlash` callasm boundary.
+
+# Fly destinations are one bounded table selection (2026-09-04)
+
+- `_FlyMap` returns one spawn index selected from the Fly destination table;
+  `FlyFunction` rejects `-1` and every index at or above `NUM_SPAWNS` before
+  storing `wDefaultSpawnpoint`. Crystal's `SpawnPoints` table has exactly 28
+  usable rows, indexed 0 through 27, followed by its `N_A` sentinel.
+- Rust's mutation command previously accepted an unlocked flypoint flag and a
+  spawn identifier as independent caller inputs. An unlocked unrelated flag
+  could therefore authorize travel to any compiled spawn, including a table
+  row not associated with that flag. Spawn catalogs also accepted identifiers
+  beyond the cartridge table.
+- Fly now requires the flag and spawn identifier to match the same compiled
+  destination row before checking its unlock flag or resolving the spawn.
+  Runtime lookup, overlay insertion, and spawn-catalog verification enforce the
+  0..27 domain. Integrated regressions cover unknown flags, mismatched spawns,
+  unset correct flags, and the valid coupled destination.
+
+# Fly catalog verification and menu order match the ASM table (2026-09-04)
+
+- `Flypoints` is a closed ordered table. Its Johto range begins at New Bark
+  Town, its Kanto range ends at Indigo Plateau, and each row couples one
+  landmark to one spawn. The Fly map initializes New Bark as Johto's default
+  and Indigo Plateau as Kanto's default; the default remains selectable even
+  when its visited bit is clear.
+- Rust previously did not verify Fly records against the compiled spawn and
+  landmark catalogs. Its UI also iterated a `BTreeSet` ordered by flypoint flag,
+  silently dropped missing landmarks, and incorrectly made Silver Cave the
+  always-selectable Johto destination.
+- Pack verification now rejects key/record drift, invalid flags or landmarks,
+  out-of-range or missing spawns, missing landmarks, and duplicate spawn or
+  landmark bindings. The shell resolves every landmark explicitly, orders the
+  active rows by the source landmark sequence, and uses New Bark Town and
+  Indigo Plateau as the exact regional defaults. Focused regressions cover the
+  verifier boundary and the Johto default/order behavior.
+
+# Default destinations and last-Center spawn memory are distinct (2026-09-04)
+
+- Crystal stores `wDefaultSpawnpoint` separately from
+  `wLastSpawnMapGroup`/`wLastSpawnMapNumber`. New Game initializes only the
+  default to `SPAWN_HOME`; Fly and post-credits change only the default;
+  Teleport reads the last-Center pair; whiteout reads that pair but falls back
+  to exported `SPAWN_HOME` when it is not a recognized spawn.
+- Rust previously collapsed both WRAM concepts into `last_spawn_identifier`.
+  New Game, Fly, post-credits, and whiteout therefore overwrote Teleport's
+  remembered Center destination, and `WarpToSpawnPoint` incorrectly fabricated
+  a pending script warp from that field even though the ASM special only clears
+  Safari and Bug Contest status.
+- Spawn transitions now preserve last-Center memory. Whiteout performs the
+  exact home fallback without writing it back, `WarpToSpawnPoint` is status
+  cleanup only, and post-credits uses a distinct journaled explicit-spawn
+  transition with `MAPSETUP_WARP`.
+
+# Pokémon Center entry records the outdoor source spawn (2026-09-04)
+
+- `EnterMapWarp.SetSpawn` updates the last-spawn map pair only when the source
+  is a route or town, the destination is indoor, and its tileset is exactly
+  `TILESET_POKECENTER` or `TILESET_POKECOM_CENTER`. It records the outdoor
+  source map, not the Center interior or the current default destination.
+- The shared Rust warp resolver now applies the same environment and tileset
+  predicate and stores the raw source map constant. The authoritative save
+  state no longer collapses the WRAM pair to an optional `SpawnPoints` index,
+  so even a Center source absent from that table remains representable.
+  Teleport and whiteout perform `IsSpawnPoint` only when invoked: Teleport
+  fails for an unrecognized pair, while whiteout uses `SPAWN_HOME`. Unrelated
+  warp and field-travel paths continue to preserve the raw value.

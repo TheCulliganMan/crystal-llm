@@ -1280,10 +1280,7 @@ fn refresh_battle_text(
 fn visible_overlay_animation_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     let mut key = 0u64;
     if let Some(title) = runtime_shell.title_menu.as_ref() {
-        key = key.wrapping_add(u64::from(title.frame));
-        key = key
-            .wrapping_mul(31)
-            .wrapping_add(u64::from(title.main_menu_frame));
+        key = key.wrapping_add(u64::from(title.source_suicune_frame()));
     }
     if let Some(intro) = runtime_shell.intro_screen.as_ref() {
         key = key
@@ -1399,10 +1396,13 @@ fn format_title_status(runtime_shell: &BevyRuntimeShell) -> String {
     ];
     if let Some(title) = &runtime_shell.title_menu {
         lines.push(format!("new_game_spawn={}", title.spawn_identifier));
-        lines.push(format!("phase={:?}", title.phase));
-        lines.push(format!("frame={}", title.frame));
-        lines.push(format!("scx={}", title.scx));
-        lines.push(format!("title_timer={}", title.title_timer));
+        lines.push(format!("phase={:?}", title.source_phase()));
+        lines.push(format!(
+            "suicune_frame={}",
+            title.source_suicune_frame()
+        ));
+        lines.push(format!("scx={}", title.source_scx()));
+        lines.push(format!("title_timer={}", title.source_title_timer()));
         if let Some(save_path) = &title.save_path {
             lines.push(format!(
                 "continue_verified={} path={}",
@@ -1419,7 +1419,7 @@ fn format_title_dialog(runtime_shell: &BevyRuntimeShell) -> String {
     let Some(title) = &runtime_shell.title_menu else {
         return String::new();
     };
-    if !visible_title_main_menu_ready(title) {
+    if !visible_title_main_menu_active(title) {
         return visible_title_menu_entries(runtime_shell, title)
             .unwrap_or_else(|_| vec!["TITLE SCREEN".to_string()])
             .join("\n");
@@ -2482,10 +2482,10 @@ fn format_battle_overlay(
         }
     }
     lines.push(format!(
-        "run={} escape_attempts={} guard={} switch={:?} items={} balls={}",
+        "run={} escape_attempts={} mist={} switch={:?} items={} balls={}",
         battle.commands.can_run,
         battle.escape_attempts,
-        battle.player_stat_drop_guard_turns,
+        battle.player_mist_active,
         battle.commands.switch_party_indices,
         battle.commands.can_use_items,
         carried_ball_item_ids(snapshot).len()
@@ -2933,7 +2933,7 @@ fn format_status_details(
         snapshot.progression.pokedex_seen,
         snapshot.progression.pokedex_owned,
         snapshot.progression.repel_steps_remaining,
-        snapshot.progression.last_spawn_identifier,
+        snapshot.progression.last_spawn_map_constant,
         snapshot.audio.current_music
     ));
     lines.push(format!(

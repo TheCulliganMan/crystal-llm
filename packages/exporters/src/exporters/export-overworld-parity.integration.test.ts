@@ -27,6 +27,7 @@ describe("overworld postbattle exporter integration", () => {
         "Script_GotABite",
         "Script_GetOnBike",
         "Script_GetOffBike",
+        "Script_ForcedMovement",
       ]),
     );
   });

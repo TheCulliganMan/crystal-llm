@@ -2237,12 +2237,27 @@ fn title_art_cache_tracks_native_eight_frame_animation_cadence() {
     let mut title = core_modular_title_shell_for_test()
         .title_menu
         .expect("title menu");
-    title.phase = VisibleTitlePhase::PressStart;
-    title.frame = 15;
-    title.scx = 0;
-    title.title_timer = 0;
+    title
+        .presentation_machine
+        .memory
+        .insert("wJumptableIndex".to_string(), 2);
+    title
+        .presentation_machine
+        .values
+        .insert("title_suicune_frame".to_string(), 15);
+    title
+        .presentation_machine
+        .memory
+        .insert("hSCX".to_string(), 0);
+    title
+        .presentation_machine
+        .memory
+        .insert("wTitleScreenTimer".to_string(), 0);
     assert_eq!(title_screen_art_key(&title).frame, 8);
-    title.frame = 16;
+    title
+        .presentation_machine
+        .values
+        .insert("title_suicune_frame".to_string(), 16);
     assert_eq!(title_screen_art_key(&title).frame, 16);
 }
 

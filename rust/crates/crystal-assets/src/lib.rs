@@ -20,20 +20,19 @@ use crystal_core::battle::damage::{
     TypeEffectivenessTableKind, WeatherModifierIssue, WeatherModifiers, type_category_issues,
     type_effectiveness_table_issues, weather_modifier_issues,
 };
-use crystal_core::battle::start::require_active_battle_for_state_item;
 use crystal_core::battle::start::{
-    ActiveBattlePartySwitchOutcome, BattleStatDropGuardOutcome, StaticWildBattleOrigin,
-    StaticWildBattleRequest, StaticWildBattleStart, TrainerBattleAdvanceOutcome,
-    TrainerBattleCompletion, TrainerBattleCompletionOutcome, TrainerBattleRequest,
-    TrainerBattleStartStatus, WildBattleStart, activate_static_wild_battle_start,
-    activate_trainer_battle_start_status, activate_wild_battle_start,
+    ActiveBattlePartySwitchOutcome, StaticWildBattleOrigin, StaticWildBattleRequest,
+    StaticWildBattleStart, TrainerBattleAdvanceOutcome, TrainerBattleCompletion,
+    TrainerBattleCompletionOutcome, TrainerBattleRequest, TrainerBattleStartStatus,
+    WildBattleStart, activate_static_wild_battle_start, activate_trainer_battle_start_status,
+    activate_wild_battle_start,
     advance_active_trainer_battle as core_advance_active_trainer_battle,
-    apply_battle_stat_drop_guard_turns, complete_trainer_battle as core_complete_trainer_battle,
-    first_available_battle_party_index, materialize_non_roaming_wild_battle_with_rng,
-    materialize_roaming_wild_battle_with_rng, materialize_staged_roaming_wild_battle_with_rng,
-    materialize_trainer_party, require_active_battle_enemy_party_index,
-    require_active_battle_party_index, require_active_battle_party_slot_index,
-    static_wild_battle_start, switch_active_battle_party_index, trainer_battle_start,
+    complete_trainer_battle as core_complete_trainer_battle, first_available_battle_party_index,
+    materialize_non_roaming_wild_battle_with_rng, materialize_roaming_wild_battle_with_rng,
+    materialize_staged_roaming_wild_battle_with_rng, materialize_trainer_party,
+    require_active_battle_enemy_party_index, require_active_battle_party_index,
+    require_active_battle_party_slot_index, static_wild_battle_start,
+    switch_active_battle_party_index, trainer_battle_start,
 };
 use crystal_core::battle::stats::{
     BattleStatMultiplier, BattleStatMultiplierTableIssue, BattleStatMultiplierTables,
@@ -41,8 +40,9 @@ use crystal_core::battle::stats::{
 };
 use crystal_core::battle::turn::{
     BattleAction, BattleCombatState, BattleEvent, BattleSide, BattleTurnError, BattleTurnInput,
-    BattleTurnOutcome, EnemyMoveSelector, EnemyPostOrderActionSelector, MovePriorityTable,
-    MovePriorityTableIssue, active_battle_combat_state, battle_action_locked_before_menu,
+    BattleTurnOutcome, EnemyMoveSelection, EnemyMoveSelector, EnemyPostOrderActionSelector,
+    MovePriorityTable, MovePriorityTableIssue, active_battle_combat_state,
+    apply_active_battle_item_effect_to_combat, battle_action_locked_before_menu,
     battle_move_effect_is_supported, battle_moves, battle_speed, commit_battle_turn_outcome,
     commit_wild_battle_escape_attempt, move_priority_table_issues,
     resolve_battle_enemy_action_with_items as core_resolve_battle_enemy_action_with_items,
@@ -163,8 +163,9 @@ use crystal_core::systems::battle_items::{
     validate_battle_escape_item, validate_battle_stat_drop_guard_item,
 };
 use crystal_core::systems::battle_rewards::{
-    BattleRewardError, BattleRewardOutcome, BattleRewardRules, BattleRewardRulesIssue,
-    MomPurchaseKind, PendingMoveLearnResolution, battle_reward_rules_issues,
+    BattleLevelUpHappinessContext, BattleRewardError, BattleRewardOutcome, BattleRewardRules,
+    BattleRewardRulesIssue, MomPurchaseKind, PendingMoveLearnResolution,
+    apply_happiness_change as core_apply_happiness_change, battle_reward_rules_issues,
     claim_active_trainer_battle_rewards as core_claim_active_trainer_battle_rewards,
     claim_active_wild_battle_rewards as core_claim_active_wild_battle_rewards,
     decline_pending_move_learn as core_decline_pending_move_learn, promote_next_pending_move_learn,
@@ -202,7 +203,8 @@ use crystal_core::systems::field_moves::{
     FieldMoveFlagRule, FieldMoveMoveRule, FieldMoveRule, FieldMoveTravelOutcome,
     FieldMoveTravelRule, FieldMoveUseOutcome, FieldStoryKeyRule, SavedDigWarpDestination,
     apply_cut_field_move as core_apply_cut_field_move, apply_dig_warp_memory_for_transition,
-    apply_flash_field_move as core_apply_flash_field_move, apply_repel_item_use,
+    apply_escape_rope_chamber_effect, apply_flash_field_move as core_apply_flash_field_move,
+    apply_flash_map_effect, apply_repel_item_use,
     apply_strength_field_move as core_apply_strength_field_move,
     apply_surf_field_move as core_apply_surf_field_move,
     apply_waterfall_field_move as core_apply_waterfall_field_move,
@@ -424,9 +426,8 @@ use crystal_core::world::session::{
     ConnectionDestination, ConnectionTransition, ConnectionTrigger, CoordEventTrigger,
     EncounterCheckOptions, ExactEncounterContext, OverworldInteraction, OverworldInteractionTarget,
     OverworldSession, OverworldSnapshot, WarpDestination, WarpTransition, WarpTrigger,
-    WildEncounterRoll, leading_usable_party_ability, leading_usable_party_level,
-    object_event_initial_facing, raw_event_tile_to_runtime_tile_checked,
-    runtime_tile_to_raw_event_tile,
+    WildEncounterRoll, leading_usable_party_level, object_event_initial_facing,
+    raw_event_tile_to_runtime_tile_checked, runtime_tile_to_raw_event_tile,
 };
 use crystal_core::world::session::{
     background_event_tile_position_checked, warp_tile_position_checked,

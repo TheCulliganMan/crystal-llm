@@ -3,10 +3,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::battle::turn::{
-    BattleSide, SwitchInSpikesOutcome, apply_switch_in_spikes_damage, switch_battle_combat_pokemon,
+    BattleSide, SwitchInSpikesOutcome, apply_switch_in_spikes_damage,
+    switch_battle_combat_pokemon_normally,
 };
 use crate::models::{
-    Dv, Move, Pokemon, PokemonBuildError, PokemonSpecies, Trainer, TrainerCatalog,
+    Dv, Item, Move, Pokemon, PokemonBuildError, PokemonSpecies, Trainer, TrainerCatalog,
     TrainerPartyPokemon, calculate_stats, create_pokemon_from_known_dvs,
 };
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -365,20 +366,6 @@ pub struct TrainerBattleAdvanceOutcome {
 pub struct ActiveBattlePartySwitchOutcome {
     pub party_index: usize,
     pub spikes: Option<SwitchInSpikesOutcome>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(deny_unknown_fields)]
-pub enum BattleStateItemError {
-    #[error("cannot use battle state item without an active battle")]
-    InactiveBattle,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BattleStatDropGuardOutcome {
-    pub turns_before: u8,
-    pub turns_after: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -1288,13 +1275,14 @@ where
 pub fn activate_wild_battle_start(
     state: &mut GameState,
     start: &WildBattleStart,
+    items: &BTreeMap<String, Item>,
 ) -> Result<(), PendingStaticWildTerminalError> {
     if state.pending_static_wild_terminal.is_some() {
         return Err(PendingStaticWildTerminalError);
     }
     state.battle = BattleMemory::from(start);
     state.pokedex.record_seen_pokemon(&start.enemy_pokemon);
-    reset_active_battle_slots(state);
+    reset_active_battle_slots(state, items);
     Ok(())
 }
 
@@ -1325,6 +1313,7 @@ pub fn activate_static_wild_battle_start(
     state: &mut GameState,
     start: &StaticWildBattleStart,
     origin: &StaticWildBattleOrigin,
+    items: &BTreeMap<String, Item>,
 ) -> Result<(), StaticWildBattleOriginError> {
     if state.pending_static_wild_terminal.is_some() {
         return Err(StaticWildBattleOriginError::PendingTerminal);
@@ -1344,13 +1333,14 @@ pub fn activate_static_wild_battle_start(
         enemy_party: start.enemy_party.clone(),
     };
     state.pokedex.record_seen_pokemon(&start.enemy_pokemon);
-    reset_active_battle_slots(state);
+    reset_active_battle_slots(state, items);
     Ok(())
 }
 
 pub fn activate_trainer_battle_start_status(
     state: &mut GameState,
     start: &TrainerBattleStartStatus,
+    items: &BTreeMap<String, Item>,
 ) -> Result<(), PendingStaticWildTerminalError> {
     if let TrainerBattleStartStatus::Started(started) = start {
         if state.pending_static_wild_terminal.is_some() {
@@ -1358,7 +1348,7 @@ pub fn activate_trainer_battle_start_status(
         }
         state.battle = BattleMemory::from(started);
         state.pokedex.record_seen_pokemon(&started.enemy_pokemon);
-        reset_active_battle_slots(state);
+        reset_active_battle_slots(state, items);
     }
     Ok(())
 }
@@ -1366,6 +1356,7 @@ pub fn activate_trainer_battle_start_status(
 pub fn activate_link_battle_start(
     state: &mut GameState,
     start: &LinkBattleStart,
+    items: &BTreeMap<String, Item>,
 ) -> Result<(), LinkBattleStartError> {
     if state.pending_static_wild_terminal.is_some() {
         return Err(LinkBattleStartError::PendingStaticWildTerminal);
@@ -1422,7 +1413,7 @@ pub fn activate_link_battle_start(
         ai_layers: Vec::new(),
     };
     state.pokedex.record_seen_pokemon(&enemy_pokemon);
-    reset_active_battle_slots(state);
+    reset_active_battle_slots(state, items);
     state.battle_active_enemy_party_index = Some(active_enemy_index);
     Ok(())
 }
@@ -1471,6 +1462,7 @@ pub fn require_active_battle_party_slot_index(
 pub fn switch_active_battle_party_index(
     state: &mut GameState,
     index: usize,
+    items: &BTreeMap<String, Item>,
 ) -> Result<ActiveBattlePartySwitchOutcome, ActiveBattlePartyError> {
     validate_active_battle_party_index(state, index)?;
     let mut switched_hp = None;
@@ -1480,7 +1472,7 @@ pub fn switch_active_battle_party_index(
         // through BattleAction::Switch. Keep the authoritative combat battler
         // in lockstep with wCurBattleMon or the next selected move still acts
         // with the fainted/outgoing Pokemon.
-        switch_battle_combat_pokemon(combat, BattleSide::Player, index)
+        switch_battle_combat_pokemon_normally(combat, BattleSide::Player, index)
             .map_err(|_| ActiveBattlePartyError::PartyIndexOutOfRange { index })?;
         spikes = apply_switch_in_spikes_damage(combat, BattleSide::Player);
         if let Some(SwitchInSpikesOutcome::Damaged { hp_after, .. }) = &spikes {
@@ -1498,7 +1490,7 @@ pub fn switch_active_battle_party_index(
     }
     state.battle_active_party_index = Some(index);
     mark_active_party_participant(state);
-    activate_amulet_coin_for_active_party(state);
+    activate_amulet_coin_for_active_party(state, items);
     Ok(ActiveBattlePartySwitchOutcome {
         party_index: index,
         spikes,
@@ -1595,7 +1587,7 @@ pub fn switch_active_battle_enemy_party_index(
     state.battle_active_enemy_party_index = Some(index);
     let mut spikes = None;
     if let Some(combat) = state.script_runtime.active_battle_combat.as_mut() {
-        switch_battle_combat_pokemon(combat, BattleSide::Enemy, index)
+        switch_battle_combat_pokemon_normally(combat, BattleSide::Enemy, index)
             .map_err(|_| ActiveBattleEnemyError::EnemyPartyIndexOutOfRange { index })?;
         spikes = apply_switch_in_spikes_damage(combat, BattleSide::Enemy);
         if let Some(SwitchInSpikesOutcome::Damaged { hp_after, .. }) = &spikes {
@@ -1650,7 +1642,7 @@ pub fn advance_active_trainer_battle(
         state.battle_active_enemy_party_index = Some(index);
         let mut spikes = None;
         if let Some(combat) = state.script_runtime.active_battle_combat.as_mut() {
-            switch_battle_combat_pokemon(combat, BattleSide::Enemy, index)
+            switch_battle_combat_pokemon_normally(combat, BattleSide::Enemy, index)
                 .map_err(|_| ActiveBattleEnemyError::EnemyPartyIndexOutOfRange { index })?;
             spikes = apply_switch_in_spikes_damage(combat, BattleSide::Enemy);
             if let Some(SwitchInSpikesOutcome::Damaged { hp_after, .. }) = &spikes {
@@ -1695,30 +1687,7 @@ pub fn claim_active_trainer_battle_reward_index(
     Ok(enemy_index)
 }
 
-pub fn apply_battle_stat_drop_guard_turns(
-    state: &mut GameState,
-    turns: u8,
-) -> Result<BattleStatDropGuardOutcome, BattleStateItemError> {
-    require_active_battle_for_state_item(state)?;
-    let turns_before = state.battle_player_stat_drop_guard_turns;
-    state.battle_player_stat_drop_guard_turns = turns;
-    Ok(BattleStatDropGuardOutcome {
-        turns_before,
-        turns_after: turns,
-    })
-}
-
-pub fn require_active_battle_for_state_item(state: &GameState) -> Result<(), BattleStateItemError> {
-    match state.battle {
-        BattleMemory::Wild { .. }
-        | BattleMemory::StaticWild { .. }
-        | BattleMemory::Trainer { .. } => {}
-        BattleMemory::Inactive => return Err(BattleStateItemError::InactiveBattle),
-    }
-    Ok(())
-}
-
-fn reset_active_battle_slots(state: &mut GameState) {
+fn reset_active_battle_slots(state: &mut GameState, items: &BTreeMap<String, Item>) {
     // NewBattle clears wBattleResult before any terminal path establishes its
     // exact WIN/LOSE/DRAW byte.  Upper capture/script flags must never leak
     // from a previous battle.
@@ -1726,13 +1695,13 @@ fn reset_active_battle_slots(state: &mut GameState) {
     state.battle_active_party_index = first_available_battle_party_index(state);
     state.battle_active_enemy_party_index = Some(0);
     state.battle_rewarded_enemy_party_indices.clear();
+    state.battle_evolvable_party_indices.clear();
     state.battle_escape_attempts = 0;
-    state.battle_player_stat_drop_guard_turns = 0;
     state.battle_pay_day_money = 0;
     state.battle_amulet_coin_active = false;
     state.script_runtime.active_battle_combat = None;
     mark_active_party_participant(state);
-    activate_amulet_coin_for_active_party(state);
+    activate_amulet_coin_for_active_party(state, items);
 }
 
 fn deactivate_battle_with_current_result(state: &mut GameState) {
@@ -1826,8 +1795,11 @@ fn mark_active_party_participant(state: &mut GameState) {
     }
 }
 
-pub(crate) fn activate_amulet_coin_for_active_party(state: &mut GameState) {
-    if state.battle_amulet_coin_active {
+pub fn activate_amulet_coin_for_active_party(
+    state: &mut GameState,
+    items: &BTreeMap<String, Item>,
+) {
+    if state.battle_amulet_coin_active || matches!(state.battle, BattleMemory::Inactive) {
         return;
     }
     let Some(index) = state.battle_active_party_index else {
@@ -1840,7 +1812,8 @@ pub(crate) fn activate_amulet_coin_for_active_party(state: &mut GameState) {
         .get(index)
         .and_then(Option::as_ref)
         .and_then(|pokemon| pokemon.item.as_deref())
-        == Some("AMULET_COIN")
+        .and_then(|item_id| items.get(item_id))
+        .is_some_and(|item| item.held_effect == "HELD_AMULET_COIN")
     {
         state.battle_amulet_coin_active = true;
     }
@@ -1861,8 +1834,8 @@ pub fn clear_active_battle_slots(state: &mut GameState) {
     state.battle_active_party_index = None;
     state.battle_active_enemy_party_index = None;
     state.battle_rewarded_enemy_party_indices.clear();
+    state.battle_evolvable_party_indices.clear();
     state.battle_escape_attempts = 0;
-    state.battle_player_stat_drop_guard_turns = 0;
     state.battle_pay_day_money = 0;
     state.battle_amulet_coin_active = false;
 }
@@ -2044,6 +2017,7 @@ mod tests {
                 enemy_party: vec![remote.clone()],
                 random_state: random_state.clone(),
             },
+            &BTreeMap::new(),
         )
         .expect("link battle starts");
 
@@ -2560,11 +2534,11 @@ mod tests {
         .expect("wild start");
         state.battle_rewarded_enemy_party_indices.insert(9);
         state.battle_escape_attempts = 3;
-        state.battle_player_stat_drop_guard_turns = 4;
         state.battle_pay_day_money = 55;
         state.battle_result = 0xff;
 
-        activate_wild_battle_start(&mut state, &start).expect("wild battle activates");
+        activate_wild_battle_start(&mut state, &start, &BTreeMap::new())
+            .expect("wild battle activates");
 
         assert_eq!(state.battle, BattleMemory::from(&start));
         assert!(state.pokedex.has_seen("PIDGEY"));
@@ -2572,7 +2546,6 @@ mod tests {
         assert_eq!(state.battle_active_enemy_party_index, Some(0));
         assert!(state.battle_rewarded_enemy_party_indices.is_empty());
         assert_eq!(state.battle_escape_attempts, 0);
-        assert_eq!(state.battle_player_stat_drop_guard_turns, 0);
         assert_eq!(state.battle_pay_day_money, 0);
         assert_eq!(state.battle_result, 0);
     }
@@ -2598,7 +2571,8 @@ mod tests {
             &mut rng,
         )
         .expect("wild start");
-        activate_wild_battle_start(&mut state, &start).expect("wild battle activates");
+        activate_wild_battle_start(&mut state, &start, &BTreeMap::new())
+            .expect("wild battle activates");
         let active_index = state.battle_active_party_index.expect("active party");
         assert_eq!(
             state.storage.party.pokemon[active_index]
@@ -2609,7 +2583,6 @@ mod tests {
         );
         state.battle_rewarded_enemy_party_indices.insert(0);
         state.battle_escape_attempts = 2;
-        state.battle_player_stat_drop_guard_turns = 3;
         state.battle_pay_day_money = 40;
         {
             let pokemon = state.storage.party.pokemon[active_index]
@@ -2632,7 +2605,6 @@ mod tests {
         assert_eq!(state.battle_active_enemy_party_index, None);
         assert!(state.battle_rewarded_enemy_party_indices.is_empty());
         assert_eq!(state.battle_escape_attempts, 0);
-        assert_eq!(state.battle_player_stat_drop_guard_turns, 0);
         assert_eq!(state.battle_pay_day_money, 0);
         assert!(
             state
@@ -2725,12 +2697,12 @@ mod tests {
         state.battle_active_party_index = Some(0);
 
         assert_eq!(
-            switch_active_battle_party_index(&mut state, 2),
+            switch_active_battle_party_index(&mut state, 2, &BTreeMap::new()),
             Err(ActiveBattlePartyError::EmptyPartySlot { index: 2 })
         );
         assert_eq!(state.battle_active_party_index, Some(0));
         assert_eq!(
-            switch_active_battle_party_index(&mut state, 1),
+            switch_active_battle_party_index(&mut state, 1, &BTreeMap::new()),
             Err(ActiveBattlePartyError::FaintedPartySlot { index: 1 })
         );
         assert_eq!(state.battle_active_party_index, Some(0));
@@ -2744,7 +2716,8 @@ mod tests {
             .expect("store third");
 
         assert_eq!(
-            switch_active_battle_party_index(&mut state, 2).map(|outcome| outcome.party_index),
+            switch_active_battle_party_index(&mut state, 2, &BTreeMap::new())
+                .map(|outcome| outcome.party_index),
             Ok(2)
         );
         assert_eq!(require_active_battle_party_index(&state), Ok(2));
@@ -2773,6 +2746,17 @@ mod tests {
             .with_parties(vec![fainted, replacement.clone()], Vec::new())
             .with_party_indices(0, 0),
         );
+        {
+            let combat = state
+                .script_runtime
+                .active_battle_combat
+                .as_mut()
+                .expect("active combat");
+            combat.player_last_move = Some("TACKLE".to_string());
+            combat.player_last_counter_move = Some("TACKLE".to_string());
+            combat.enemy_last_move = Some("GUST".to_string());
+            combat.enemy_last_counter_move = Some("GUST".to_string());
+        }
 
         assert_eq!(require_active_battle_party_slot_index(&state), Ok(0));
         assert_eq!(
@@ -2780,7 +2764,8 @@ mod tests {
             Err(ActiveBattlePartyError::FaintedPartySlot { index: 0 })
         );
         assert_eq!(
-            switch_active_battle_party_index(&mut state, 1).map(|outcome| outcome.party_index),
+            switch_active_battle_party_index(&mut state, 1, &BTreeMap::new())
+                .map(|outcome| outcome.party_index),
             Ok(1)
         );
         let combat = state
@@ -2791,6 +2776,10 @@ mod tests {
         assert_eq!(combat.player_party_index, 1);
         assert_eq!(combat.player.hp, replacement.hp);
         assert_eq!(combat.player.level, replacement.level);
+        assert_eq!(combat.player_last_move, None);
+        assert_eq!(combat.player_last_counter_move, None);
+        assert_eq!(combat.enemy_last_counter_move, None);
+        assert_eq!(combat.enemy_last_move.as_deref(), Some("GUST"));
     }
 
     #[test]
@@ -2820,8 +2809,8 @@ mod tests {
             .expect("active combat")
             .player_spikes = true;
 
-        let switch =
-            switch_active_battle_party_index(&mut state, 1).expect("switch to replacement");
+        let switch = switch_active_battle_party_index(&mut state, 1, &BTreeMap::new())
+            .expect("switch to replacement");
         assert_eq!(switch.party_index, 1);
         assert_eq!(
             switch.spikes,
@@ -2882,7 +2871,8 @@ mod tests {
             &mut rng,
         )
         .expect("wild start");
-        activate_wild_battle_start(&mut state, &start).expect("wild battle activates");
+        activate_wild_battle_start(&mut state, &start, &BTreeMap::new())
+            .expect("wild battle activates");
         let mut updated = start.enemy_pokemon.clone();
         updated.hp = updated.hp.saturating_sub(1);
 
@@ -3137,42 +3127,6 @@ mod tests {
             claim_active_trainer_battle_reward_index(&mut state),
             Err(ActiveBattleEnemyError::RewardsAlreadyClaimed { index: 0 })
         );
-    }
-
-    #[test]
-    fn battle_stat_drop_guard_requires_active_battle_and_records_before_after_turns() {
-        let mut inactive = GameState::default();
-        assert_eq!(
-            apply_battle_stat_drop_guard_turns(&mut inactive, 5),
-            Err(BattleStateItemError::InactiveBattle)
-        );
-        assert_eq!(inactive.battle_player_stat_drop_guard_turns, 0);
-
-        let mut state = GameState::default();
-        let mut rng = Random::new(1);
-        let start = wild_battle_start_from_encounter(
-            encounter(),
-            "MUSIC_JOHTO_WILD_BATTLE".to_string(),
-            &species(),
-            &learnsets(),
-            &BTreeMap::new(),
-            &growth_rates(),
-            &mut rng,
-        )
-        .expect("wild start");
-        activate_wild_battle_start(&mut state, &start).expect("wild battle activates");
-        state.battle_player_stat_drop_guard_turns = 2;
-
-        let guard = apply_battle_stat_drop_guard_turns(&mut state, 5).expect("guard turns apply");
-
-        assert_eq!(
-            guard,
-            BattleStatDropGuardOutcome {
-                turns_before: 2,
-                turns_after: 5,
-            }
-        );
-        assert_eq!(state.battle_player_stat_drop_guard_turns, 5);
     }
 
     #[test]

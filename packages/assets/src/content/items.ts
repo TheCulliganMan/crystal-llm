@@ -268,7 +268,6 @@ const toGeneratedItemRecord = (script_name: string, data: ItemSeed): ItemType =>
         battle_escape_mode: null,
         battle_focus_energy: null,
         battle_stat_drop_guard: null,
-        battle_stat_drop_guard_turns: null,
         confusion_heal: null,
         repel_steps: null,
         escape_rope_mode: null,

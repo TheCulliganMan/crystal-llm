@@ -3234,21 +3234,22 @@ fn selected_enemy_battle_move_slot_with_rng(
     battle: &crate::RuntimeBattleSnapshot,
     combat: &crystal_core::battle::turn::BattleCombatState,
     rng: &mut dyn BattleRandomSource,
-) -> Result<usize> {
+) -> Result<crystal_core::battle::turn::EnemyMoveSelection> {
     let RuntimeBattleKind::Trainer { ai_move_flags, .. } = &battle.kind else {
         anyhow::bail!("trainer move scorer received a wild battle");
     };
-    data.select_trainer_enemy_move_slot(combat, *ai_move_flags, rng)
+    data.select_trainer_enemy_move_with_scratch(combat, *ai_move_flags, rng)
 }
 
 
 fn selected_wild_enemy_move_slot(
     combat: &crystal_core::battle::turn::BattleCombatState,
     rng: &mut dyn BattleRandomSource,
-) -> Result<usize> {
-    Ok(crystal_core::battle::turn::select_wild_enemy_move_slot(
-        combat, rng,
-    ))
+) -> Result<crystal_core::battle::turn::EnemyMoveSelection> {
+    Ok(crystal_core::battle::turn::EnemyMoveSelection {
+        slot: crystal_core::battle::turn::select_wild_enemy_move_slot(combat, rng),
+        ai_damage_register: 0,
+    })
 }
 
 fn selected_enemy_trainer_post_order_action(
@@ -3894,6 +3895,10 @@ fn format_battle_turn_events(events: &[crate::core::battle::turn::BattleEvent]) 
                 crate::core::battle::turn::BattleSide::Player => "player_pain_split",
                 crate::core::battle::turn::BattleSide::Enemy => "enemy_pain_split",
             },
+            crate::core::battle::turn::BattleEvent::PainSplitFailed { side, .. } => match side {
+                crate::core::battle::turn::BattleSide::Player => "player_pain_split_failed",
+                crate::core::battle::turn::BattleSide::Enemy => "enemy_pain_split_failed",
+            },
             crate::core::battle::turn::BattleEvent::OhkoFailed { side, .. } => match side {
                 crate::core::battle::turn::BattleSide::Player => "player_ohko_failed",
                 crate::core::battle::turn::BattleSide::Enemy => "enemy_ohko_failed",
@@ -4015,6 +4020,10 @@ fn format_battle_turn_events(events: &[crate::core::battle::turn::BattleEvent]) 
                 crate::core::battle::turn::BattleSide::Player => "player_curse_failed",
                 crate::core::battle::turn::BattleSide::Enemy => "enemy_curse_failed",
             },
+            crate::core::battle::turn::BattleEvent::CurseStatsCapped { side, .. } => match side {
+                crate::core::battle::turn::BattleSide::Player => "player_curse_stats_capped",
+                crate::core::battle::turn::BattleSide::Enemy => "enemy_curse_stats_capped",
+            },
             crate::core::battle::turn::BattleEvent::CurseDamage { side, .. } => match side {
                 crate::core::battle::turn::BattleSide::Player => "player_curse_damage",
                 crate::core::battle::turn::BattleSide::Enemy => "enemy_curse_damage",
@@ -4070,6 +4079,10 @@ fn format_battle_turn_events(events: &[crate::core::battle::turn::BattleEvent]) 
             crate::core::battle::turn::BattleEvent::LockOnApplied { side, .. } => match side {
                 crate::core::battle::turn::BattleSide::Player => "player_lock_on_applied",
                 crate::core::battle::turn::BattleSide::Enemy => "enemy_lock_on_applied",
+            },
+            crate::core::battle::turn::BattleEvent::LockOnFailed { side, .. } => match side {
+                crate::core::battle::turn::BattleSide::Player => "player_lock_on_failed",
+                crate::core::battle::turn::BattleSide::Enemy => "enemy_lock_on_failed",
             },
             crate::core::battle::turn::BattleEvent::LockOnConsumed { side, .. } => match side {
                 crate::core::battle::turn::BattleSide::Player => "player_lock_on_consumed",
@@ -4203,9 +4216,25 @@ fn format_battle_turn_events(events: &[crate::core::battle::turn::BattleEvent]) 
                 crate::core::battle::turn::BattleSide::Player => "player_psych_up",
                 crate::core::battle::turn::BattleSide::Enemy => "enemy_psych_up",
             },
+            crate::core::battle::turn::BattleEvent::PsychUpFailed { side, .. } => match side {
+                crate::core::battle::turn::BattleSide::Player => "player_psych_up_failed",
+                crate::core::battle::turn::BattleSide::Enemy => "enemy_psych_up_failed",
+            },
+            crate::core::battle::turn::BattleEvent::BellyDrumApplied { side, .. } => match side {
+                crate::core::battle::turn::BattleSide::Player => "player_belly_drum",
+                crate::core::battle::turn::BattleSide::Enemy => "enemy_belly_drum",
+            },
+            crate::core::battle::turn::BattleEvent::BellyDrumFailed { side, .. } => match side {
+                crate::core::battle::turn::BattleSide::Player => "player_belly_drum_failed",
+                crate::core::battle::turn::BattleSide::Enemy => "enemy_belly_drum_failed",
+            },
             crate::core::battle::turn::BattleEvent::WeatherApplied { side, .. } => match side {
                 crate::core::battle::turn::BattleSide::Player => "player_weather_applied",
                 crate::core::battle::turn::BattleSide::Enemy => "enemy_weather_applied",
+            },
+            crate::core::battle::turn::BattleEvent::WeatherFailed { side, .. } => match side {
+                crate::core::battle::turn::BattleSide::Player => "player_weather_failed",
+                crate::core::battle::turn::BattleSide::Enemy => "enemy_weather_failed",
             },
             crate::core::battle::turn::BattleEvent::WeatherContinues { .. } => "weather_continues",
             crate::core::battle::turn::BattleEvent::SandstormDamage { side, .. } => match side {

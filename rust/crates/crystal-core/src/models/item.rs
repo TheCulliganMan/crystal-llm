@@ -66,8 +66,6 @@ pub struct Item {
     pub battle_focus_energy: Option<bool>,
     #[serde(deserialize_with = "required_nullable_bool")]
     pub battle_stat_drop_guard: Option<bool>,
-    #[serde(deserialize_with = "required_nullable_u8")]
-    pub battle_stat_drop_guard_turns: Option<u8>,
     #[serde(deserialize_with = "required_nullable_bool")]
     pub confusion_heal: Option<bool>,
     #[serde(deserialize_with = "required_nullable_u16")]
@@ -141,8 +139,6 @@ impl<'de> Deserialize<'de> for Item {
             battle_focus_energy: Option<bool>,
             #[serde(deserialize_with = "required_nullable_bool")]
             battle_stat_drop_guard: Option<bool>,
-            #[serde(deserialize_with = "required_nullable_u8")]
-            battle_stat_drop_guard_turns: Option<u8>,
             #[serde(deserialize_with = "required_nullable_bool")]
             confusion_heal: Option<bool>,
             #[serde(deserialize_with = "required_nullable_u16")]
@@ -193,7 +189,6 @@ impl<'de> Deserialize<'de> for Item {
             battle_capture_ball: raw.battle_capture_ball,
             battle_focus_energy: raw.battle_focus_energy,
             battle_stat_drop_guard: raw.battle_stat_drop_guard,
-            battle_stat_drop_guard_turns: raw.battle_stat_drop_guard_turns,
             confusion_heal: raw.confusion_heal,
             repel_steps: raw.repel_steps,
             escape_rope_mode: raw.escape_rope_mode,
@@ -431,7 +426,6 @@ mod tests {
 		              "battle_focus_energy":null,
               "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
-		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
 		              "repel_steps":null,
 		              "escape_rope_mode":null,
@@ -518,7 +512,6 @@ mod tests {
               "battle_focus_energy":null,
               "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
-              "battle_stat_drop_guard_turns":null,
               "confusion_heal":null,
               "repel_steps":null,
               "escape_rope_mode":null,
@@ -653,7 +646,6 @@ mod tests {
 		              "battle_focus_energy":null,
               "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
-		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
 		              "repel_steps":null,
 		              "escape_rope_mode":null,
@@ -703,7 +695,6 @@ mod tests {
 		              "battle_focus_energy":null,
               "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
-		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
 		              "repel_steps":null,
 		              "escape_rope_mode":null,
@@ -822,7 +813,6 @@ mod tests {
 		              "battle_focus_energy":null,
               "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
-		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
 		              "repel_steps":null,
 		              "escape_rope_mode":null,
@@ -1022,7 +1012,6 @@ mod tests {
 		              "battle_focus_energy":null,
               "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
-		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
 		              "repel_steps":null,
 		              "escape_rope_mode":null,
@@ -1115,7 +1104,6 @@ mod tests {
 		              "battle_focus_energy":null,
               "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
-		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
 		              "repel_steps":null,
 		              "escape_rope_mode":null,
@@ -1164,7 +1152,6 @@ mod tests {
 		              "battle_focus_energy":null,
               "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
-		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
 		              "repel_steps":null,
 		              "escape_rope_mode":null,
@@ -1210,7 +1197,6 @@ mod tests {
 		              "battle_focus_energy":null,
               "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
-		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
 		              "repel_steps":null,
 		              "escape_rope_mode":null,
@@ -1257,7 +1243,6 @@ mod tests {
 		              "battle_focus_energy":null,
               "battle_capture_ball":null,
               "battle_stat_drop_guard":null,
-		              "battle_stat_drop_guard_turns":null,
 		              "confusion_heal":null,
 		              "repel_steps":null,
 		              "escape_rope_mode":null,
@@ -1305,7 +1290,6 @@ mod tests {
             "battle_focus_energy": null,
             "battle_capture_ball": null,
             "battle_stat_drop_guard": null,
-            "battle_stat_drop_guard_turns": null,
             "confusion_heal": null,
             "repel_steps": null,
             "escape_rope_mode": null,
@@ -1374,10 +1358,9 @@ mod tests {
     }
 
     #[test]
-    fn serialized_items_require_explicit_menu_and_battle_guard_fields() {
+    fn serialized_items_require_explicit_menu_and_battle_fields() {
         for field in [
             "battle_stat_drop_guard",
-            "battle_stat_drop_guard_turns",
             "battle_capture_ball",
             "field_menu",
             "field_usable",
@@ -1421,7 +1404,6 @@ mod tests {
             "battle_focus_energy": null,
             "battle_capture_ball": null,
             "battle_stat_drop_guard": null,
-            "battle_stat_drop_guard_turns": null,
             "confusion_heal": null,
             "repel_steps": null,
             "escape_rope_mode": null,

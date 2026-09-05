@@ -115,6 +115,11 @@ export type RuntimePresentationProgram = {
   text: Array<{
     id: string;
     source_span: RuntimePresentationSourceSpan;
+    commands: Array<{
+      command: string;
+      args: string[];
+      source_span: RuntimePresentationSourceSpan;
+    }>;
   }>;
   host_effects: RuntimePresentationHostEffect[];
   subprograms: RuntimePresentationCallableSubprogram[];
@@ -199,6 +204,15 @@ export type RuntimePresentationSpriteOperation =
       instances: string[];
       source_span: RuntimePresentationSourceSpan;
       before_host_call: string;
+      rom_frame_crossings?: Array<{
+        dispatcher_entry: number;
+        dispatch_tick: number;
+        elapsed_t_cycles_between_hooks: number;
+      }>;
+      timing_oracle?: {
+        runner: string;
+        rom_sha1: string;
+      };
     };
 
 type RuntimePresentationSpriteFrameset = RuntimePresentationNamedByte & {
@@ -437,6 +451,186 @@ export type RuntimePresentationCallableSubprogram = {
     natural_scheduler_ticks: number | null;
     scheduler: RuntimePresentationSpriteOperation | null;
     frame_wait: RuntimePresentationOperation;
+    interrupt_timing?: {
+      unit: "sm83_machine_cycles";
+      entry_to_first_input_machine_cycles: number;
+      joy_text_delay: {
+        pressed_repeat_reset_machine_cycles: number;
+        repeat_suppressed_machine_cycles: number;
+        repeat_restart_machine_cycles: number;
+        common_instruction_machine_cycles: number[];
+        pressed_repeat_reset_tail_machine_cycles: number[];
+        repeat_suppressed_tail_machine_cycles: number[];
+        repeat_restart_tail_machine_cycles: number[];
+        source_spans: RuntimePresentationSourceSpan[];
+      };
+      outer_loop_body: {
+        after_input_before_scene_dispatch: number;
+        scene_dispatch_to_sprite_scheduler: number;
+        sprite_scheduler_to_frame_wait: number;
+        source_span: RuntimePresentationSourceSpan;
+      };
+      frame_clock: {
+        frame_t_cycles: number;
+        intro_entry_phase_t_cycles: number;
+        timing_oracle: {
+          runner: string;
+          rom_sha1: string;
+        };
+      };
+      hardware_entry: number;
+      vectors: {
+        instruction: "jp";
+        machine_cycles: number;
+        source_span: RuntimePresentationSourceSpan;
+      };
+      lcd_stat: {
+        handler: "LCD";
+        trigger_register: "rSTAT";
+        trigger_mask: "STAT_MODE_0";
+        trigger: "hblank";
+        scanline_t_cycles: number;
+        hblank_request_t_cycles: number;
+        vblank_request_t_cycles: number;
+        interrupts_per_visible_frame: number;
+        callback_pointer: "hLCDCPointer";
+        callback_zero_machine_cycles: number;
+        callback_nonzero_machine_cycles: number;
+        setup_source_span: RuntimePresentationSourceSpan;
+        source_span: RuntimePresentationSourceSpan;
+      };
+      timer: {
+        handler: "MobileTimer";
+        enable: "IE_TIMER";
+        inactive_guard: { source: "hMobile"; predicate: "zero" };
+        request_period_t_cycles: number;
+        first_request_after_intro_entry_t_cycles: number;
+        inactive_machine_cycles: number;
+        setup_source_span: RuntimePresentationSourceSpan;
+        source_span: RuntimePresentationSourceSpan;
+      };
+      vblank_normal: {
+        handler: "VBlank_Normal";
+        selector: { source: "hVBlank"; value: 0 };
+        inactive_game_timer_machine_cycles: number;
+        wrapper_epilogue_machine_cycles: number;
+        game_timer_source_spans: RuntimePresentationSourceSpan[];
+        audio_update: {
+          routine: "_UpdateSound";
+          cadence: "every_vblank";
+          playing_guard: { source: "wMusicPlaying"; predicate: "nonzero" };
+          timing: "state_dependent";
+          all_channels_inactive: {
+            predicate: "all_SOUND_CHANNEL_ON_flags_clear";
+            machine_cycles: number;
+            source_spans: RuntimePresentationSourceSpan[];
+          };
+          helper_inactive_paths: {
+            apply_pitch_slide: {
+              guard: "SOUND_PITCH_SLIDE_clear";
+              machine_cycles: number;
+              source_span: RuntimePresentationSourceSpan;
+            };
+            handle_track_vibrato: {
+              guard: "SOUND_DUTY_LOOP_SOUND_PITCH_OFFSET_SOUND_VIBRATO_clear";
+              machine_cycles: number;
+              source_span: RuntimePresentationSourceSpan;
+            };
+            handle_noise: {
+              guard: "SOUND_NOISE_clear";
+              machine_cycles: number;
+              source_span: RuntimePresentationSourceSpan;
+            };
+            play_danger: {
+              guard: "DANGER_ON_clear";
+              machine_cycles: number;
+              source_span: RuntimePresentationSourceSpan;
+            };
+            fade_music: {
+              guard: "wMusicFade_zero";
+              machine_cycles: number;
+              source_span: RuntimePresentationSourceSpan;
+            };
+          };
+          active_channel_paths: {
+            guard: {
+              sfx_priority: "zero";
+              sustained_note_duration: "at_least_2";
+            };
+            extra_over_inactive_channel_machine_cycles: {
+              music_without_active_sfx: number;
+              sfx: number;
+              music_shadowed_by_active_sfx: number;
+            };
+            note_over_extra_before_parse_machine_cycles: number;
+            source_spans: RuntimePresentationSourceSpan[];
+          };
+          helper_cycle_models: {
+            handle_track_vibrato: {
+              base_machine_cycles: number;
+              duty_loop_extra_machine_cycles: number;
+              pitch_offset_extra_machine_cycles: number;
+              vibrato_extra_machine_cycles: {
+                delay_count_nonzero: number;
+                zero_extent: number;
+                rate_count_nonzero: number;
+                toggle_up_no_borrow: number;
+                toggle_up_borrow: number;
+                toggle_down_no_carry: number;
+                toggle_down_carry: number;
+              };
+              source_spans: RuntimePresentationSourceSpan[];
+            };
+            update_channels_intro_paths: {
+              pulse1: { unchanged: number; noise_sampling: number };
+              pulse2: { unchanged: number; vibrato_override: number };
+              wave: { unchanged: number; noise_sampling: number };
+              noise: { unchanged: number; noise_sampling: number };
+              source_spans: RuntimePresentationSourceSpan[];
+            };
+            parse_music_intro_paths: {
+              normal_note_base_machine_cycles: number;
+              music_noise_note_base_machine_cycles: number;
+              octave_command_machine_cycles: number;
+              set_note_duration: {
+                fixed_machine_cycles: number;
+                multiply_per_bit_machine_cycles: number;
+                multiply_fixed_machine_cycles: number;
+                multiply_set_bit_extra_machine_cycles: number;
+                minimum_multiply_iterations: number;
+              };
+              get_frequency: {
+                fixed_machine_cycles: number;
+                per_right_shift_machine_cycles: number;
+                target_octave: number;
+              };
+              source_spans: RuntimePresentationSourceSpan[];
+            };
+            handle_noise: {
+              inactive_machine_cycles: number;
+              prefix_to_delay_check_machine_cycles: {
+                sfx_channel: number;
+                music_channel_with_ch8_off: number;
+                music_channel_with_non_noise_ch8: number;
+              };
+              music_blocked_by_noise_ch8_machine_cycles: number;
+              delay_machine_cycles: {
+                nonzero_return: number;
+                zero_to_sample_reader: number;
+              };
+              sample_reader_machine_cycles: {
+                empty_address: number;
+                sound_ret: number;
+                sample: number;
+              };
+              source_spans: RuntimePresentationSourceSpan[];
+            };
+          };
+          invocation_source_span: RuntimePresentationSourceSpan;
+          implementation_source_span: RuntimePresentationSourceSpan;
+        };
+      };
+    };
   };
   resource_transfers: Array<Record<string, unknown>>;
   tilemap_writes: Array<Record<string, unknown>>;
@@ -12307,7 +12501,11 @@ const certifyPresentationLz3Implementation = (
 const decodePresentationLz3Resource = (
   relativePath: string,
   options: BuildRuntimeTitlePresentationProgramOptions,
-): { compressed_byte_count: number; output_byte_count: number } => {
+): {
+  compressed_byte_count: number;
+  output_byte_count: number;
+  decompress_machine_cycles: number;
+} => {
   const root = path.resolve(options.disassemblyRoot);
   const absolute = path.resolve(root, relativePath);
   if (absolute !== root && !absolute.startsWith(`${root}${path.sep}`)) {
@@ -12321,6 +12519,89 @@ const decodePresentationLz3Resource = (
   const output: number[] = [];
   let cursor = 0;
   let terminated = false;
+  // Exact SM83 machine-cycle count for the source-certified Decompress body.
+  // This deliberately excludes the caller's six-cycle `call Decompress`.
+  let machineCycles = 10;
+  const countedLoop = (
+    length: number,
+    jump: "jp" | "jr",
+    writeCycles: number,
+  ): number => {
+    let b = (length >> 8) & 0xff;
+    let c = length & 0xff;
+    b = (b + 1) & 0xff;
+    c = (c + 1) & 0xff;
+    let cycles = 0;
+    let writes = 0;
+    for (;;) {
+      cycles += 1; // dec c
+      c = (c - 1) & 0xff;
+      if (c !== 0) {
+        cycles += 3; // jr nz, write
+      } else {
+        cycles += 3; // untaken jr nz + dec b
+        b = (b - 1) & 0xff;
+        const done = b === 0;
+        cycles += jump === "jp" ? (done ? 4 : 3) : done ? 3 : 2;
+        if (done) break;
+      }
+      writes += 1;
+      cycles += writeCycles;
+    }
+    if (writes !== length) {
+      throw new Error(
+        `Runtime presentation LZ3 cycle model wrote ${writes} bytes for length ${length}`,
+      );
+    }
+    return cycles;
+  };
+  const countedAlternateLoop = (length: number): number => {
+    let b = (length >> 8) & 0xff;
+    let c = length & 0xff;
+    b = (b + 1) & 0xff;
+    c = (c + 1) & 0xff;
+    let cycles = 0;
+    let writes = 0;
+    for (;;) {
+      cycles += 1;
+      c = (c - 1) & 0xff;
+      if (c !== 0) {
+        cycles += 3;
+      } else {
+        cycles += 3;
+        b = (b - 1) & 0xff;
+        if (b === 0) {
+          cycles += 4 + 2 + 2 + 3;
+          break;
+        }
+        cycles += 3;
+      }
+      writes += 1;
+      cycles += 6;
+
+      cycles += 1;
+      c = (c - 1) & 0xff;
+      if (c !== 0) {
+        cycles += 3;
+      } else {
+        cycles += 3;
+        b = (b - 1) & 0xff;
+        if (b === 0) {
+          cycles += 4 + 2 + 3;
+          break;
+        }
+        cycles += 3;
+      }
+      writes += 1;
+      cycles += 9;
+    }
+    if (writes !== length) {
+      throw new Error(
+        `Runtime presentation LZ3 alternate cycle model wrote ${writes} bytes for length ${length}`,
+      );
+    }
+    return cycles;
+  };
   const readByte = (): number => {
     const value = input[cursor];
     if (value === undefined) {
@@ -12334,6 +12615,7 @@ const decodePresentationLz3Resource = (
   while (cursor < input.length) {
     const control = readByte();
     if (control === 0xff) {
+      machineCycles += 9;
       terminated = true;
       break;
     }
@@ -12342,18 +12624,23 @@ const decodePresentationLz3Resource = (
     if (command === 0xe0) {
       command = (control & 0x1c) << 3;
       length = (((control & 0x03) << 8) | readByte()) + 1;
+      machineCycles += command < 0x80 ? 45 : 46;
     } else {
       length = (control & 0x1f) + 1;
+      machineCycles += command < 0x80 ? 34 : 35;
     }
     if (command < 0x80) {
       if (command === 0x00) {
+        machineCycles += 12 + countedLoop(length, "jp", 9);
         for (let index = 0; index < length; index += 1) {
           output.push(readByte());
         }
       } else if (command === 0x20) {
+        machineCycles += 7 + countedLoop(length, "jp", 7);
         const value = readByte();
         output.push(...Array.from({ length }, () => value));
       } else if (command === 0x40) {
+        machineCycles += 9 + countedAlternateLoop(length);
         const first = readByte();
         const second = readByte();
         output.push(
@@ -12362,6 +12649,7 @@ const decodePresentationLz3Resource = (
           ),
         );
       } else if (command === 0x60) {
+        machineCycles += 14 + countedLoop(length, "jp", 7);
         output.push(...Array.from({ length }, () => 0));
       } else {
         throw new Error(
@@ -12373,9 +12661,19 @@ const decodePresentationLz3Resource = (
       let sourceIndex: number;
       if ((offsetHigh & 0x80) !== 0) {
         sourceIndex = output.length - (offsetHigh & 0x7f) - 1;
+        machineCycles += 26;
       } else {
         sourceIndex = ((offsetHigh & 0x7f) << 8) | readByte();
+        machineCycles += 30;
       }
+      machineCycles +=
+        3 +
+        (command === 0x80 ? 5 : command === 0xa0 ? 9 : 13) +
+        countedLoop(
+          length,
+          command === 0x80 ? "jr" : "jp",
+          command === 0xa0 ? 75 : 9,
+        );
       for (let index = 0; index < length; index += 1) {
         const value = output[sourceIndex];
         if (value === undefined) {
@@ -12390,6 +12688,7 @@ const decodePresentationLz3Resource = (
         output.push(command === 0xa0 ? flipped : value);
         sourceIndex += command === 0xc0 ? -1 : 1;
       }
+      machineCycles += (offsetHigh & 0x80) !== 0 ? 15 : 16;
     }
   }
   if (!terminated) {
@@ -12400,6 +12699,7 @@ const decodePresentationLz3Resource = (
   return {
     compressed_byte_count: input.length,
     output_byte_count: output.length,
+    decompress_machine_cycles: machineCycles,
   };
 };
 
@@ -13091,6 +13391,7 @@ const compileIntroSceneDecompressionPrefix = (
           resource_kind: resource.kind,
           compressed_byte_count: decoded.compressed_byte_count,
           output_byte_count: decoded.output_byte_count,
+          decompress_machine_cycles: decoded.decompress_machine_cycles,
           target: "wDecompressScratch",
           target_offset: 0,
           target_capacity_bytes: implementation.scratch_capacity_bytes,
@@ -13339,11 +13640,33 @@ const compileIntroDirect2bppRequest = (
       tile_count: tileCount,
       bytes_per_tile: implementation.bytes_per_tile,
       byte_count: byteCount,
+      request_state: {
+        size: "wRequested2bppSize",
+        source: "wRequested2bppSource",
+        destination: "wRequested2bppDest",
+        clears_size_before_copy: true,
+        advances_source_and_destination: true,
+      },
+      chunking: {
+        default_tiles_per_vblank: implementation.default_tiles_per_cycle,
+        mobile_tiles_per_vblank: implementation.mobile_tiles_per_cycle,
+        mobile_condition: {
+          wLinkMode: "LINK_MOBILE",
+          hMobile: 0,
+        },
+      },
       completion: {
         blocking: true,
         wait: "DelayFrame",
         until: "wRequested2bppSize == 0",
       },
+      schedule: "normal_vblank_after_bg_updates_before_1bpp_and_tileset",
+      saves_and_restores: [
+        "hBGMapMode",
+        "hROMBank",
+        "hTilesPerCycle",
+        "rWBK",
+      ],
       resource_label_source_span: resource.label_source_span,
       resource_source_span: resource.directive_source_span,
       request_source_spans: implementation.request_source_spans,
@@ -15287,6 +15610,143 @@ const compileCrystalIntroBackgroundBindings = (
   return output;
 };
 
+// Captured from the unmodified pinned ROM by tools/asm-oracle/intro_trace.py
+// --timing. The resource order is independently source-certified below. An
+// altered source program remains inspectable by exporter mutation tests, but
+// receives no mismatched timing annotation and therefore fails closed if it
+// is compiled as a playable Rust pack.
+const CRYSTAL_INTRO_DECOMPRESSION_ROM_TIMING = [
+  ["IntroUnownAAttrmap", 7, 8, 1, 70696, 12757],
+  ["IntroUnownsGFX", 16, 22, 6, 372432, 67368],
+  ["IntroPulseGFX", 38, 39, 1, 26264, 5027],
+  ["IntroUnownATilemap", 55, 57, 2, 75912, 13716],
+  ["IntroBackgroundAttrmap", 202, 202, 0, 60700, 11536],
+  ["IntroBackgroundGFX", 210, 213, 3, 182488, 33358],
+  ["IntroBackgroundTilemap", 229, 231, 2, 75140, 13625],
+  ["IntroUnownHIAttrmap", 376, 377, 1, 72556, 13114],
+  ["IntroUnownsGFX", 385, 391, 6, 372432, 67368],
+  ["IntroPulseGFX", 407, 408, 1, 26264, 5027],
+  ["IntroUnownHITilemap", 424, 426, 2, 77004, 13983],
+  ["IntroBackgroundAttrmap", 571, 571, 0, 60400, 11536],
+  ["IntroPichuWooperGFX", 579, 583, 4, 259232, 47228],
+  ["IntroSuicuneRunGFX", 599, 606, 7, 452044, 81766],
+  ["IntroBackgroundGFX", 638, 640, 2, 182788, 33358],
+  ["IntroBackgroundTilemap", 656, 658, 2, 75440, 13625],
+  ["IntroUnownsAttrmap", 970, 971, 1, 80016, 14520],
+  ["IntroUnownsGFX", 979, 985, 6, 372432, 67368],
+  ["IntroUnownsTilemap", 1001, 1003, 2, 89960, 16439],
+  ["IntroBackgroundAttrmap", 1212, 1212, 0, 60400, 11536],
+  ["IntroSuicuneRunGFX", 1221, 1227, 6, 460588, 81766],
+  ["IntroBackgroundGFX", 1259, 1261, 2, 182488, 33358],
+  ["IntroBackgroundTilemap", 1277, 1279, 2, 75140, 13625],
+  ["IntroSuicuneJumpAttrmap", 1425, 1426, 1, 75764, 12278],
+  ["IntroSuicuneJumpGFX", 1435, 1439, 4, 329364, 55485],
+  ["IntroUnownBackGFX", 1456, 1457, 1, 120212, 21302],
+  ["IntroSuicuneJumpTilemap", 1475, 1476, 1, 73488, 12373],
+  ["IntroSuicuneCloseAttrmap", 1641, 1642, 1, 84300, 14476],
+  ["IntroSuicuneCloseGFX", 1651, 1658, 7, 521816, 87367],
+  ["IntroSuicuneCloseTilemap", 1690, 1691, 1, 76568, 13020],
+  ["IntroSuicuneBackAttrmap", 1804, 1805, 1, 83936, 14433],
+  ["IntroSuicuneBackGFX", 1814, 1817, 3, 271640, 46920],
+  ["IntroUnownsGFX", 1835, 1840, 5, 400264, 67368],
+  ["IntroSuicuneBackTilemap", 1858, 1859, 1, 92736, 16099],
+  ["IntroCrystalUnownsAttrmap", 2142, 2143, 1, 82068, 13173],
+  ["IntroCrystalUnownsGFX", 2152, 2153, 1, 73300, 12374],
+  ["IntroCrystalUnownsTilemap", 2170, 2171, 1, 77320, 13136],
+] as const;
+
+const CRYSTAL_INTRO_DECOMPRESSION_ROM_START_PHASES = [
+  2480, 70092, 70072, 70072, 3560, 70092, 70072, 3122, 70092, 70072,
+  70072, 3568, 70072, 70092, 2508, 70072, 2484, 70092, 70072, 3556, 1116,
+  2808, 70072, 7400, 7332, 4192, 4972, 6920, 4544, 8736, 6940, 4328, 4568,
+  4972, 6608, 4328, 4308,
+] as const;
+
+// Whole-call timings for the matching Intro_DecompressRequest2bpp_* wrappers.
+// These retain VBlanks that land in the wrapper outside the decompressor and
+// transfer loop, which cannot be recovered by summing those two child calls.
+const CRYSTAL_INTRO_DECOMPRESSION_REQUEST_ROM_TIMING = [
+  [7, 16, 9, 699560],
+  [16, 38, 22, 1544860],
+  [38, 55, 17, 1193760],
+  [55, 65, 10, 702192],
+  [202, 210, 8, 628364],
+  [210, 229, 19, 1334188],
+  [229, 239, 10, 702192],
+  [376, 385, 9, 699026],
+  [385, 407, 22, 1544860],
+  [407, 424, 17, 1193760],
+  [424, 434, 10, 702192],
+  [571, 579, 8, 628356],
+  [579, 599, 20, 1404432],
+  [599, 638, 39, 2671104],
+  [638, 656, 18, 1331548],
+  [656, 666, 10, 702192],
+  [970, 979, 9, 699556],
+  [979, 1001, 22, 1544860],
+  [1001, 1011, 10, 702192],
+  [1212, 1221, 9, 629616],
+  [1221, 1259, 38, 2670156],
+  [1259, 1277, 18, 1331248],
+  [1277, 1287, 10, 702192],
+  [1425, 1435, 10, 701996],
+  [1435, 1456, 21, 1471516],
+  [1456, 1474, 18, 1264276],
+  [1475, 1485, 10, 701636],
+  [1641, 1651, 10, 699688],
+  [1651, 1690, 39, 2742988],
+  [1690, 1700, 10, 697680],
+  [1804, 1814, 10, 699560],
+  [1814, 1835, 21, 1474788],
+  [1835, 1857, 22, 1544620],
+  [1858, 1868, 10, 701720],
+  [2142, 2152, 10, 699892],
+  [2152, 2170, 18, 1263964],
+  [2170, 2180, 10, 702192],
+] as const;
+
+const CRYSTAL_INTRO_REQUEST_2BPP_ROM_TIMING = [
+  [8, 16, 8, 628556, 3120],
+  [22, 38, 16, 1172120, 21348],
+  [39, 55, 16, 1167296, 26172],
+  [57, 65, 8, 626080, 5596],
+  [202, 210, 8, 567356, 64320],
+  [213, 229, 16, 1151500, 41968],
+  [231, 239, 8, 626744, 4932],
+  [377, 385, 8, 626162, 5514],
+  [391, 407, 16, 1172120, 21348],
+  [408, 424, 16, 1167296, 26172],
+  [426, 434, 8, 624880, 6796],
+  [571, 579, 8, 567648, 64028],
+  [583, 599, 16, 1145000, 48468],
+  [606, 638, 32, 2218860, 30628],
+  [640, 656, 16, 1148560, 44908],
+  [658, 666, 8, 626552, 5124],
+  [971, 979, 8, 619340, 12336],
+  [985, 1001, 16, 1172120, 21348],
+  [1003, 1011, 8, 612032, 19644],
+  [1212, 1221, 9, 568908, 64016],
+  [1227, 1259, 32, 2209152, 40528],
+  [1261, 1277, 16, 1148560, 44908],
+  [1279, 1287, 8, 626744, 4932],
+  [1426, 1435, 9, 626032, 13000],
+  [1439, 1456, 17, 1141844, 55860],
+  [1457, 1474, 17, 1143864, 54240],
+  [1474, 1475, 1, 70436, 4504],
+  [1476, 1485, 9, 627840, 8296],
+  [1642, 1651, 9, 615188, 21056],
+  [1658, 1690, 32, 2220756, 34852],
+  [1691, 1700, 9, 620912, 15140],
+  [1805, 1814, 9, 615424, 20712],
+  [1817, 1835, 18, 1202948, 65356],
+  [1840, 1857, 17, 1144156, 53772],
+  [1857, 1858, 1, 70720, 4220],
+  [1859, 1868, 9, 608676, 27544],
+  [2143, 2152, 9, 617516, 18620],
+  [2153, 2170, 17, 1190464, 7464],
+  [2171, 2180, 9, 624672, 11464],
+] as const;
+
 function certifyCrystalIntroSubprogram(
   options: BuildRuntimeTitlePresentationProgramOptions,
   controlFlow: RuntimePresentationControlFlow,
@@ -15295,8 +15755,1069 @@ function certifyCrystalIntroSubprogram(
   const joypad = loadSource("home/joypad.asm", options);
   const clearSprites = loadSource("home/clear_sprites.asm", options);
   const delay = loadSource("home/delay.asm", options);
-  const blocks = parseAsmBlocks([intro, joypad, clearSprites, delay]);
+  const lcd = loadSource("home/lcd.asm", options);
+  const header = loadSource("home/header.asm", options);
+  const initSource = loadSource("home/init.asm", options);
+  const mobile = loadSource("home/mobile.asm", options);
+  const gameTime = loadSource("home/game_time.asm", options);
+  const vblank = loadSource("home/vblank.asm", options);
+  const audioHome = loadSource("home/audio.asm", options);
+  const audioEngine = loadSource("audio/engine.asm", options);
+  const hardware = loadSource("constants/hardware.inc", options);
+  const blocks = parseAsmBlocks([
+    intro,
+    joypad,
+    clearSprites,
+    delay,
+    lcd,
+    mobile,
+    gameTime,
+    audioHome,
+    audioEngine,
+  ]);
   const delayFramesImplementationSpan = certifyDelayFrames(blocks);
+  const gameTimerSpan = requireExactRoutineBlock(
+    blocks,
+    "GameTimer",
+    [
+      "nop",
+      "ldh a, [rWBK]",
+      "push af",
+      "ld a, BANK(wGameTime)",
+      "ldh [rWBK], a",
+      "call .Function",
+      "pop af",
+      "ldh [rWBK], a",
+      "ret",
+    ],
+    "CrystalIntro inactive GameTimer wrapper",
+  );
+  const gameTimerInactiveSpan = requireExactNormalizedRegion(
+    gameTime,
+    "ld a, [wGameLogicPaused]",
+    "ret z",
+    [
+      "ld a, [wGameLogicPaused]",
+      "and a",
+      "ret nz",
+      "ld hl, wGameTimerPaused",
+      "bit GAME_TIMER_COUNTING_F, [hl]",
+      "ret z",
+    ],
+    "CrystalIntro inactive GameTimer guard",
+  );
+  const vblankWrapperEpilogueSpan = requireExactNormalizedRegion(
+    vblank,
+    "pop hl",
+    "reti",
+    ["pop hl", "pop de", "pop bc", "pop af", "reti"],
+    "CrystalIntro VBlank wrapper epilogue",
+  );
+  const lcdInterruptSpan = requireExactRoutineBlock(
+    blocks,
+    "LCD",
+    [
+      "push af",
+      "ldh a, [hLCDCPointer]",
+      "and a",
+      "jr z, .done",
+      "push bc",
+      "ldh a, [rLY]",
+      "ld c, a",
+      "ld b, HIGH(wLYOverrides)",
+      "ld a, [bc]",
+      "ld b, a",
+      "ldh a, [hLCDCPointer]",
+      "ld c, a",
+      "ld a, b",
+      "ldh [c], a",
+      "pop bc",
+    ],
+    "CrystalIntro LCD STAT interrupt handler",
+  );
+  const lcdInterruptDoneSpan = requireExactRoutineBlock(
+    blocks,
+    ".done@LCD",
+    ["pop af", "reti"],
+    "CrystalIntro LCD STAT interrupt return",
+  );
+  const interruptVectorSpan = requireExactNormalizedRegion(
+    header,
+    'SECTION "vblank", ROM0[$0040]',
+    "jp MobileTimer",
+    [
+      'SECTION "vblank", ROM0[$0040]',
+      "jp VBlank",
+      'SECTION "lcd", ROM0[$0048]',
+      "jp LCD",
+      'SECTION "timer", ROM0[$0050]',
+      "jp MobileTimer",
+    ],
+    "CrystalIntro VBlank and LCD interrupt vectors",
+  );
+  const inactiveTimerPrefixSpan = requireExactNormalizedRegion(
+    mobile,
+    "MobileTimer::",
+    "jr z, .pop_ret",
+    [
+      "MobileTimer::",
+      "push af",
+      "push bc",
+      "push de",
+      "push hl",
+      "ldh a, [hMobile]",
+      "and a",
+      "jr z, .pop_ret",
+    ],
+    "CrystalIntro inactive MobileTimer interrupt prefix",
+  );
+  const inactiveTimerReturnSpan = requireExactRoutineBlock(
+    blocks,
+    ".pop_ret@MobileTimer",
+    ["pop hl", "pop de", "pop bc", "pop af", "reti"],
+    "CrystalIntro inactive MobileTimer interrupt return",
+  );
+  const vblankAudioInvocationSpan = requireExactNormalizedRegion(
+    vblank,
+    "call UpdateJoypad",
+    "ret",
+    [
+      "call UpdateJoypad",
+      "ld a, BANK(_UpdateSound)",
+      "rst Bankswitch",
+      "call _UpdateSound",
+      "ldh a, [hROMBankBackup]",
+      "rst Bankswitch",
+      "ldh a, [hSeconds]",
+      "ldh [hUnusedBackup], a",
+      "ret",
+    ],
+    "CrystalIntro VBlank_Normal sound update invocation",
+  );
+  const updateSoundGuardSpan = requireExactNormalizedRegion(
+    audioEngine,
+    "_UpdateSound::",
+    "ret z",
+    ["_UpdateSound::", "ld a, [wMusicPlaying]", "and a", "ret z"],
+    "CrystalIntro state-dependent VBlank sound update guard",
+  );
+  const inactiveSoundChannelPrefixSpan = requireExactNormalizedRegion(
+    audioEngine,
+    "_UpdateSound::",
+    "jp z, .nextchannel",
+    [
+      "_UpdateSound::",
+      "ld a, [wMusicPlaying]",
+      "and a",
+      "ret z",
+      "xor a",
+      "ld [wCurChannel], a",
+      "ld [wSoundOutput], a",
+      "ld bc, wChannel1",
+      ".loop",
+      "ld hl, CHANNEL_FLAGS1",
+      "add hl, bc",
+      "bit SOUND_CHANNEL_ON, [hl]",
+      "jp z, .nextchannel",
+    ],
+    "CrystalIntro inactive sound-channel loop prefix",
+  );
+  const inactiveSoundChannelLoopSpan = requireExactNormalizedRegion(
+    audioEngine,
+    ".nextchannel",
+    "jp nz, .loop",
+    [
+      ".nextchannel",
+      "ld hl, CHANNEL_STRUCT_LENGTH",
+      "add hl, bc",
+      "ld c, l",
+      "ld b, h",
+      "ld a, [wCurChannel]",
+      "inc a",
+      "ld [wCurChannel], a",
+      "cp NUM_CHANNELS",
+      "jp nz, .loop",
+    ],
+    "CrystalIntro inactive sound-channel loop continuation",
+  );
+  const inactiveSoundTailSpan = requireExactNormalizedRegion(
+    audioEngine,
+    "call PlayDanger",
+    "ret",
+    [
+      "call PlayDanger",
+      "call FadeMusic",
+      "ld a, [wVolume]",
+      "ldh [rAUDVOL], a",
+      "ld a, [wSoundOutput]",
+      "ldh [rAUDTERM], a",
+      "ret",
+    ],
+    "CrystalIntro inactive sound update tail",
+  );
+  const inactiveDangerSpan = requireExactNormalizedRegion(
+    audioEngine,
+    "PlayDanger:",
+    "ret z",
+    ["PlayDanger:", "ld a, [wLowHealthAlarm]", "bit DANGER_ON_F, a", "ret z"],
+    "CrystalIntro inactive danger-sound path",
+  );
+  const inactiveFadeSpan = requireExactNormalizedRegion(
+    audioEngine,
+    "FadeMusic:",
+    "ret z",
+    ["FadeMusic:", "ld a, [wMusicFade]", "and a", "ret z"],
+    "CrystalIntro inactive music-fade path",
+  );
+  const inactivePitchSlideSpan = requireExactNormalizedRegion(
+    audioEngine,
+    "ApplyPitchSlide:",
+    "ret z",
+    [
+      "ApplyPitchSlide:",
+      "ld hl, CHANNEL_FLAGS2",
+      "add hl, bc",
+      "bit SOUND_PITCH_SLIDE, [hl]",
+      "ret z",
+    ],
+    "CrystalIntro inactive pitch-slide path",
+  );
+  const inactiveVibratoSpan = requireExactNormalizedRegion(
+    audioEngine,
+    "HandleTrackVibrato:",
+    ".quit",
+    [
+      "HandleTrackVibrato:",
+      "ld hl, CHANNEL_FLAGS2",
+      "add hl, bc",
+      "bit SOUND_DUTY_LOOP, [hl]",
+      "jr z, .next",
+      "ld hl, CHANNEL_DUTY_CYCLE_PATTERN",
+      "add hl, bc",
+      "ld a, [hl]",
+      "rlca",
+      "rlca",
+      "ld [hl], a",
+      "and $c0",
+      "ld [wCurTrackDuty], a",
+      "ld hl, CHANNEL_NOTE_FLAGS",
+      "add hl, bc",
+      "set NOTE_DUTY_OVERRIDE, [hl]",
+      ".next",
+      "ld hl, CHANNEL_FLAGS2",
+      "add hl, bc",
+      "bit SOUND_PITCH_OFFSET, [hl]",
+      "jr z, .vibrato",
+      "ld hl, CHANNEL_PITCH_OFFSET",
+      "add hl, bc",
+      "ld e, [hl]",
+      "inc hl",
+      "ld d, [hl]",
+      "ld hl, wCurTrackFrequency",
+      "ld a, [hli]",
+      "ld h, [hl]",
+      "ld l, a",
+      "add hl, de",
+      "ld e, l",
+      "ld d, h",
+      "ld hl, wCurTrackFrequency",
+      "ld [hl], e",
+      "inc hl",
+      "ld [hl], d",
+      ".vibrato",
+      "ld hl, CHANNEL_FLAGS2",
+      "add hl, bc",
+      "bit SOUND_VIBRATO, [hl]",
+      "jr z, .quit",
+      "ld hl, CHANNEL_VIBRATO_DELAY_COUNT",
+      "add hl, bc",
+      "ld a, [hl]",
+      "and a",
+      "jr nz, .subexit",
+      "ld hl, CHANNEL_VIBRATO_EXTENT",
+      "add hl, bc",
+      "ld a, [hl]",
+      "and a",
+      "jr z, .quit",
+      "ld d, a",
+      "ld hl, CHANNEL_VIBRATO_RATE",
+      "add hl, bc",
+      "ld a, [hl]",
+      "and $f",
+      "jr z, .toggle",
+      ".subexit",
+      "dec [hl]",
+      "jr .quit",
+      ".toggle",
+      "ld a, [hl]",
+      "swap [hl]",
+      "or [hl]",
+      "ld [hl], a",
+      "ld a, [wCurTrackFrequency]",
+      "ld e, a",
+      "ld hl, CHANNEL_FLAGS3",
+      "add hl, bc",
+      "bit SOUND_VIBRATO_DIR, [hl]",
+      "jr z, .down",
+      "res SOUND_VIBRATO_DIR, [hl]",
+      "ld a, d",
+      "and $f",
+      "ld d, a",
+      "ld a, e",
+      "sub d",
+      "jr nc, .no_carry",
+      "ld a, 0",
+      "jr .no_carry",
+      ".down",
+      "set SOUND_VIBRATO_DIR, [hl]",
+      "ld a, d",
+      "and $f0",
+      "swap a",
+      "add e",
+      "jr nc, .no_carry",
+      "ld a, $ff",
+      ".no_carry",
+      "ld [wCurTrackFrequency], a",
+      "ld hl, CHANNEL_NOTE_FLAGS",
+      "add hl, bc",
+      "set NOTE_VIBRATO_OVERRIDE, [hl]",
+      ".quit",
+    ],
+    "CrystalIntro track-vibrato branch topology",
+  );
+  const vibratoReturnSpan = requireExactRoutineBlock(
+    blocks,
+    ".quit@HandleTrackVibrato",
+    ["ret"],
+    "CrystalIntro track-vibrato return",
+  );
+  const inactiveNoiseSpan = requireExactNormalizedRegion(
+    audioEngine,
+    "HandleNoise:",
+    "ret z",
+    [
+      "HandleNoise:",
+      "ld hl, CHANNEL_FLAGS1",
+      "add hl, bc",
+      "bit SOUND_NOISE, [hl]",
+      "ret z",
+    ],
+    "CrystalIntro inactive noise path",
+  );
+  const noiseRoutingSpan = requireExactRoutineBlock(
+    blocks,
+    "HandleNoise",
+    [
+      "ld hl, CHANNEL_FLAGS1",
+      "add hl, bc",
+      "bit SOUND_NOISE, [hl]",
+      "ret z",
+      "ld a, [wCurChannel]",
+      "bit NOISE_CHAN_F, a",
+      "jr nz, .next",
+      "ld hl, wChannel8Flags1",
+      "bit SOUND_CHANNEL_ON, [hl]",
+      "jr z, .next",
+      "bit SOUND_NOISE, [hl]",
+      "ret nz",
+    ],
+    "CrystalIntro noise routing path",
+  );
+  const noiseDelaySpan = requireExactRoutineBlock(
+    blocks,
+    ".next@HandleNoise",
+    [
+      "ld a, [wNoiseSampleDelay]",
+      "and a",
+      "jr z, ReadNoiseSample",
+      "dec a",
+      "ld [wNoiseSampleDelay], a",
+      "ret",
+    ],
+    "CrystalIntro noise delay path",
+  );
+  const noiseSampleSpan = requireExactRoutineBlock(
+    blocks,
+    "ReadNoiseSample",
+    [
+      "ld hl, wNoiseSampleAddress",
+      "ld e, [hl]",
+      "inc hl",
+      "ld d, [hl]",
+      "ld a, e",
+      "or d",
+      "jr z, .quit",
+      "ld a, [de]",
+      "inc de",
+      "cp sound_ret_cmd",
+      "jr z, .quit",
+      "and $f",
+      "inc a",
+      "ld [wNoiseSampleDelay], a",
+      "ld a, [de]",
+      "inc de",
+      "ld [wCurTrackVolumeEnvelope], a",
+      "ld a, [de]",
+      "inc de",
+      "ld [wCurTrackFrequency], a",
+      "xor a",
+      "ld [wCurTrackFrequency + 1], a",
+      "ld hl, wNoiseSampleAddress",
+      "ld [hl], e",
+      "inc hl",
+      "ld [hl], d",
+      "ld hl, CHANNEL_NOTE_FLAGS",
+      "add hl, bc",
+      "set NOTE_NOISE_SAMPLING, [hl]",
+      "ret",
+    ],
+    "CrystalIntro noise sample reader",
+  );
+  const noiseSampleReturnSpan = requireExactRoutineBlock(
+    blocks,
+    ".quit@ReadNoiseSample",
+    ["ret"],
+    "CrystalIntro empty noise sample return",
+  );
+  const updateChannelsDispatcherSpan = requireExactRoutineBlock(
+    blocks,
+    "UpdateChannels",
+    [
+      "ld hl, .ChannelFunctions",
+      "ld a, [wCurChannel]",
+      "maskbits NUM_CHANNELS",
+      "add a",
+      "ld e, a",
+      "ld d, 0",
+      "add hl, de",
+      "ld a, [hli]",
+      "ld h, [hl]",
+      "ld l, a",
+      "jp hl",
+    ],
+    "CrystalIntro audio-channel dispatcher",
+  );
+  const updatePulse1PrefixSpan = requireExactRoutineBlock(
+    blocks,
+    ".Channel1@UpdateChannels",
+    ["ld a, [wLowHealthAlarm]", "bit DANGER_ON_F, a", "ret nz"],
+    "CrystalIntro pulse-1 danger prefix",
+  );
+  const updatePulse15PrefixSpan = requireExactRoutineBlock(
+    blocks,
+    ".Channel5@UpdateChannels",
+    [
+      "ld hl, CHANNEL_NOTE_FLAGS",
+      "add hl, bc",
+      "bit NOTE_PITCH_SWEEP, [hl]",
+      "jr z, .noPitchSweep",
+      "ld a, [wPitchSweep]",
+      "ldh [rAUD1SWEEP], a",
+    ],
+    "CrystalIntro pulse-1/5 update prefix",
+  );
+  const updatePulse1RoutingSpan = requireExactRoutineBlock(
+    blocks,
+    ".noPitchSweep@UpdateChannels",
+    [
+      "bit NOTE_REST, [hl]",
+      "jr nz, .ch1_rest",
+      "bit NOTE_NOISE_SAMPLING, [hl]",
+      "jr nz, .ch1_noise_sampling",
+      "bit NOTE_FREQ_OVERRIDE, [hl]",
+      "jr nz, .ch1_frequency_override",
+      "bit NOTE_VIBRATO_OVERRIDE, [hl]",
+      "jr nz, .ch1_vibrato_override",
+      "jr .ch1_check_duty_override",
+    ],
+    "CrystalIntro pulse-1 update routing",
+  );
+  const updatePulse1UnchangedSpan = requireExactRoutineBlock(
+    blocks,
+    ".ch1_check_duty_override@UpdateChannels",
+    [
+      "bit NOTE_DUTY_OVERRIDE, [hl]",
+      "ret z",
+      "ld a, [wCurTrackDuty]",
+      "ld d, a",
+      "ldh a, [rAUD1LEN]",
+      "and $3f",
+      "or d",
+      "ldh [rAUD1LEN], a",
+      "ret",
+    ],
+    "CrystalIntro pulse-1 unchanged path",
+  );
+  const updatePulse1NoiseSpan = requireExactRoutineBlock(
+    blocks,
+    ".ch1_noise_sampling@UpdateChannels",
+    [
+      "ld hl, wCurTrackDuty",
+      "ld a, $3f",
+      "or [hl]",
+      "ldh [rAUD1LEN], a",
+      "ld a, [wCurTrackVolumeEnvelope]",
+      "ldh [rAUD1ENV], a",
+      "ld a, [wCurTrackFrequency]",
+      "ldh [rAUD1LOW], a",
+      "ld a, [wCurTrackFrequency + 1]",
+      "or $80",
+      "ldh [rAUD1HIGH], a",
+      "ret",
+    ],
+    "CrystalIntro pulse-1 note-trigger path",
+  );
+  const updatePulse2Span = requireExactRoutineBlock(
+    blocks,
+    ".Channel6@UpdateChannels",
+    [
+      "ld hl, CHANNEL_NOTE_FLAGS",
+      "add hl, bc",
+      "bit NOTE_REST, [hl]",
+      "jr nz, .ch2_rest",
+      "bit NOTE_NOISE_SAMPLING, [hl]",
+      "jr nz, .ch2_noise_sampling",
+      "bit NOTE_VIBRATO_OVERRIDE, [hl]",
+      "jr nz, .ch2_vibrato_override",
+      "bit NOTE_DUTY_OVERRIDE, [hl]",
+      "ret z",
+      "ld a, [wCurTrackDuty]",
+      "ld d, a",
+      "ldh a, [rAUD2LEN]",
+      "and $3f",
+      "or d",
+      "ldh [rAUD2LEN], a",
+      "ret",
+    ],
+    "CrystalIntro pulse-2/6 update routing",
+  );
+  const updatePulse2VibratoSpan = requireExactRoutineBlock(
+    blocks,
+    ".ch2_vibrato_override@UpdateChannels",
+    [
+      "ld a, [wCurTrackDuty]",
+      "ld d, a",
+      "ldh a, [rAUD2LEN]",
+      "and $3f",
+      "or d",
+      "ldh [rAUD2LEN], a",
+      "ld a, [wCurTrackFrequency]",
+      "ldh [rAUD2LOW], a",
+      "ret",
+    ],
+    "CrystalIntro pulse-2 vibrato-write path",
+  );
+  const updateWaveSpan = requireExactRoutineBlock(
+    blocks,
+    ".Channel7@UpdateChannels",
+    [
+      "ld hl, CHANNEL_NOTE_FLAGS",
+      "add hl, bc",
+      "bit NOTE_REST, [hl]",
+      "jr nz, .ch3_rest",
+      "bit NOTE_NOISE_SAMPLING, [hl]",
+      "jr nz, .ch3_noise_sampling",
+      "bit NOTE_VIBRATO_OVERRIDE, [hl]",
+      "jr nz, .ch3_vibrato_override",
+      "ret",
+    ],
+    "CrystalIntro wave-channel update routing",
+  );
+  const updateWaveNoiseSpan = requireExactRoutineBlock(
+    blocks,
+    ".ch3_noise_sampling@UpdateChannels",
+    [
+      "ld a, $3f",
+      "ldh [rAUD3LEN], a",
+      "xor a",
+      "ldh [rAUD3ENA], a",
+      "call .load_wave_pattern",
+      "ld a, $80",
+      "ldh [rAUD3ENA], a",
+      "ld a, [wCurTrackFrequency]",
+      "ldh [rAUD3LOW], a",
+      "ld a, [wCurTrackFrequency + 1]",
+      "or $80",
+      "ldh [rAUD3HIGH], a",
+      "ret",
+    ],
+    "CrystalIntro wave-channel note-trigger path",
+  );
+  const updateWavePatternSpan = requireExactRoutineBlock(
+    blocks,
+    ".load_wave_pattern@UpdateChannels",
+    [
+      "push hl",
+      "ld a, [wCurTrackVolumeEnvelope]",
+      "and $f",
+      "ld l, a",
+      "ld h, 0",
+      "rept 4",
+      "add hl, hl",
+      "endr",
+      "ld de, WaveSamples",
+      "add hl, de",
+      ...Array.from({ length: 16 }, (_, index) => [
+        "ld a, [hli]",
+        `ldh [rAUD3WAVE_${index.toString(16).toUpperCase()}], a`,
+      ]).flat(),
+      "pop hl",
+      "ld a, [wCurTrackVolumeEnvelope]",
+      "and $f0",
+      "sla a",
+      "ldh [rAUD3LEVEL], a",
+      "ret",
+    ],
+    "CrystalIntro wave-pattern load",
+  );
+  const updateNoiseSpan = requireExactRoutineBlock(
+    blocks,
+    ".Channel8@UpdateChannels",
+    [
+      "ld hl, CHANNEL_NOTE_FLAGS",
+      "add hl, bc",
+      "bit NOTE_REST, [hl]",
+      "jr nz, .ch4_rest",
+      "bit NOTE_NOISE_SAMPLING, [hl]",
+      "jr nz, .ch4_noise_sampling",
+      "ret",
+    ],
+    "CrystalIntro hardware-noise update routing",
+  );
+  const updateNoiseSamplingSpan = requireExactRoutineBlock(
+    blocks,
+    ".ch4_noise_sampling@UpdateChannels",
+    [
+      "ld a, $3f",
+      "ldh [rAUD4LEN], a",
+      "ld a, [wCurTrackVolumeEnvelope]",
+      "ldh [rAUD4ENV], a",
+      "ld a, [wCurTrackFrequency]",
+      "ldh [rAUD4POLY], a",
+      "ld a, $80",
+      "ldh [rAUD4GO], a",
+      "ret",
+    ],
+    "CrystalIntro hardware-noise note-trigger path",
+  );
+  const parseMusicPrefixSpan = requireExactRoutineBlock(
+    blocks,
+    "ParseMusic",
+    [
+      "call GetMusicByte",
+      "cp sound_ret_cmd",
+      "jr z, .sound_ret",
+      "cp FIRST_MUSIC_CMD",
+      "jr c, .readnote",
+    ],
+    "CrystalIntro ParseMusic entry routing",
+  );
+  const parseMusicCommandLoopSpan = requireExactRoutineBlock(
+    blocks,
+    ".readcommand@ParseMusic",
+    ["call ParseMusicCommand", "jr ParseMusic"],
+    "CrystalIntro ParseMusic command loop",
+  );
+  const parseMusicNoteSpan = requireExactRoutineBlock(
+    blocks,
+    ".readnote@ParseMusic",
+    [
+      "ld hl, CHANNEL_FLAGS1",
+      "add hl, bc",
+      "bit SOUND_SFX, [hl]",
+      "jp nz, ParseSFXOrCry",
+      "bit SOUND_CRY, [hl]",
+      "jp nz, ParseSFXOrCry",
+      "bit SOUND_NOISE, [hl]",
+      "jp nz, GetNoiseSample",
+      "ld a, [wCurMusicByte]",
+      "and $f",
+      "call SetNoteDuration",
+      "ld a, [wCurMusicByte]",
+      "swap a",
+      "and $f",
+      "jr z, .rest",
+      "ld hl, CHANNEL_PITCH",
+      "add hl, bc",
+      "ld [hl], a",
+      "ld e, a",
+      "ld hl, CHANNEL_OCTAVE",
+      "add hl, bc",
+      "ld d, [hl]",
+      "call GetFrequency",
+      "ld hl, CHANNEL_FREQUENCY",
+      "add hl, bc",
+      "ld [hl], e",
+      "inc hl",
+      "ld [hl], d",
+      "ld hl, CHANNEL_NOTE_FLAGS",
+      "add hl, bc",
+      "set NOTE_NOISE_SAMPLING, [hl]",
+      "jp LoadNote",
+    ],
+    "CrystalIntro ParseMusic normal-note path",
+  );
+  const getMusicByteSpan = requireExactRoutineBlock(
+    blocks,
+    "GetMusicByte",
+    [
+      "push hl",
+      "push de",
+      "ld hl, CHANNEL_MUSIC_ADDRESS",
+      "add hl, bc",
+      "ld a, [hli]",
+      "ld e, a",
+      "ld d, [hl]",
+      "ld hl, CHANNEL_MUSIC_BANK",
+      "add hl, bc",
+      "ld a, [hl]",
+      "call _LoadMusicByte",
+      "inc de",
+      "ld hl, CHANNEL_MUSIC_ADDRESS",
+      "add hl, bc",
+      "ld a, e",
+      "ld [hli], a",
+      "ld [hl], d",
+      "pop de",
+      "pop hl",
+      "ld a, [wCurMusicByte]",
+      "ret",
+    ],
+    "CrystalIntro GetMusicByte timing",
+  );
+  const loadMusicByteSpan = requireExactRoutineBlock(
+    blocks,
+    "_LoadMusicByte",
+    [
+      "ldh [hROMBank], a",
+      "ld [rROMB], a",
+      "ld a, [de]",
+      "ld [wCurMusicByte], a",
+      "ld a, BANK(LoadMusicByte)",
+      "ldh [hROMBank], a",
+      "ld [rROMB], a",
+      "ret",
+    ],
+    "CrystalIntro banked music-byte load",
+  );
+  const setNoteDurationSpan = requireExactRoutineBlock(
+    blocks,
+    "SetNoteDuration",
+    [
+      "inc a",
+      "ld e, a",
+      "ld d, 0",
+      "ld hl, CHANNEL_NOTE_LENGTH",
+      "add hl, bc",
+      "ld a, [hl]",
+      "ld l, 0",
+      "call .Multiply",
+      "ld a, l",
+      "ld hl, CHANNEL_TEMPO",
+      "add hl, bc",
+      "ld e, [hl]",
+      "inc hl",
+      "ld d, [hl]",
+      "ld hl, CHANNEL_NOTE_DURATION_MODIFIER",
+      "add hl, bc",
+      "ld l, [hl]",
+      "call .Multiply",
+      "ld e, l",
+      "ld d, h",
+      "ld hl, CHANNEL_NOTE_DURATION_MODIFIER",
+      "add hl, bc",
+      "ld [hl], e",
+      "ld hl, CHANNEL_NOTE_DURATION",
+      "add hl, bc",
+      "ld [hl], d",
+      "ret",
+    ],
+    "CrystalIntro SetNoteDuration timing",
+  );
+  const multiplyNoteDurationSpan = requireExactRoutineBlock(
+    blocks,
+    ".Multiply@SetNoteDuration",
+    ["ld h, 0"],
+    "CrystalIntro note-duration multiply setup",
+  );
+  const multiplyNoteDurationLoopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@SetNoteDuration",
+    [
+      "srl a",
+      "jr nc, .skip",
+      "add hl, de",
+    ],
+    "CrystalIntro note-duration multiply bit branch",
+  );
+  const multiplyNoteDurationTailSpan = requireExactRoutineBlock(
+    blocks,
+    ".skip@SetNoteDuration",
+    ["sla e", "rl d", "and a", "jr nz, .loop", "ret"],
+    "CrystalIntro note-duration multiply loop tail",
+  );
+  const getFrequencySpan = requireExactRoutineBlock(
+    blocks,
+    "GetFrequency",
+    [
+      "ld hl, CHANNEL_TRANSPOSITION",
+      "add hl, bc",
+      "ld a, [hl]",
+      "swap a",
+      "and $f",
+      "add d",
+      "push af",
+      "ld hl, CHANNEL_TRANSPOSITION",
+      "add hl, bc",
+      "ld a, [hl]",
+      "and $f",
+      "ld l, a",
+      "ld d, 0",
+      "ld h, d",
+      "add hl, de",
+      "add hl, hl",
+      "ld de, FrequencyTable",
+      "add hl, de",
+      "ld e, [hl]",
+      "inc hl",
+      "ld d, [hl]",
+      "pop af",
+    ],
+    "CrystalIntro frequency lookup timing",
+  );
+  const getFrequencyLoopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@GetFrequency",
+    ["cp $7", "jr nc, .ok", "sra d", "rr e", "inc a", "jr .loop"],
+    "CrystalIntro frequency octave loop",
+  );
+  const getFrequencyReturnSpan = requireExactRoutineBlock(
+    blocks,
+    ".ok@GetFrequency",
+    ["ld a, d", "and $7", "ld d, a", "ret"],
+    "CrystalIntro frequency return",
+  );
+  const parseMusicCommandSpan = requireExactRoutineBlock(
+    blocks,
+    "ParseMusicCommand",
+    [
+      "ld a, [wCurMusicByte]",
+      "sub FIRST_MUSIC_CMD",
+      "ld e, a",
+      "ld d, 0",
+      "ld hl, MusicCommands",
+      "add hl, de",
+      "add hl, de",
+      "ld a, [hli]",
+      "ld h, [hl]",
+      "ld l, a",
+      "jp hl",
+    ],
+    "CrystalIntro music-command dispatch",
+  );
+  const musicOctaveSpan = requireExactRoutineBlock(
+    blocks,
+    "Music_Octave1",
+    [
+      "ld hl, CHANNEL_OCTAVE",
+      "add hl, bc",
+      "ld a, [wCurMusicByte]",
+      "and 7",
+      "ld [hl], a",
+      "ret",
+    ],
+    "CrystalIntro octave music command",
+  );
+  const getNoiseSampleSpan = requireExactRoutineBlock(
+    blocks,
+    "GetNoiseSample",
+    [
+      "ld a, [wCurChannel]",
+      "and NUM_MUSIC_CHANS - 1",
+      "cp CHAN4",
+      "ret nz",
+      "ld a, [wCurMusicByte]",
+      "and $f",
+      "call SetNoteDuration",
+      "ld a, [wCurChannel]",
+      "bit NOISE_CHAN_F, a",
+      "jr nz, .sfx",
+      "ld hl, wChannel8Flags1",
+      "bit SOUND_CHANNEL_ON, [hl]",
+      "ret nz",
+      "ld a, [wMusicNoiseSampleSet]",
+      "jr .next",
+    ],
+    "CrystalIntro music-noise sample routing",
+  );
+  const getNoiseSampleTailSpan = requireExactRoutineBlock(
+    blocks,
+    ".next@GetNoiseSample",
+    [
+      "ld e, a",
+      "ld d, 0",
+      "ld hl, Drumkits",
+      "add hl, de",
+      "add hl, de",
+      "ld a, [hli]",
+      "ld h, [hl]",
+      "ld l, a",
+      "ld a, [wCurMusicByte]",
+      "swap a",
+      "and $f",
+      "ret z",
+      "ld e, a",
+      "ld d, 0",
+      "add hl, de",
+      "add hl, de",
+      "ld a, [hli]",
+      "ld [wNoiseSampleAddress], a",
+      "ld a, [hl]",
+      "ld [wNoiseSampleAddress + 1], a",
+      "xor a",
+      "ld [wNoiseSampleDelay], a",
+      "ret",
+    ],
+    "CrystalIntro music-noise sample load",
+  );
+  const activeSustainSpan = requireExactNormalizedRegion(
+    audioEngine,
+    "ld hl, CHANNEL_NOTE_DURATION",
+    "jr .continue_sound_update",
+    [
+      "ld hl, CHANNEL_NOTE_DURATION",
+      "add hl, bc",
+      "ld a, [hl]",
+      "cp 2",
+      "jr c, .noteover",
+      "dec [hl]",
+      "jr .continue_sound_update",
+    ],
+    "CrystalIntro sustained active sound-channel path",
+  );
+  const activeNoteOverSpan = requireExactNormalizedRegion(
+    audioEngine,
+    ".noteover",
+    "call ParseMusic",
+    [
+      ".noteover",
+      "ld hl, CHANNEL_VIBRATO_DELAY",
+      "add hl, bc",
+      "ld a, [hl]",
+      "ld hl, CHANNEL_VIBRATO_DELAY_COUNT",
+      "add hl, bc",
+      "ld [hl], a",
+      "ld hl, CHANNEL_FLAGS2",
+      "add hl, bc",
+      "res SOUND_PITCH_SLIDE, [hl]",
+      "call ParseMusic",
+    ],
+    "CrystalIntro active sound-channel note-over prefix",
+  );
+  const activeChannelCommonSpan = requireExactNormalizedRegion(
+    audioEngine,
+    ".continue_sound_update",
+    "jr z, .next",
+    [
+      ".continue_sound_update",
+      "call ApplyPitchSlide",
+      "ld hl, CHANNEL_DUTY_CYCLE",
+      "add hl, bc",
+      "ld a, [hli]",
+      "ld [wCurTrackDuty], a",
+      "ld a, [hli]",
+      "ld [wCurTrackVolumeEnvelope], a",
+      "ld a, [hli]",
+      "ld [wCurTrackFrequency], a",
+      "ld a, [hl]",
+      "ld [wCurTrackFrequency + 1], a",
+      "call HandleTrackVibrato",
+      "call HandleNoise",
+      "ld a, [wSFXPriority]",
+      "and a",
+      "jr z, .next",
+    ],
+    "CrystalIntro active sound-channel common path",
+  );
+  const activeChannelRoutingSpan = requireExactNormalizedRegion(
+    audioEngine,
+    ".next",
+    ".sound_channel_on",
+    [
+      ".next",
+      "ld a, [wCurChannel]",
+      "cp NUM_MUSIC_CHANS",
+      "jr nc, .sfx_channel",
+      "ld hl, CHANNEL_STRUCT_LENGTH * NUM_MUSIC_CHANS + CHANNEL_FLAGS1",
+      "add hl, bc",
+      "bit SOUND_CHANNEL_ON, [hl]",
+      "jr nz, .sound_channel_on",
+      ".sfx_channel",
+      "call UpdateChannels",
+      "ld hl, CHANNEL_TRACKS",
+      "add hl, bc",
+      "ld a, [wSoundOutput]",
+      "or [hl]",
+      "ld [wSoundOutput], a",
+      ".sound_channel_on",
+    ],
+    "CrystalIntro active sound-channel routing path",
+  );
+  const activeChannelAdvanceSpan = requireExactNormalizedRegion(
+    audioEngine,
+    ".sound_channel_on",
+    "jp nz, .loop",
+    [
+      ".sound_channel_on",
+      "ld hl, CHANNEL_NOTE_FLAGS",
+      "add hl, bc",
+      "xor a",
+      "ld [hl], a",
+      ".nextchannel",
+      "ld hl, CHANNEL_STRUCT_LENGTH",
+      "add hl, bc",
+      "ld c, l",
+      "ld b, h",
+      "ld a, [wCurChannel]",
+      "inc a",
+      "ld [wCurChannel], a",
+      "cp NUM_CHANNELS",
+      "jp nz, .loop",
+    ],
+    "CrystalIntro active sound-channel advance path",
+  );
+  const lcdStatSetupSpan = requireExactNormalizedRegion(
+    initSource,
+    "ld a, STAT_MODE_0",
+    "ldh [rSTAT], a",
+    ["ld a, STAT_MODE_0", "ldh [rSTAT], a"],
+    "CrystalIntro inherited HBlank STAT interrupt setup",
+  );
+  const timerSetupSpan = requireExactNormalizedRegion(
+    initSource,
+    "ldh [rTMA], a",
+    ".wait",
+    [
+      "ldh [rTMA], a",
+      "ldh [rTAC], a",
+      "ld [wBetaTitleSequenceOpeningType], a",
+      "ld a, %100",
+      "ldh [rTAC], a",
+      ".wait",
+    ],
+    "CrystalIntro inherited 4096 Hz timer setup",
+  );
+  const hardwareConstants = parseAsmConstants([hardware]);
+  if (
+    hardwareConstants.get("STAT_MODE_0") !== 1 << 3 ||
+    hardwareConstants.get("SCREEN_HEIGHT_PX") !== 144 ||
+    hardwareConstants.get("TAC_START") !== 1 << 2 ||
+    hardwareConstants.get("TAC_4KHZ") !== 0
+  ) {
+    throw new Error(
+      "CrystalIntro timing requires the exact HBlank STAT mask, visible scanlines, and timer clock",
+    );
+  }
 
   const entrySpan = requireExactRoutineBlock(
     blocks,
@@ -15378,7 +16899,41 @@ function certifyCrystalIntroSubprogram(
     ],
     "CrystalIntro exact loop-state initialization",
   );
-  requireExactRoutineBlock(
+  const getJoypadSpan = requireExactRoutineBlock(
+    blocks,
+    "GetJoypad",
+    [
+      "push af",
+      "push hl",
+      "push de",
+      "push bc",
+      "ld a, [wInputType]",
+      "cp AUTO_INPUT",
+      "jr z, .auto",
+      "ldh a, [hJoypadDown]",
+      "ld b, a",
+      "ldh a, [hJoyDown]",
+      "ld e, a",
+      "xor b",
+      "ld d, a",
+      "and e",
+      "ldh [hJoyReleased], a",
+      "ld a, d",
+      "and b",
+      "ldh [hJoyPressed], a",
+      "ld c, a",
+      "ld a, b",
+      "ldh [hJoyDown], a",
+    ],
+    "CrystalIntro GetJoypad normal input path",
+  );
+  const getJoypadReturnSpan = requireExactRoutineBlock(
+    blocks,
+    ".quit@GetJoypad",
+    ["pop bc", "pop de", "pop hl", "pop af", "ret"],
+    "CrystalIntro GetJoypad register restore and return",
+  );
+  const joyTextDelaySpan = requireExactRoutineBlock(
     blocks,
     "JoyTextDelay",
     [
@@ -15391,7 +16946,7 @@ function certifyCrystalIntroSubprogram(
     ],
     "CrystalIntro JoyTextDelay pressed-versus-held selection",
   );
-  requireExactRoutineBlock(
+  const joyTextDelayOkSpan = requireExactRoutineBlock(
     blocks,
     ".ok@JoyTextDelay",
     [
@@ -15405,7 +16960,7 @@ function certifyCrystalIntroSubprogram(
     ],
     "CrystalIntro JoyTextDelay pressed-input repeat reset",
   );
-  requireExactRoutineBlock(
+  const joyTextDelayCheckSpan = requireExactRoutineBlock(
     blocks,
     ".checkframedelay@JoyTextDelay",
     [
@@ -15418,12 +16973,38 @@ function certifyCrystalIntroSubprogram(
     ],
     "CrystalIntro JoyTextDelay repeat suppression",
   );
-  requireExactRoutineBlock(
+  const joyTextDelayRestartSpan = requireExactRoutineBlock(
     blocks,
     ".restartframedelay@JoyTextDelay",
     ["ld a, 5", "ld [wTextDelayFrames], a", "ret"],
     "CrystalIntro JoyTextDelay repeat restart",
   );
+  const joyTextDelayCommonInstructionMachineCycles = [
+    6, 4, 4, 4, 4, 4, 2, 2, 3, 1, 3, 1, 1, 1, 1, 3, 1, 1, 3, 1, 1,
+    3, 3, 3, 3, 3, 4, 3, 1, 3, 2, 3, 3, 3, 1,
+  ];
+  const joyTextDelayPressedTailMachineCycles = [2, 2, 4, 4];
+  const joyTextDelaySuppressedTailMachineCycles = [3, 4, 1, 2, 1, 3, 4];
+  const joyTextDelayRestartTailMachineCycles = [3, 4, 1, 3, 2, 4, 4];
+  const machineCycleSum = (cycles: readonly number[]): number =>
+    cycles.reduce((total, cycles) => total + cycles, 0);
+  if (
+    machineCycleSum(joyTextDelayCommonInstructionMachineCycles) !== 89 ||
+    machineCycleSum([
+      ...joyTextDelayCommonInstructionMachineCycles,
+      ...joyTextDelayPressedTailMachineCycles,
+    ]) !== 101 ||
+    machineCycleSum([
+      ...joyTextDelayCommonInstructionMachineCycles,
+      ...joyTextDelaySuppressedTailMachineCycles,
+    ]) !== 107 ||
+    machineCycleSum([
+      ...joyTextDelayCommonInstructionMachineCycles,
+      ...joyTextDelayRestartTailMachineCycles,
+    ]) !== 110
+  ) {
+    throw new Error("CrystalIntro JoyTextDelay instruction timing does not compose");
+  }
   const clearOamSpan = requireExactRoutineBlock(
     blocks,
     "ClearSprites",
@@ -15719,7 +17300,12 @@ function certifyCrystalIntroSubprogram(
     });
     cursor += 1;
   }
+  const scenePhaseLabels: Record<string, number> = { IntroScene1: 0 };
   let frontierBlock = "IntroScene1";
+  const enterIntroScene = (scene: { id: string }): void => {
+    frontierBlock = scene.id;
+    scenePhaseLabels[scene.id] = compiledPrefix.length;
+  };
   let nextCall = firstScene[cursor];
   if (!nextCall) {
     frontierBlock = ".loop@CrystalIntro";
@@ -15977,7 +17563,7 @@ function certifyCrystalIntroSubprogram(
         "CrystalIntro stateful scheduler has no exact IntroScene2 continuation",
       );
     }
-    frontierBlock = secondScene.id;
+    enterIntroScene(secondScene);
     nextCall = secondSceneEntry;
   }
   if (
@@ -16192,7 +17778,7 @@ function certifyCrystalIntroSubprogram(
     if (!thirdScene || !thirdSceneEntry) {
       throw new Error("IntroScene2 has no exact IntroScene3 continuation");
     }
-    frontierBlock = thirdScene.id;
+    enterIntroScene(thirdScene);
     nextCall = thirdSceneEntry;
   }
   if (
@@ -16425,7 +18011,7 @@ function certifyCrystalIntroSubprogram(
     if (!fourthScene || !fourthSceneEntry) {
       throw new Error("IntroScene3 has no exact IntroScene4 continuation");
     }
-    frontierBlock = fourthScene.id;
+    enterIntroScene(fourthScene);
     nextCall = fourthSceneEntry;
   }
   if (
@@ -16513,7 +18099,7 @@ function certifyCrystalIntroSubprogram(
     if (!fifthScene || !fifthSceneEntry) {
       throw new Error("IntroScene4 has no exact IntroScene5 continuation");
     }
-    frontierBlock = fifthScene.id;
+    enterIntroScene(fifthScene);
     nextCall = fifthSceneEntry;
   }
   if (
@@ -16684,7 +18270,7 @@ function certifyCrystalIntroSubprogram(
     if (!sixthScene || !sixthSceneEntry) {
       throw new Error("IntroScene5 has no exact IntroScene6 continuation");
     }
-    frontierBlock = sixthScene.id;
+    enterIntroScene(sixthScene);
     nextCall = sixthSceneEntry;
   }
   if (
@@ -16893,7 +18479,7 @@ function certifyCrystalIntroSubprogram(
     if (!seventhScene || !seventhSceneEntry) {
       throw new Error("IntroScene6 has no exact IntroScene7 continuation");
     }
-    frontierBlock = seventhScene.id;
+    enterIntroScene(seventhScene);
     nextCall = seventhSceneEntry;
   }
   if (
@@ -17123,7 +18709,7 @@ function certifyCrystalIntroSubprogram(
     if (!eighthScene || !eighthSceneEntry) {
       throw new Error("IntroScene7 has no exact IntroScene8 continuation");
     }
-    frontierBlock = eighthScene.id;
+    enterIntroScene(eighthScene);
     nextCall = eighthSceneEntry;
   }
   if (
@@ -17324,7 +18910,7 @@ function certifyCrystalIntroSubprogram(
     if (!ninthScene || !ninthSceneEntry) {
       throw new Error("IntroScene8 has no exact IntroScene9 continuation");
     }
-    frontierBlock = ninthScene.id;
+    enterIntroScene(ninthScene);
     nextCall = ninthSceneEntry;
   }
   if (
@@ -17574,7 +19160,7 @@ function certifyCrystalIntroSubprogram(
       throw new Error("IntroScene9 has no exact IntroScene10 continuation");
     }
     void coordSpan;
-    frontierBlock = tenthScene.id;
+    enterIntroScene(tenthScene);
     nextCall = tenthSceneEntry;
   }
   if (
@@ -17731,7 +19317,7 @@ function certifyCrystalIntroSubprogram(
     if (!eleventhScene || !eleventhSceneEntry) {
       throw new Error("IntroScene10 has no exact IntroScene11 continuation");
     }
-    frontierBlock = eleventhScene.id;
+    enterIntroScene(eleventhScene);
     nextCall = eleventhSceneEntry;
   }
   if (
@@ -17891,7 +19477,7 @@ function certifyCrystalIntroSubprogram(
     if (!twelfthScene || !twelfthSceneEntry) {
       throw new Error("IntroScene11 has no exact IntroScene12 continuation");
     }
-    frontierBlock = twelfthScene.id;
+    enterIntroScene(twelfthScene);
     nextCall = twelfthSceneEntry;
   }
   if (
@@ -18083,7 +19669,7 @@ function certifyCrystalIntroSubprogram(
     if (!thirteenthScene || !thirteenthSceneEntry) {
       throw new Error("IntroScene12 has no exact IntroScene13 continuation");
     }
-    frontierBlock = thirteenthScene.id;
+    enterIntroScene(thirteenthScene);
     nextCall = thirteenthSceneEntry;
   }
   if (
@@ -18308,7 +19894,7 @@ function certifyCrystalIntroSubprogram(
     if (!fourteenthScene || !fourteenthSceneEntry) {
       throw new Error("IntroScene13 has no exact IntroScene14 continuation");
     }
-    frontierBlock = fourteenthScene.id;
+    enterIntroScene(fourteenthScene);
     nextCall = fourteenthSceneEntry;
   }
   if (
@@ -18548,7 +20134,7 @@ function certifyCrystalIntroSubprogram(
     if (!fifteenthScene || !fifteenthSceneEntry) {
       throw new Error("IntroScene14 has no exact IntroScene15 continuation");
     }
-    frontierBlock = fifteenthScene.id;
+    enterIntroScene(fifteenthScene);
     nextCall = fifteenthSceneEntry;
   }
   if (
@@ -18788,7 +20374,7 @@ function certifyCrystalIntroSubprogram(
     if (!sixteenthScene || !sixteenthSceneEntry) {
       throw new Error("IntroScene15 has no exact IntroScene16 continuation");
     }
-    frontierBlock = sixteenthScene.id;
+    enterIntroScene(sixteenthScene);
     nextCall = sixteenthSceneEntry;
   }
   if (
@@ -18900,7 +20486,7 @@ function certifyCrystalIntroSubprogram(
     if (!seventeenthScene || !seventeenthSceneEntry) {
       throw new Error("IntroScene16 has no exact IntroScene17 continuation");
     }
-    frontierBlock = seventeenthScene.id;
+    enterIntroScene(seventeenthScene);
     nextCall = seventeenthSceneEntry;
   }
   if (
@@ -19059,7 +20645,7 @@ function certifyCrystalIntroSubprogram(
     if (!eighteenthScene || !eighteenthSceneEntry) {
       throw new Error("IntroScene17 has no exact IntroScene18 continuation");
     }
-    frontierBlock = eighteenthScene.id;
+    enterIntroScene(eighteenthScene);
     nextCall = eighteenthSceneEntry;
   }
   if (
@@ -19169,7 +20755,7 @@ function certifyCrystalIntroSubprogram(
     if (!nineteenthScene || !nineteenthSceneEntry) {
       throw new Error("IntroScene18 has no exact IntroScene19 continuation");
     }
-    frontierBlock = nineteenthScene.id;
+    enterIntroScene(nineteenthScene);
     nextCall = nineteenthSceneEntry;
   }
   if (
@@ -19430,7 +21016,7 @@ function certifyCrystalIntroSubprogram(
     if (!twentiethScene || !twentiethSceneEntry) {
       throw new Error("IntroScene19 has no exact IntroScene20 continuation");
     }
-    frontierBlock = twentiethScene.id;
+    enterIntroScene(twentiethScene);
     nextCall = twentiethSceneEntry;
   }
   if (
@@ -19594,7 +21180,7 @@ function certifyCrystalIntroSubprogram(
     if (!twentyFirstScene || !twentyFirstEntry) {
       throw new Error("IntroScene20 has no exact IntroScene21 continuation");
     }
-    frontierBlock = twentyFirstScene.id;
+    enterIntroScene(twentyFirstScene);
     nextCall = twentyFirstEntry;
   }
   if (
@@ -19658,7 +21244,7 @@ function certifyCrystalIntroSubprogram(
     if (!scene22 || !scene22Entry) {
       throw new Error("IntroScene21 has no exact IntroScene22 continuation");
     }
-    frontierBlock = scene22.id;
+    enterIntroScene(scene22);
     nextCall = scene22Entry;
   }
   if (
@@ -19723,7 +21309,7 @@ function certifyCrystalIntroSubprogram(
     if (!scene23 || !scene23Entry) {
       throw new Error("IntroScene22 has no exact IntroScene23 continuation");
     }
-    frontierBlock = scene23.id;
+    enterIntroScene(scene23);
     nextCall = scene23Entry;
   }
   if (
@@ -19754,7 +21340,7 @@ function certifyCrystalIntroSubprogram(
     if (!scene24 || !scene24Entry) {
       throw new Error("IntroScene23 has no exact IntroScene24 continuation");
     }
-    frontierBlock = scene24.id;
+    enterIntroScene(scene24);
     nextCall = scene24Entry;
   }
   if (
@@ -19849,7 +21435,7 @@ function certifyCrystalIntroSubprogram(
     if (!scene25 || !scene25Entry) {
       throw new Error("IntroScene24 has no exact IntroScene25 continuation");
     }
-    frontierBlock = scene25.id;
+    enterIntroScene(scene25);
     nextCall = scene25Entry;
   }
   if (
@@ -19916,7 +21502,7 @@ function certifyCrystalIntroSubprogram(
     if (!scene26 || !scene26Entry) {
       throw new Error("IntroScene25 has no exact IntroScene26 continuation");
     }
-    frontierBlock = scene26.id;
+    enterIntroScene(scene26);
     nextCall = scene26Entry;
   }
   if (
@@ -20028,7 +21614,7 @@ function certifyCrystalIntroSubprogram(
     if (!scene27 || !scene27Entry) {
       throw new Error("IntroScene26 has no exact IntroScene27 continuation");
     }
-    frontierBlock = scene27.id;
+    enterIntroScene(scene27);
     nextCall = scene27Entry;
   }
   if (
@@ -20138,7 +21724,7 @@ function certifyCrystalIntroSubprogram(
     if (!scene28 || !scene28Entry) {
       throw new Error("IntroScene27 has no exact IntroScene28 continuation");
     }
-    frontierBlock = scene28.id;
+    enterIntroScene(scene28);
     nextCall = scene28Entry;
   }
   if (
@@ -20407,19 +21993,348 @@ function certifyCrystalIntroSubprogram(
 
   const scheduler = compiledPrefix.find(
     (operation) => operation.op === "sprite_scheduler_step" && operation.source_span.start_line === 20,
-  ) as RuntimePresentationSpriteOperation | undefined;
+  ) as
+    | Extract<RuntimePresentationSpriteOperation, { op: "sprite_scheduler_step" }>
+    | undefined;
   const frameWait = compiledPrefix.find(
     (operation) => operation.op === "wait_frames" && operation.source_span.start_line === 21,
   );
   if (!scheduler || !frameWait) {
     throw new Error("CrystalIntro callable loop has no exact central scheduler/frame boundary");
   }
+  scheduler.rom_frame_crossings = [
+    { dispatcher_entry: 7, dispatch_tick: 1, elapsed_t_cycles_between_hooks: 52020 },
+    { dispatcher_entry: 13, dispatch_tick: 1, elapsed_t_cycles_between_hooks: 71776 },
+    { dispatcher_entry: 15, dispatch_tick: 1, elapsed_t_cycles_between_hooks: 40104 },
+    { dispatcher_entry: 15, dispatch_tick: 33, elapsed_t_cycles_between_hooks: 37596 },
+    { dispatcher_entry: 15, dispatch_tick: 45, elapsed_t_cycles_between_hooks: 37432 },
+    { dispatcher_entry: 15, dispatch_tick: 57, elapsed_t_cycles_between_hooks: 37520 },
+    { dispatcher_entry: 15, dispatch_tick: 69, elapsed_t_cycles_between_hooks: 42796 },
+    { dispatcher_entry: 15, dispatch_tick: 73, elapsed_t_cycles_between_hooks: 44964 },
+    { dispatcher_entry: 15, dispatch_tick: 77, elapsed_t_cycles_between_hooks: 49160 },
+    { dispatcher_entry: 15, dispatch_tick: 81, elapsed_t_cycles_between_hooks: 51072 },
+    { dispatcher_entry: 15, dispatch_tick: 85, elapsed_t_cycles_between_hooks: 51072 },
+    { dispatcher_entry: 15, dispatch_tick: 89, elapsed_t_cycles_between_hooks: 48840 },
+    { dispatcher_entry: 15, dispatch_tick: 93, elapsed_t_cycles_between_hooks: 49648 },
+    { dispatcher_entry: 15, dispatch_tick: 97, elapsed_t_cycles_between_hooks: 48956 },
+    { dispatcher_entry: 15, dispatch_tick: 101, elapsed_t_cycles_between_hooks: 49316 },
+    { dispatcher_entry: 15, dispatch_tick: 105, elapsed_t_cycles_between_hooks: 48536 },
+    { dispatcher_entry: 15, dispatch_tick: 109, elapsed_t_cycles_between_hooks: 49264 },
+    { dispatcher_entry: 15, dispatch_tick: 113, elapsed_t_cycles_between_hooks: 48652 },
+    { dispatcher_entry: 15, dispatch_tick: 117, elapsed_t_cycles_between_hooks: 49284 },
+    { dispatcher_entry: 15, dispatch_tick: 121, elapsed_t_cycles_between_hooks: 48624 },
+    { dispatcher_entry: 15, dispatch_tick: 125, elapsed_t_cycles_between_hooks: 49436 },
+    { dispatcher_entry: 15, dispatch_tick: 129, elapsed_t_cycles_between_hooks: 53244 },
+    { dispatcher_entry: 19, dispatch_tick: 1, elapsed_t_cycles_between_hooks: 34716 },
+  ];
+  scheduler.timing_oracle = {
+    runner: "tools/asm-oracle/intro_trace.py --timing",
+    rom_sha1: "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133",
+  };
+  const request2bppOperations = compiledPrefix.filter(
+    (operation) => operation.op === "request_2bpp_transfer",
+  );
+  for (const [index, timing] of CRYSTAL_INTRO_REQUEST_2BPP_ROM_TIMING.entries()) {
+    const operation = request2bppOperations[index];
+    if (!operation) continue;
+    const [startIntroFrame, endIntroFrame, frameBoundaries, elapsedTCycles, startPhaseTCycles] =
+      timing;
+    if (
+      endIntroFrame - startIntroFrame !== frameBoundaries ||
+      Math.floor((startPhaseTCycles + elapsedTCycles) / 70224) !== frameBoundaries
+    ) {
+      continue;
+    }
+    operation.request_2bpp_frame_boundaries_crossed = frameBoundaries;
+    operation.request_2bpp_timing_oracle = {
+      runner: "tools/asm-oracle/intro_trace.py --timing",
+      rom_sha1: "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133",
+      start_intro_frame: startIntroFrame,
+      end_intro_frame: endIntroFrame,
+      elapsed_t_cycles_between_hooks: elapsedTCycles,
+      start_frame_phase_t_cycles: startPhaseTCycles,
+    };
+  }
+  for (const [dispatcherEntry, entry] of exactSceneEntries.entries()) {
+    const start = scenePhaseLabels[entry];
+    const end =
+      dispatcherEntry + 1 < exactSceneEntries.length
+        ? scenePhaseLabels[exactSceneEntries[dispatcherEntry + 1]]
+        : compiledPrefix.length;
+    if (start === undefined || end === undefined || start >= end) {
+      throw new Error(`CrystalIntro ${entry} has no exact compiled operation range`);
+    }
+    for (const operation of compiledPrefix.slice(start, end)) {
+      if (operation.op === "sprite_init_group") {
+        const instances = operation.instances as string[];
+        const dispatchTicks = new Set(
+          instances.map((instance) => {
+            const match = /^sprite:engine\/movie\/intro\.asm:\d+:(\d+):\d+$/.exec(instance);
+            if (!match) {
+              throw new Error(`${entry} has malformed grouped sprite instance ${instance}`);
+            }
+            return Number(match[1]);
+          }),
+        );
+        if (dispatchTicks.size !== 1) {
+          throw new Error(`${entry} grouped sprite instances disagree on allocation tick`);
+        }
+        operation.dispatcher_entry = dispatcherEntry;
+        operation.dispatch_tick = [...dispatchTicks][0];
+      } else if (operation.op === "sprite_activate") {
+        const lifetime = operation.lifetime as RuntimePresentationSpriteProgram["lifetime"];
+        if (
+          lifetime.allocation_dispatcher_entry !== dispatcherEntry ||
+          lifetime.allocation_dispatch_tick === null
+        ) {
+          throw new Error(`${entry} sprite activation disagrees with its compiled scene range`);
+        }
+        operation.dispatcher_entry = dispatcherEntry;
+        operation.dispatch_tick = lifetime.allocation_dispatch_tick;
+      }
+    }
+  }
+  const decompressionOperations = compiledPrefix.filter(
+    (operation) => operation.op === "decompress_lz3_resource",
+  );
+  for (const [index, timing] of CRYSTAL_INTRO_DECOMPRESSION_ROM_TIMING.entries()) {
+    const [
+      resourceSymbol,
+      startIntroFrame,
+      endIntroFrame,
+      frameBoundaries,
+      elapsedTCycles,
+      expectedBodyMachineCycles,
+    ] = timing;
+    const operation = decompressionOperations[index];
+    const startPhaseTCycles = CRYSTAL_INTRO_DECOMPRESSION_ROM_START_PHASES[index];
+    if (!operation || operation.resource_symbol !== resourceSymbol) continue;
+    const bodyMachineCycles = Number(operation.decompress_machine_cycles);
+    if (
+      !Number.isInteger(bodyMachineCycles) ||
+      bodyMachineCycles !== expectedBodyMachineCycles ||
+      elapsedTCycles < bodyMachineCycles * 4 ||
+      endIntroFrame - startIntroFrame !== frameBoundaries ||
+      startPhaseTCycles === undefined ||
+      Math.floor((startPhaseTCycles + elapsedTCycles) / 70224) !== frameBoundaries
+    ) {
+      continue;
+    }
+    operation.decompress_frame_boundaries_crossed = frameBoundaries;
+    operation.timing_oracle = {
+      runner: "tools/asm-oracle/intro_trace.py --timing",
+      rom_sha1: "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133",
+      start_intro_frame: startIntroFrame,
+      end_intro_frame: endIntroFrame,
+      elapsed_t_cycles_between_hooks: elapsedTCycles,
+      start_frame_phase_t_cycles: startPhaseTCycles,
+    };
+    const request = compiledPrefix[compiledPrefix.indexOf(operation) + 1];
+    const wrapperTiming = CRYSTAL_INTRO_DECOMPRESSION_REQUEST_ROM_TIMING[index];
+    if (!request || request.op !== "request_2bpp_transfer" || !wrapperTiming) {
+      continue;
+    }
+    const [wrapperStartFrame, wrapperEndFrame, wrapperFrameBoundaries, wrapperElapsedTCycles] =
+      wrapperTiming;
+    const tileCount = Number(request.tile_count);
+    const chunking = request.chunking as Record<string, unknown> | undefined;
+    const tilesPerVBlank = Number(chunking?.default_tiles_per_vblank);
+    const transferFrameBoundaries = Number(request.request_2bpp_frame_boundaries_crossed);
+    if (
+      !Number.isInteger(tileCount) ||
+      tileCount <= 0 ||
+      !Number.isInteger(tilesPerVBlank) ||
+      tilesPerVBlank <= 0 ||
+      wrapperEndFrame - wrapperStartFrame !== wrapperFrameBoundaries ||
+      wrapperElapsedTCycles < elapsedTCycles ||
+      !Number.isInteger(transferFrameBoundaries) ||
+      transferFrameBoundaries < Math.ceil(tileCount / tilesPerVBlank) ||
+      wrapperFrameBoundaries !== frameBoundaries + transferFrameBoundaries
+    ) {
+      continue;
+    }
+    request.decompress_request_frame_boundaries_crossed = wrapperFrameBoundaries;
+    request.decompress_request_timing_oracle = {
+      runner: "tools/asm-oracle/intro_trace.py --timing",
+      rom_sha1: "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133",
+      start_intro_frame: wrapperStartFrame,
+      end_intro_frame: wrapperEndFrame,
+      elapsed_t_cycles_between_hooks: wrapperElapsedTCycles,
+    };
+  }
+  for (const [dispatcherEntry, entry] of exactSceneEntries.entries()) {
+    const start = scenePhaseLabels[entry];
+    const end =
+      dispatcherEntry + 1 < exactSceneEntries.length
+        ? scenePhaseLabels[exactSceneEntries[dispatcherEntry + 1]]
+        : compiledPrefix.length;
+    if (start === undefined || end === undefined || start >= end) {
+      throw new Error(`CrystalIntro ${entry} has no exact compiled operation range`);
+    }
+    const sceneOperations = compiledPrefix.slice(start, end);
+    for (const [sceneOperationIndex, operation] of sceneOperations.entries()) {
+      if (operation.op !== "play_audio") continue;
+      const dispatchTicks = new Set<number>();
+      const previousOperation = sceneOperations[sceneOperationIndex - 1];
+      if (
+        previousOperation &&
+        ["sprite_init_group", "sprite_activate"].includes(previousOperation.op) &&
+        previousOperation.dispatcher_entry === dispatcherEntry &&
+        Number.isInteger(previousOperation.dispatch_tick)
+      ) {
+        dispatchTicks.add(Number(previousOperation.dispatch_tick));
+      }
+      for (const spriteProgram of compiledSpritePrograms) {
+        for (const hostOperation of spriteProgram.lifetime.handler_host_operations) {
+          if (
+            hostOperation.target === "PlaySFX" &&
+            hostOperation.dispatcher_entry === dispatcherEntry &&
+            hostOperation.source_span.file === operation.source_span.file &&
+            hostOperation.source_span.start_line >= operation.source_span.start_line &&
+            hostOperation.source_span.end_line <= operation.source_span.end_line
+          ) {
+            for (const dispatchTick of hostOperation.dispatch_ticks) {
+              dispatchTicks.add(dispatchTick);
+            }
+          }
+        }
+      }
+      if (dispatchTicks.size === 0) {
+        const decrementIndex = sceneOperations.findIndex(
+          (candidate, index) =>
+            index < sceneOperationIndex &&
+            candidate.op === "decrement_memory_byte" &&
+            candidate.target === "wIntroSceneFrameCounter" &&
+            candidate.comparison_value === "predecrement_value",
+        );
+        const guard = sceneOperations[sceneOperationIndex - 1];
+        const precedingEntry = exactSceneEntries[dispatcherEntry - 1];
+        const precedingStart = precedingEntry === undefined ? undefined : scenePhaseLabels[precedingEntry];
+        const initialCounter =
+          precedingStart === undefined
+            ? undefined
+            : compiledPrefix
+                .slice(precedingStart, start)
+                .reverse()
+                .find(
+                  (candidate) =>
+                    candidate.op === "write_memory_byte" &&
+                    candidate.target === "wIntroSceneFrameCounter" &&
+                    Number.isInteger(candidate.value),
+                )?.value;
+        if (
+          decrementIndex >= 0 &&
+          guard?.op === "return_unless_compare" &&
+          guard.value === "predecrement_value" &&
+          guard.predicate === "equal" &&
+          Number.isInteger(guard.operand) &&
+          Number.isInteger(initialCounter) &&
+          Number(initialCounter) >= Number(guard.operand)
+        ) {
+          const interveningBranches = sceneOperations.slice(
+            decrementIndex + 1,
+            sceneOperationIndex - 1,
+          );
+          if (
+            interveningBranches.every(
+              (candidate) =>
+                candidate.op === "branch_compare" &&
+                candidate.value === "predecrement_value" &&
+                candidate.predicate === "equal" &&
+                Number(candidate.operand) !== Number(guard.operand),
+            )
+          ) {
+            dispatchTicks.add(Number(initialCounter) - Number(guard.operand) + 1);
+          }
+        }
+      }
+      if (dispatchTicks.size !== 1) {
+        throw new Error(
+          `${entry} play_audio at ${operation.source_span.file}:${operation.source_span.start_line} has ${dispatchTicks.size} certified dispatch ticks`,
+        );
+      }
+      operation.dispatcher_entry = dispatcherEntry;
+      operation.dispatch_tick = [...dispatchTicks][0];
+    }
+  }
+  const sceneCompletionWaitFrames = exactSceneEntries.map((entry, index) => {
+    const start = scenePhaseLabels[entry];
+    const end =
+      index + 1 < exactSceneEntries.length
+        ? scenePhaseLabels[exactSceneEntries[index + 1]]
+        : compiledPrefix.length;
+    if (start === undefined || end === undefined || start >= end) {
+      throw new Error(`CrystalIntro ${entry} has no exact compiled operation range`);
+    }
+    return compiledPrefix.slice(start, end).reduce((frames, operation) => {
+      if (
+        operation !== frameWait &&
+        operation.op === "wait_frames" &&
+        operation.source_span.file === "engine/movie/intro.asm"
+      ) {
+        const operationFrames = Number(operation.frames);
+        if (!Number.isInteger(operationFrames) || operationFrames <= 0) {
+          throw new Error(`${entry} has an invalid source wait_frames duration`);
+        }
+        return frames + operationFrames;
+      }
+      return frames;
+    }, 0);
+  });
 
   bindCrystalIntroSpriteGraphics(
     compiledPrefix,
     compiledSpritePrograms,
     parseAsmConstants([loadSource("constants/hardware.inc", options)]),
   );
+  const sceneOperationLabels: Record<string, number> = { ...scenePhaseLabels };
+  const sceneLocalBranchTargets = new Set(
+    compiledPrefix
+      .map((operation) => operation.target)
+      .filter(
+        (target): target is string =>
+          typeof target === "string" &&
+          target.startsWith(".") &&
+          !target.endsWith("@CrystalIntro"),
+      ),
+  );
+  const spanContains = (
+    container: RuntimePresentationSourceSpan | undefined,
+    nested: RuntimePresentationSourceSpan,
+  ): boolean =>
+    !!container &&
+    container.file === nested.file &&
+    container.start_line <= nested.start_line &&
+    container.end_line >= nested.end_line;
+  for (const target of sceneLocalBranchTargets) {
+    const targetBlock = blocks.get(target);
+    const firstInstruction = targetBlock?.instructions[0];
+    if (!targetBlock || !firstInstruction) {
+      throw new Error(`CrystalIntro scene branch target ${target} has no source block`);
+    }
+    const operationIndex = compiledPrefix.findIndex(
+      (operation) =>
+        spanContains(operation.source_span, firstInstruction.source_span) ||
+        spanContains(
+          operation.invocation_source_span as RuntimePresentationSourceSpan | undefined,
+          firstInstruction.source_span,
+        ),
+    );
+    if (operationIndex < 0) {
+      throw new Error(
+        `CrystalIntro scene branch target ${target} has no compiled operation entry`,
+      );
+    }
+    sceneOperationLabels[target] = operationIndex;
+  }
+  const outerLoopOperationIndex = compiledPrefix.findIndex(
+    (operation) =>
+      operation.op === "sample_input" && operation.result === "hJoyLast",
+  );
+  if (outerLoopOperationIndex < 0) {
+    throw new Error("CrystalIntro scene phase has no exact outer loop entry");
+  }
+  sceneOperationLabels[".loop@CrystalIntro"] = outerLoopOperationIndex;
   compiledPrefix.push(...compileCrystalIntroBackgroundBindings(compiledPrefix, blocks));
 
   const resourceMap = new Map<string, RuntimePresentationCallableSubprogram["resources"][number]>();
@@ -20477,7 +22392,12 @@ function certifyCrystalIntroSubprogram(
     },
     phases: [
       { id: "entry_init", source_span: sourceSpanThrough(entrySpan, initSpan), operations: entryOperations },
-      { id: "scene_dispatch", source_span: loopSpan, operations: compiledPrefix },
+      {
+        id: "scene_dispatch",
+        source_span: loopSpan,
+        labels: sceneOperationLabels,
+        operations: compiledPrefix,
+      },
       {
         id: "button_cancel",
         source_span: shutOffMusicSpan,
@@ -20509,12 +22429,280 @@ function certifyCrystalIntroSubprogram(
       scene_dispatch: {
         table: "IntroScenes",
         index: "wJumptableIndex",
+        entries: exactSceneEntries,
+        entry_offsets: scenePhaseLabels,
+        completion_wait_frames: sceneCompletionWaitFrames,
         domain: sceneDomain,
         source_span: sceneTable.source_span,
       },
       natural_scheduler_ticks: null,
       scheduler,
       frame_wait: frameWait,
+      interrupt_timing: {
+        unit: "sm83_machine_cycles",
+        // Saved-register setup, .InitRAMAddrs call/body/return, and the call
+        // into the first JoyTextDelay invocation.
+        entry_to_first_input_machine_cycles: 59,
+        joy_text_delay: {
+          pressed_repeat_reset_machine_cycles: 101,
+          repeat_suppressed_machine_cycles: 107,
+          repeat_restart_machine_cycles: 110,
+          common_instruction_machine_cycles: joyTextDelayCommonInstructionMachineCycles,
+          pressed_repeat_reset_tail_machine_cycles: joyTextDelayPressedTailMachineCycles,
+          repeat_suppressed_tail_machine_cycles: joyTextDelaySuppressedTailMachineCycles,
+          repeat_restart_tail_machine_cycles: joyTextDelayRestartTailMachineCycles,
+          source_spans: [
+            getJoypadSpan,
+            getJoypadReturnSpan,
+            joyTextDelaySpan,
+            joyTextDelayOkSpan,
+            joyTextDelayCheckSpan,
+            joyTextDelayRestartSpan,
+          ],
+        },
+        outer_loop_body: {
+          // Exact non-interrupt instruction/macro bodies between the four
+          // outer-loop routine hooks. The complete loop clock composes these
+          // with the separately certified interrupt handlers below.
+          after_input_before_scene_dispatch: 21,
+          scene_dispatch_to_sprite_scheduler: 48,
+          sprite_scheduler_to_frame_wait: 49,
+          source_span: loopSpan,
+        },
+        frame_clock: {
+          frame_t_cycles: 70224,
+          intro_entry_phase_t_cycles: 2980,
+          timing_oracle: {
+            runner: "tools/asm-oracle/intro_trace.py --timing",
+            rom_sha1: "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133",
+          },
+        },
+        hardware_entry: 5,
+        vectors: {
+          instruction: "jp",
+          machine_cycles: 4,
+          source_span: interruptVectorSpan,
+        },
+        lcd_stat: {
+          handler: "LCD",
+          trigger_register: "rSTAT",
+          trigger_mask: "STAT_MODE_0",
+          trigger: "hblank",
+          scanline_t_cycles: 456,
+          hblank_request_t_cycles: 250,
+          vblank_request_t_cycles: 65664,
+          interrupts_per_visible_frame: 144,
+          callback_pointer: "hLCDCPointer",
+          // Totals include the hardware interrupt entry and vector jump above.
+          callback_zero_machine_cycles: 27,
+          callback_nonzero_machine_cycles: 49,
+          setup_source_span: lcdStatSetupSpan,
+          source_span: sourceSpanThrough(lcdInterruptSpan, lcdInterruptDoneSpan),
+        },
+        timer: {
+          handler: "MobileTimer",
+          enable: "IE_TIMER",
+          inactive_guard: { source: "hMobile", predicate: "zero" },
+          request_period_t_cycles: 262144,
+          first_request_after_intro_entry_t_cycles: 258428,
+          // Total includes the hardware interrupt entry and vector jump above.
+          inactive_machine_cycles: 48,
+          setup_source_span: timerSetupSpan,
+          source_span: sourceSpanThrough(
+            inactiveTimerPrefixSpan,
+            inactiveTimerReturnSpan,
+          ),
+        },
+        vblank_normal: {
+          handler: "VBlank_Normal",
+          selector: { source: "hVBlank", value: 0 },
+          inactive_game_timer_machine_cycles: 47,
+          wrapper_epilogue_machine_cycles: 16,
+          game_timer_source_spans: [
+            gameTimerSpan,
+            gameTimerInactiveSpan,
+            vblankWrapperEpilogueSpan,
+          ],
+          audio_update: {
+            routine: "_UpdateSound",
+            cadence: "every_vblank",
+            playing_guard: { source: "wMusicPlaying", predicate: "nonzero" },
+            timing: "state_dependent",
+            all_channels_inactive: {
+              predicate: "all_SOUND_CHANNEL_ON_flags_clear",
+              // 19-cycle setup + seven 34-cycle loop iterations + one
+              // 33-cycle final iteration + 11-cycle PlayDanger +
+              // 10-cycle FadeMusic + 30-cycle call/tail sequence.
+              machine_cycles: 341,
+              source_spans: [
+                inactiveSoundChannelPrefixSpan,
+                inactiveSoundChannelLoopSpan,
+                inactiveSoundTailSpan,
+                inactiveDangerSpan,
+                inactiveFadeSpan,
+              ],
+            },
+            helper_inactive_paths: {
+              apply_pitch_slide: {
+                guard: "SOUND_PITCH_SLIDE_clear",
+                machine_cycles: 13,
+                source_span: inactivePitchSlideSpan,
+              },
+              handle_track_vibrato: {
+                guard:
+                  "SOUND_DUTY_LOOP_SOUND_PITCH_OFFSET_SOUND_VIBRATO_clear",
+                machine_cycles: 37,
+                source_span: inactiveVibratoSpan,
+              },
+              handle_noise: {
+                guard: "SOUND_NOISE_clear",
+                machine_cycles: 13,
+                source_span: inactiveNoiseSpan,
+              },
+              play_danger: {
+                guard: "DANGER_ON_clear",
+                machine_cycles: 11,
+                source_span: inactiveDangerSpan,
+              },
+              fade_music: {
+                guard: "wMusicFade_zero",
+                machine_cycles: 10,
+                source_span: inactiveFadeSpan,
+              },
+            },
+            active_channel_paths: {
+              guard: {
+                sfx_priority: "zero",
+                sustained_note_duration: "at_least_2",
+              },
+              extra_over_inactive_channel_machine_cycles: {
+                // Each value replaces one 34-cycle inactive iteration and
+                // excludes the separately modeled helper bodies.
+                music_without_active_sfx: 118,
+                sfx: 109,
+                music_shadowed_by_active_sfx: 98,
+              },
+              // The note-over prefix is 29 cycles including `call
+              // ParseMusic`; the sustained-duration prefix is 17 cycles.
+              // Their 12-cycle difference excludes the parser body.
+              note_over_extra_before_parse_machine_cycles: 12,
+              source_spans: [
+                activeSustainSpan,
+                activeNoteOverSpan,
+                activeChannelCommonSpan,
+                activeChannelRoutingSpan,
+                activeChannelAdvanceSpan,
+              ],
+            },
+            helper_cycle_models: {
+              handle_track_vibrato: {
+                base_machine_cycles: 37,
+                duty_loop_extra_machine_cycles: 25,
+                pitch_offset_extra_machine_cycles: 31,
+                vibrato_extra_machine_cycles: {
+                  delay_count_nonzero: 16,
+                  zero_extent: 20,
+                  rate_count_nonzero: 37,
+                  toggle_up_no_borrow: 83,
+                  toggle_up_borrow: 87,
+                  toggle_down_no_carry: 84,
+                  toggle_down_carry: 85,
+                },
+                source_spans: [inactiveVibratoSpan, vibratoReturnSpan],
+              },
+              handle_noise: {
+                inactive_machine_cycles: 13,
+                prefix_to_delay_check_machine_cycles: {
+                  sfx_channel: 19,
+                  music_channel_with_ch8_off: 27,
+                  music_channel_with_non_noise_ch8: 31,
+                },
+                music_blocked_by_noise_ch8_machine_cycles: 34,
+                delay_machine_cycles: {
+                  nonzero_return: 16,
+                  zero_to_sample_reader: 8,
+                },
+                sample_reader_machine_cycles: {
+                  empty_address: 18,
+                  sound_ret: 26,
+                  sample: 71,
+                },
+                source_spans: [
+                  noiseRoutingSpan,
+                  noiseDelaySpan,
+                  noiseSampleSpan,
+                  noiseSampleReturnSpan,
+                ],
+              },
+              update_channels_intro_paths: {
+                pulse1: { unchanged: 71, noise_sampling: 88 },
+                pulse2: { unchanged: 49, vibrato_override: 67 },
+                wave: { unchanged: 45, noise_sampling: 201 },
+                noise: { unchanged: 40, noise_sampling: 65 },
+                source_spans: [
+                  updateChannelsDispatcherSpan,
+                  updatePulse1PrefixSpan,
+                  updatePulse15PrefixSpan,
+                  updatePulse1RoutingSpan,
+                  updatePulse1UnchangedSpan,
+                  updatePulse1NoiseSpan,
+                  updatePulse2Span,
+                  updatePulse2VibratoSpan,
+                  updateWaveSpan,
+                  updateWaveNoiseSpan,
+                  updateWavePatternSpan,
+                  updateNoiseSpan,
+                  updateNoiseSamplingSpan,
+                ],
+              },
+              parse_music_intro_paths: {
+                // A normal note is the fixed parser/read/write path plus the
+                // two variable helpers below. A music-noise note replaces the
+                // normal frequency/write tail with GetNoiseSample.
+                normal_note_base_machine_cycles: 201,
+                music_noise_note_base_machine_cycles: 220,
+                // GetMusicByte + command routing + Music_Octave + loop-back.
+                octave_command_machine_cycles: 145,
+                set_note_duration: {
+                  // Excludes both calls to the source .Multiply helper.
+                  fixed_machine_cycles: 64,
+                  // Multiply(a) = 13 * max(bit_length(a), 1) + 5 + popcount(a).
+                  multiply_per_bit_machine_cycles: 13,
+                  multiply_fixed_machine_cycles: 5,
+                  multiply_set_bit_extra_machine_cycles: 1,
+                  minimum_multiply_iterations: 1,
+                },
+                get_frequency: {
+                  // Includes the terminal comparison and return path.
+                  fixed_machine_cycles: 60,
+                  per_right_shift_machine_cycles: 12,
+                  target_octave: 7,
+                },
+                source_spans: [
+                  parseMusicPrefixSpan,
+                  parseMusicCommandLoopSpan,
+                  parseMusicNoteSpan,
+                  getMusicByteSpan,
+                  loadMusicByteSpan,
+                  setNoteDurationSpan,
+                  multiplyNoteDurationSpan,
+                  multiplyNoteDurationLoopSpan,
+                  multiplyNoteDurationTailSpan,
+                  getFrequencySpan,
+                  getFrequencyLoopSpan,
+                  getFrequencyReturnSpan,
+                  parseMusicCommandSpan,
+                  musicOctaveSpan,
+                  getNoiseSampleSpan,
+                  getNoiseSampleTailSpan,
+                ],
+              },
+            },
+            invocation_source_span: vblankAudioInvocationSpan,
+            implementation_source_span: updateSoundGuardSpan,
+          },
+        },
+      },
     },
     resource_transfers: [],
     tilemap_writes: [],
@@ -20536,6 +22724,64 @@ function certifyCrystalIntroSubprogram(
       clearOamSpan,
       clearOamLoopSpan,
       delayFramesImplementationSpan,
+      lcdInterruptSpan,
+      lcdInterruptDoneSpan,
+      interruptVectorSpan,
+      lcdStatSetupSpan,
+      inactiveTimerPrefixSpan,
+      inactiveTimerReturnSpan,
+      gameTimerSpan,
+      gameTimerInactiveSpan,
+      vblankWrapperEpilogueSpan,
+      vblankAudioInvocationSpan,
+      updateSoundGuardSpan,
+      inactiveSoundChannelPrefixSpan,
+      inactiveSoundChannelLoopSpan,
+      inactiveSoundTailSpan,
+      inactiveDangerSpan,
+      inactiveFadeSpan,
+      inactivePitchSlideSpan,
+      inactiveVibratoSpan,
+      vibratoReturnSpan,
+      inactiveNoiseSpan,
+      noiseRoutingSpan,
+      noiseDelaySpan,
+      noiseSampleSpan,
+      noiseSampleReturnSpan,
+      updateChannelsDispatcherSpan,
+      updatePulse1PrefixSpan,
+      updatePulse15PrefixSpan,
+      updatePulse1RoutingSpan,
+      updatePulse1UnchangedSpan,
+      updatePulse1NoiseSpan,
+      updatePulse2Span,
+      updatePulse2VibratoSpan,
+      updateWaveSpan,
+      updateWaveNoiseSpan,
+      updateWavePatternSpan,
+      updateNoiseSpan,
+      updateNoiseSamplingSpan,
+      parseMusicPrefixSpan,
+      parseMusicCommandLoopSpan,
+      parseMusicNoteSpan,
+      getMusicByteSpan,
+      loadMusicByteSpan,
+      setNoteDurationSpan,
+      multiplyNoteDurationSpan,
+      multiplyNoteDurationLoopSpan,
+      multiplyNoteDurationTailSpan,
+      getFrequencySpan,
+      getFrequencyLoopSpan,
+      getFrequencyReturnSpan,
+      parseMusicCommandSpan,
+      musicOctaveSpan,
+      getNoiseSampleSpan,
+      getNoiseSampleTailSpan,
+      activeSustainSpan,
+      activeNoteOverSpan,
+      activeChannelCommonSpan,
+      activeChannelRoutingSpan,
+      activeChannelAdvanceSpan,
     ],
   };
 }
@@ -20762,6 +23008,7 @@ function certifyStartTitleScreenSetupFrontier(
     resource_kind: suicuneResource.kind,
     compressed_byte_count: suicuneDecoded.compressed_byte_count,
     output_byte_count: suicuneDecoded.output_byte_count,
+    decompress_machine_cycles: suicuneDecoded.decompress_machine_cycles,
     target: "vTiles4",
     target_vram_bank: 1,
     resource_label_source_span: suicuneResource.label_source_span,
@@ -20868,6 +23115,7 @@ function certifyStartTitleScreenSetupFrontier(
       resource_kind: resource.kind,
       compressed_byte_count: decoded.compressed_byte_count,
       output_byte_count: decoded.output_byte_count,
+      decompress_machine_cycles: decoded.decompress_machine_cycles,
       target,
       target_vram_bank: 0,
       resource_label_source_span: resource.label_source_span,
@@ -24485,9 +26733,13 @@ function certifyOakSpeechSubprogram(
   const intro = loadSource("engine/menus/intro_menu.asm", options);
   const timeSet = loadSource("engine/rtc/timeset.asm", options);
   const playerGfx = loadSource("engine/gfx/player_gfx.asm", options);
+  const joypad = loadSource("home/joypad.asm", options);
+  const tilemap = loadSource("home/tilemap.asm", options);
   const blocks = parseAsmBlocks([intro]);
   const timeBlocks = parseAsmBlocks([timeSet]);
   const playerBlocks = parseAsmBlocks([playerGfx]);
+  const joypadBlocks = parseAsmBlocks([joypad]);
+  const tilemapBlocks = parseAsmBlocks([tilemap]);
   const speechSpan = requireExactRoutineBlock(
     blocks,
     "OakSpeech",
@@ -24760,6 +27012,64 @@ function certifyOakSpeechSubprogram(
     ],
     "NewGame exact clock acceptance/menu restoration",
   );
+  const joyPressRepeatSpan = requireExactRoutineBlock(
+    joypadBlocks,
+    ".ok@JoyTextDelay",
+    [
+      "ldh [hJoyLast], a",
+      "ldh a, [hJoyPressed]",
+      "and a",
+      "jr z, .checkframedelay",
+      "ld a, 15",
+      "ld [wTextDelayFrames], a",
+      "ret",
+    ],
+    "NewGame clock held-input initial counter",
+  );
+  const joyRestartRepeatSpan = requireExactRoutineBlock(
+    joypadBlocks,
+    ".restartframedelay@JoyTextDelay",
+    ["ld a, 5", "ld [wTextDelayFrames], a", "ret"],
+    "NewGame clock held-input restart counter",
+  );
+  const hourIdleSpan = requireInstructionSubsequence(
+    timeBlocks,
+    "SetHour",
+    [
+      "ld a, [hl]",
+      "and PAD_DOWN",
+      "jr nz, .down",
+      "call DelayFrame",
+      "and a",
+      "ret",
+    ],
+    "NewGame clock hour idle frame",
+  );
+  const minuteIdleSpan = requireInstructionSubsequence(
+    timeBlocks,
+    "SetMinutes",
+    [
+      "ld a, [hl]",
+      "and PAD_DOWN",
+      "jr nz, .d_down",
+      "call DelayFrame",
+      "and a",
+      "ret",
+    ],
+    "NewGame clock minute idle frame",
+  );
+  const waitBgMapSpan = requireExactRoutineBlock(
+    tilemapBlocks,
+    "WaitBGMap",
+    [
+      "ld a, 1",
+      "ldh [hBGMapMode], a",
+      "ld c, 4",
+      "call DelayFrames",
+      "ret",
+    ],
+    "NewGame clock selector redraw wait",
+  );
   const moveRightSpan = requireExactRoutineBlock(
     playerBlocks,
     "MovePlayerPicRight",
@@ -24771,6 +27081,49 @@ function certifyOakSpeechSubprogram(
     "MovePlayerPicLeft",
     ["hlcoord 13, 4", "ld de, -1"],
     "NewGame exact player-picture left movement entry",
+  );
+  const movePlayerPicSpan = requireExactRoutineBlock(
+    playerBlocks,
+    "MovePlayerPic",
+    ["ld c, $8"],
+    "NewGame exact player-picture movement setup",
+  );
+  const movePlayerPicLoopSpan = requireExactRoutineBlock(
+    playerBlocks,
+    ".loop@MovePlayerPic",
+    [
+      "push bc",
+      "push hl",
+      "push de",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "lb bc, 7, 7",
+      "predef PlaceGraphic",
+      "xor a",
+      "ldh [hBGMapThird], a",
+      "call WaitBGMap",
+      "call DelayFrame",
+      "pop de",
+      "pop hl",
+      "add hl, de",
+      "pop bc",
+      "dec c",
+      "ret z",
+      "push hl",
+      "push bc",
+      "ld a, l",
+      "sub e",
+      "ld l, a",
+      "ld a, h",
+      "sbc d",
+      "ld h, a",
+      "lb bc, 7, 7",
+      "call ClearBox",
+      "pop bc",
+      "pop hl",
+      "jr .loop",
+    ],
+    "NewGame exact player-picture movement loop",
   );
   const drawPlayerSpan = findLabelSpan(playerGfx, "DrawIntroPlayerPic");
   const namingChoicesSpan = findLabelSpan(playerGfx, "ShowPlayerNamingChoices");
@@ -24786,12 +27139,74 @@ function certifyOakSpeechSubprogram(
     {
       op: "initialize_clock",
       default_hour: 10,
+      default_minute: 0,
       hour_range: [0, 23],
       minute_range: [0, 59],
+      startup_delay_frames: 8,
+      startup_sequence: [
+        { op: "save_menu_state", register: "hInMenu" },
+        { op: "set_menu_state", register: "hInMenu", value: 1 },
+        { op: "disable_sprite_updates", register: "wSpriteUpdatesEnabled" },
+        { op: "fade_music", audio: "MUSIC_NONE", rate: 16 },
+        { op: "wait", frames: 8 },
+        { op: "rotate_palettes_left", steps: 4, frames_per_step: 8 },
+        { op: "clear_tilemap" },
+        { op: "clear_sprites" },
+        { op: "load_sgb_layout", layout: "SCGB_DIPLOMA" },
+        { op: "disable_bg_map_updates", register: "hBGMapMode" },
+        { op: "load_standard_font" },
+        {
+          op: "load_1bpp_tiles",
+          entries: [
+            { gfx: "TimeSetBackgroundGFX", tile: 0, count: 1 },
+            { gfx: "TimeSetUpArrowGFX", tile: 1, count: 1 },
+            { gfx: "TimeSetDownArrowGFX", tile: 2, count: 1 },
+          ],
+          frames_per_entry: 1,
+        },
+        { op: "clear_screen" },
+        { op: "wait_bg_map", frames: 4 },
+        { op: "rotate_palettes_right", steps: 4, frames_per_step: 8 },
+      ],
+      selection_delay_frames: 10,
+      selection_directions: ["up", "down"],
+      held_direction_repeat: {
+        h_in_menu: 1,
+        press_counter: 15,
+        restart_counter: 5,
+        redraw_wait_frames: 4,
+        idle_wait_frames: 1,
+        first_repeat_frames: 10,
+        later_repeat_frames: 5,
+      },
       requires_hour_confirmation: true,
       requires_minute_confirmation: true,
       restores_hInMenu: true,
+      text_entries: [
+        "OakTimeWokeUpText",
+        "OakTimeWhatTimeIsItText",
+        "OakTimeWhatHoursText",
+        "OakTimeHoursQuestionMarkText",
+        "OakTimeHowManyMinutesText",
+        "OakTimeWhoaMinutesText",
+        "OakTimeMinutesQuestionMarkText",
+        "OakTimeOversleptText",
+        "OakTimeYikesText",
+        "OakTimeSoDarkText",
+      ],
+      response_text_by_period: {
+        nite: "OakTimeSoDarkText",
+        morn: "OakTimeOversleptText",
+        day: "OakTimeYikesText",
+      },
       source_span: timeSetSpan,
+      implementation_source_spans: [
+        joyPressRepeatSpan,
+        joyRestartRepeatSpan,
+        hourIdleSpan,
+        minuteIdleSpan,
+        waitBgMapSpan,
+      ],
     },
     {
       op: "play_audio",
@@ -24815,6 +27230,12 @@ function certifyOakSpeechSubprogram(
       source_span: loadedSourceLineSpan(intro, 647, 648),
     },
     {
+      op: "dismiss_intro_portrait",
+      fade: { words: 3, frames_per_word: 8 },
+      clear_tilemap: true,
+      source_span: loadedSourceLineSpan(intro, 649, 650),
+    },
+    {
       op: "present_intro_portrait",
       kind: "pokemon",
       species: "WOOPER",
@@ -24829,6 +27250,12 @@ function certifyOakSpeechSubprogram(
       entries: ["OakText2", "OakText3", "OakText4"],
       embedded_audio: [{ after: "OakText2", cry: "WOOPER", wait_for_sfx: true }],
       source_span: wooperTextSpan,
+    },
+    {
+      op: "dismiss_intro_portrait",
+      fade: { words: 3, frames_per_word: 8 },
+      clear_tilemap: true,
+      source_span: loadedSourceLineSpan(intro, 667, 668),
     },
     {
       op: "present_intro_portrait",
@@ -24847,12 +27274,19 @@ function certifyOakSpeechSubprogram(
       source_span: loadedSourceLineSpan(intro, 685, 686),
     },
     {
+      op: "dismiss_intro_portrait",
+      fade: { words: 3, frames_per_word: 8 },
+      clear_tilemap: true,
+      source_span: loadedSourceLineSpan(intro, 687, 688),
+    },
+    {
       op: "present_intro_portrait",
       kind: "player",
       gender_source: "wPlayerGender",
       coordinate: [6, 4],
       dimensions: [7, 7],
-      source_span: drawPlayerSpan,
+      fade: { words: 6, frames_per_word: 10 },
+      source_span: loadedSourceLineSpan(intro, 690, 696),
     },
     {
       op: "present_text_sequence",
@@ -24866,7 +27300,36 @@ function certifyOakSpeechSubprogram(
       custom_naming_mode: "NAME_PLAYER",
       custom_target: "wPlayerName",
       empty_fallbacks: { male: "CHRIS", female: "KRIS" },
-      picture_motion: { right_tiles: 7, left_tiles: 7, steps: 8 },
+      preset_choices: {
+        male: ["NEW NAME", "CHRIS", "MAT", "ALLAN", "JON"],
+        female: ["NEW NAME", "KRIS", "AMANDA", "JUANA", "JODI"],
+      },
+      preset_menu: {
+        coordinates: { left: 0, top: 0, right: 10, bottom: 11 },
+        default_option: 1,
+        title: "NAME",
+        title_indent: 2,
+        flags: ["STATICMENU_CURSOR", "STATICMENU_PLACE_TITLE", "STATICMENU_DISABLE_B"],
+      },
+      picture_motion: {
+        right_tiles: 7,
+        left_tiles: 7,
+        steps: 8,
+        bg_map_wait_frames: 4,
+        delay_frames: 1,
+      },
+      custom_return: {
+        fade_out: { steps: 3, frames_per_step: 8 },
+        clear_tilemap: true,
+        bg_map_wait_frames: 4,
+        player_picture: {
+          species_value: 0,
+          coordinate: [6, 4],
+          dimensions: [7, 7],
+          palette_layout: "SCGB_TRAINER_OR_MON_FRONTPIC_PALS",
+        },
+        fade_in: { steps: 3, frames_per_step: 8 },
+      },
       source_span: sourceSpanThrough(nameEntrySpan, nameFinishSpan),
     },
     {
@@ -24928,6 +27391,8 @@ function certifyOakSpeechSubprogram(
       storeNameSpan,
       moveRightSpan,
       moveLeftSpan,
+      movePlayerPicSpan,
+      movePlayerPicLoopSpan,
       namingChoicesSpan,
       drawPlayerSpan,
       chrisNameSpan,
@@ -26976,6 +29441,196 @@ function certifyFinishContinueOperations(
   ];
 }
 
+function certifyCreditsSourceDataSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const credits = loadSource("engine/movie/credits.asm", options);
+  const script = loadSource("data/credits_script.asm", options);
+  const constants = loadSource("constants/credits_constants.asm", options);
+  const strings = loadSource("data/credits_strings.asm", options);
+  const tilemap = loadSource("home/tilemap.asm", options);
+  const blocks = parseAsmBlocks([credits]);
+  const tilemapBlocks = parseAsmBlocks([tilemap]);
+  const creditsSpan = findLabelSpan(credits, "Credits");
+  const skipHandlerSpan = requireExactRoutineBlock(
+    blocks,
+    "Credits_HandleBButton",
+    [
+      "ldh a, [hJoypadDown]",
+      "and PAD_B",
+      "ret z",
+      "ld a, [wJumptableIndex]",
+      "bit ALLOW_SKIPPING_CREDITS_F, a",
+      "ret z",
+      "ld hl, wCreditsPos",
+      "ld a, [hli]",
+      "cp $d",
+      "jr nc, .okay",
+      "ld a, [hli]",
+      "and a",
+      "ret z",
+    ],
+    "Credits exact B-button skip gate",
+  );
+  const menuStateSpan = requireInstructionSubsequence(
+    blocks,
+    ".load_loop@Credits",
+    [
+      "ldh a, [hVBlank]",
+      "push af",
+      "ld a, VBLANK_CREDITS",
+      "ldh [hVBlank], a",
+      "ld a, TRUE",
+      "ldh [hInMenu], a",
+      "xor a",
+      "ldh [hBGMapMode], a",
+    ],
+    "Credits exact hInMenu setup",
+  );
+  const exitSpan = requireExactRoutineBlock(
+    blocks,
+    ".exit_credits@Credits",
+    [
+      "call ClearBGPalettes",
+      "xor a",
+      "ldh [hLCDCPointer], a",
+      "ldh [hBGMapAddress], a",
+      "pop af",
+      "ldh [hVBlank], a",
+      "pop af",
+      "ldh [rWBK], a",
+      "ret",
+    ],
+    "Credits exact exit without an hInMenu restore",
+  );
+  const clearPalettesSpan = requireExactRoutineBlock(
+    tilemapBlocks,
+    "ClearBGPalettes",
+    ["call ClearPalettes"],
+    "Credits exit ClearBGPalettes fallthrough",
+  );
+  const waitBgMapSpan = requireExactRoutineBlock(
+    tilemapBlocks,
+    "WaitBGMap",
+    [
+      "ld a, 1",
+      "ldh [hBGMapMode], a",
+      "ld c, 4",
+      "call DelayFrames",
+      "ret",
+    ],
+    "Credits exit exact four-frame palette-clear wait",
+  );
+  const clearCgbPalettesSpan = requireExactRoutineBlock(
+    tilemapBlocks,
+    ".cgb@ClearPalettes",
+    [
+      "ldh a, [rWBK]",
+      "push af",
+      "ld a, BANK(wBGPals2)",
+      "ldh [rWBK], a",
+      "ld hl, wBGPals2",
+      "ld bc, 16 palettes",
+      "ld a, $ff",
+      "call ByteFill",
+      "pop af",
+      "ldh [rWBK], a",
+      "ld a, TRUE",
+      "ldh [hCGBPalUpdate], a",
+      "ret",
+    ],
+    "Credits exit exact white CGB palette fill",
+  );
+  const endSpan = requireExactRoutineBlock(
+    blocks,
+    ".end@ParseCredits",
+    [
+      "ld hl, wJumptableIndex",
+      "set JUMPTABLE_EXIT_F, [hl]",
+      "ld a, 32",
+      "ld [wMusicFade], a",
+      "ld a, LOW(MUSIC_POST_CREDITS)",
+      "ld [wMusicFadeID], a",
+      "ld a, HIGH(MUSIC_POST_CREDITS)",
+      "ld [wMusicFadeID + 1], a",
+      "ret",
+    ],
+    "Credits exact post-credits music fade",
+  );
+  const scriptSpan = findLabelSpan(script, "CreditsScript");
+  const constantsSpan = loadedSourceLineSpan(constants, 1, constants.lines.length);
+  const stringsSpan = findLabelSpan(strings, "CreditsStringsPointers");
+  const skipThresholdToken = blocks.get("Credits_HandleBButton")!.instructions[8]!.args[0]!;
+  if (!/^\$[0-9a-f]+$/i.test(skipThresholdToken)) {
+    throw new Error(`Credits B-button skip threshold is not a byte literal: ${skipThresholdToken}`);
+  }
+  const skipPositionThreshold = Number.parseInt(skipThresholdToken.slice(1), 16);
+  return {
+    id: "credits_source_data",
+    source_entry: "Credits",
+    accepted_call_forms: ["call"],
+    result: {
+      name: "credits_completion",
+      storage: "none",
+      domain: [{
+        id: "completed",
+        value: null,
+        condition: { kind: "ordinary_return" },
+        source_span: creditsSpan,
+      }],
+    },
+    phases: [{
+      id: "credits",
+      source_span: creditsSpan,
+      operations: [{
+        op: "credits_source_data",
+        script_source: script.lines.join("\n"),
+        constants_source: constants.lines.join("\n"),
+        strings_source: strings.lines.join("\n"),
+        skip_position_threshold: skipPositionThreshold,
+        end_music_fade: { target: "MUSIC_POST_CREDITS", rate: 32 },
+        exit_clear: { frames: 4, cgb_palette_fill_byte: 0xff },
+        menu_state: {
+          register: "hInMenu",
+          value: 1,
+          restored_on_return: false,
+        },
+        source_span: scriptSpan,
+        implementation_source_spans: [creditsSpan, skipHandlerSpan, menuStateSpan, exitSpan, clearPalettesSpan, clearCgbPalettesSpan, waitBgMapSpan, endSpan, constantsSpan, stringsSpan],
+      }],
+    }],
+    loop: {
+      source_span: creditsSpan,
+      order: ["input", "jumptable", "frame"],
+      input: { buttons: ["A", "B"] },
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: { op: "delay_frame", frames: 1, source_span: creditsSpan },
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [],
+    audio: [{
+      id: "MUSIC_CREDITS",
+      kind: "music",
+      source_span: loadedSourceLineSpan(credits, 339, 342),
+    }, {
+      id: "MUSIC_POST_CREDITS",
+      kind: "music",
+      source_span: endSpan,
+    }],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: {
+      id: "runtime_title_screen.credits_source_data",
+      required: true,
+    },
+    source_span: creditsSpan,
+    implementation_source_spans: [scriptSpan, skipHandlerSpan, menuStateSpan, exitSpan, clearPalettesSpan, clearCgbPalettesSpan, waitBgMapSpan, endSpan, constantsSpan, stringsSpan],
+  };
+}
+
 const RUNTIME_PRESENTATION_SOURCE_SUBPROGRAM_BOUNDARIES: Record<
   string,
   RuntimePresentationSourceSubprogramBoundary
@@ -27598,6 +30253,7 @@ export function buildRuntimeTitlePresentationProgram(
   options: BuildRuntimeTitlePresentationProgramOptions,
 ): RuntimePresentationProgram {
   const checkpoint = analyzeRuntimeTitlePresentationEmission(options);
+  checkpoint.subprograms.push(certifyCreditsSourceDataSubprogram(options));
   const frontier = checkpoint.frontier;
   if (frontier) {
     const location =
@@ -27710,6 +30366,11 @@ export function buildRuntimeTitlePresentationProgram(
         if (typeof entry === "string") textById.set(entry, operation.source_span);
       }
     }
+    if (operation.op === "initialize_clock" && Array.isArray(operation.text_entries)) {
+      for (const entry of operation.text_entries) {
+        if (typeof entry === "string") textById.set(entry, operation.source_span);
+      }
+    }
   };
   for (const block of Object.values(checkpoint.blocks)) {
     block.operations.forEach(collectText);
@@ -27717,13 +30378,58 @@ export function buildRuntimeTitlePresentationProgram(
   for (const subprogram of checkpoint.subprograms) {
     for (const phase of subprogram.phases) phase.operations.forEach(collectText);
   }
+  const textSources = TEXT_SOURCE_FILES.map((file) => loadSource(file, options));
+  const textBlocks = parseAsmBlocks(textSources);
+  const resolveTextCommands = (id: string) => {
+    const wrapper = textBlocks.get(id) ?? textBlocks.get(`_${id}`);
+    if (!wrapper) {
+      throw new Error(`Runtime presentation text ${id} has no source body`);
+    }
+    const farTargets = wrapper.instructions
+      .filter((instruction) => instruction.opcode === "text_far")
+      .map((instruction) => instruction.args[0]);
+    if (farTargets.length > 1 || farTargets.some((target) => !target)) {
+      throw new Error(
+        `Runtime presentation text ${id} must have at most one exact text_far target`,
+      );
+    }
+    const body = farTargets.length === 1
+      ? textBlocks.get(farTargets[0]!)
+      : wrapper;
+    if (!body) {
+      throw new Error(
+        `Runtime presentation text ${id} has missing text_far body ${farTargets[0]}`,
+      );
+    }
+    const commands = body.instructions
+      .filter((instruction) =>
+        RUNTIME_PRESENTATION_TEXT_COMMAND_OPCODES.has(instruction.opcode),
+      )
+      .map((instruction) => ({
+        command: instruction.opcode,
+        args: instruction.args,
+        source_span: instruction.source_span,
+      }));
+    const terminalIndex = commands.findIndex((command) =>
+      ["text_end", "prompt", "done"].includes(command.command),
+    );
+    if (terminalIndex >= 0) commands.splice(terminalIndex + 1);
+    if (commands.length === 0) {
+      throw new Error(`Runtime presentation text ${id} resolves to no text commands`);
+    }
+    return commands;
+  };
   const program: RuntimePresentationProgram = {
     schema_version: 1,
     entrypoints: checkpoint.entrypoints,
     blocks: checkpoint.blocks,
     resources,
     audio,
-    text: [...textById].map(([id, source_span]) => ({ id, source_span })),
+    text: [...textById].map(([id, source_span]) => ({
+      id,
+      source_span,
+      commands: resolveTextCommands(id),
+    })),
     host_effects: checkpoint.host_effects,
     subprograms: checkpoint.subprograms,
   };
@@ -27830,6 +30536,8 @@ const REQUIRED_AUDIO: ReadonlyArray<{
   { id: "MUSIC_MAIN_MENU", kind: "music" },
   { id: "MUSIC_CRYSTAL_OPENING", kind: "music" },
   { id: "MUSIC_ROUTE_30", kind: "music" },
+  { id: "MUSIC_CREDITS", kind: "music" },
+  { id: "MUSIC_POST_CREDITS", kind: "music" },
   { id: "MUSIC_MOBILE_ADAPTER_MENU", kind: "music" },
   { id: "SFX_TITLE_SCREEN_ENTRANCE", kind: "sound_effect" },
   { id: "SFX_GAME_FREAK_PRESENTS", kind: "sound_effect" },
@@ -27851,12 +30559,35 @@ const REQUIRED_AUDIO: ReadonlyArray<{
 const TEXT_SOURCE_FILES = [
   "engine/menus/intro_menu.asm",
   "engine/menus/main_menu.asm",
+  "engine/menus/save.asm",
   "engine/menus/delete_save.asm",
   "engine/rtc/reset_password.asm",
   "engine/rtc/restart_clock.asm",
   "engine/rtc/timeset.asm",
   "engine/menus/init_gender.asm",
+  "data/text/common_1.asm",
+  "data/text/common_2.asm",
+  "data/text/common_3.asm",
 ] as const;
+
+const RUNTIME_PRESENTATION_TEXT_COMMAND_OPCODES = new Set([
+  "text",
+  "text_start",
+  "text_block",
+  "text_ram",
+  "text_decimal",
+  "text_today",
+  "text_pause",
+  "text_low",
+  "text_promptbutton",
+  "text_end",
+  "line",
+  "next",
+  "para",
+  "cont",
+  "prompt",
+  "done",
+]);
 
 const normalizeAsmLine = (line: string): string => {
   let inQuotes = false;
@@ -28401,7 +31132,7 @@ export function assertRuntimePresentationProgram(
   for (const [index, candidate] of (text as unknown[]).entries()) {
     const reference = exactKeys(
       candidate,
-      ["id", "source_span"],
+      ["id", "source_span", "commands"],
       `text ${index}`,
     );
     if (typeof reference.id !== "string" || textIds.has(reference.id)) {
@@ -28411,6 +31142,32 @@ export function assertRuntimePresentationProgram(
     }
     textIds.add(reference.id);
     assertSpan(reference.source_span, `text ${reference.id} source_span`);
+    if (!Array.isArray(reference.commands) || reference.commands.length === 0) {
+      throw new Error(`Runtime presentation text ${reference.id} has no commands`);
+    }
+    for (const [commandIndex, candidateCommand] of (
+      reference.commands as unknown[]
+    ).entries()) {
+      const command = exactKeys(
+        candidateCommand,
+        ["command", "args", "source_span"],
+        `text ${reference.id} command ${commandIndex}`,
+      );
+      if (
+        typeof command.command !== "string" ||
+        !RUNTIME_PRESENTATION_TEXT_COMMAND_OPCODES.has(command.command) ||
+        !Array.isArray(command.args) ||
+        !(command.args as unknown[]).every((argument) => typeof argument === "string")
+      ) {
+        throw new Error(
+          `Runtime presentation text ${reference.id} command ${commandIndex} is invalid`,
+        );
+      }
+      assertSpan(
+        command.source_span,
+        `text ${reference.id} command ${commandIndex} source_span`,
+      );
+    }
   }
   const hostEffectIds = new Set<string>();
   const hostEffectResults = new Map<string, string>();

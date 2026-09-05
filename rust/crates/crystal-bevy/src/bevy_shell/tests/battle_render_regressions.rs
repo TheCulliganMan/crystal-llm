@@ -81,6 +81,123 @@ fn battle_dialogue_uses_player_input_drains_once_and_returns_menu_control() {
 }
 
 #[test]
+fn replacement_text_uses_send_out_mon_texts_quarter_max_hp_divisor() {
+    let runtime_shell = route36_battle_shell_for_render_regression();
+    let mut snapshot = runtime_shell.shell.snapshot().expect("battle snapshot");
+    let battle = snapshot.battle.as_mut().expect("active battle");
+    battle.enemy_pokemon.hp = 2;
+    battle.enemy_pokemon.max_hp = 21;
+    let nickname = snapshot.party.slots[0].pokemon.nickname.clone();
+
+    assert_eq!(
+        super::visible_player_send_out_message(&snapshot, 0, false).expect("send-out message"),
+        format!("Go for it, {nickname}!"),
+    );
+}
+
+#[test]
+fn replacement_text_rejects_send_out_mon_texts_nonterminating_divisor() {
+    let runtime_shell = route36_battle_shell_for_render_regression();
+    let mut snapshot = runtime_shell.shell.snapshot().expect("battle snapshot");
+    let battle = snapshot.battle.as_mut().expect("active battle");
+    battle.enemy_pokemon.hp = 1;
+    battle.enemy_pokemon.max_hp = 3;
+
+    let error = super::visible_player_send_out_message(&snapshot, 0, false)
+        .expect_err("the cartridge divide would never terminate");
+    assert!(
+        error
+            .to_string()
+            .contains("would not terminate with enemy max HP 3"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn link_replacement_text_uses_go_mon_text_without_reading_enemy_hp() {
+    let runtime_shell = route36_battle_shell_for_render_regression();
+    let mut snapshot = runtime_shell.shell.snapshot().expect("battle snapshot");
+    snapshot.link_session.link_mode = 1;
+    let battle = snapshot.battle.as_mut().expect("active battle");
+    battle.enemy_pokemon.hp = 1;
+    battle.enemy_pokemon.max_hp = 3;
+    let nickname = snapshot.party.slots[0].pokemon.nickname.clone();
+
+    assert_eq!(
+        super::visible_player_send_out_message(&snapshot, 0, false).expect("send-out message"),
+        format!("Go! {nickname}!"),
+    );
+}
+
+#[test]
+fn initial_link_send_out_text_still_uses_enemy_hp() {
+    let runtime_shell = route36_battle_shell_for_render_regression();
+    let mut snapshot = runtime_shell.shell.snapshot().expect("battle snapshot");
+    snapshot.link_session.link_mode = 1;
+    let battle = snapshot.battle.as_mut().expect("active battle");
+    battle.enemy_pokemon.hp = 2;
+    battle.enemy_pokemon.max_hp = 21;
+    let nickname = snapshot.party.slots[0].pokemon.nickname.clone();
+
+    assert_eq!(
+        super::visible_player_send_out_message(&snapshot, 0, true).expect("send-out message"),
+        format!("Go for it, {nickname}!"),
+    );
+}
+
+#[test]
+fn withdrawal_text_uses_withdraw_mon_texts_quarter_max_hp_divisor() {
+    let mut runtime_shell = route36_battle_shell_for_render_regression();
+    runtime_shell.battle_enemy_hp_at_player_send_out = Some(20);
+    let mut snapshot = runtime_shell.shell.snapshot().expect("battle snapshot");
+    let battle = snapshot.battle.as_mut().expect("active battle");
+    battle.enemy_pokemon.hp = 14;
+    battle.enemy_pokemon.max_hp = 21;
+
+    assert_eq!(
+        super::visible_player_withdraw_message(&runtime_shell, &snapshot, "CYNDAQUIL")
+            .expect("withdrawal message"),
+        "CYNDAQUIL, OK! Come back!",
+    );
+}
+
+#[test]
+fn withdrawal_text_uses_wrapping_damage_and_the_low_quotient_byte() {
+    let mut runtime_shell = route36_battle_shell_for_render_regression();
+    runtime_shell.battle_enemy_hp_at_player_send_out = Some(10);
+    let mut snapshot = runtime_shell.shell.snapshot().expect("battle snapshot");
+    let battle = snapshot.battle.as_mut().expect("active battle");
+    battle.enemy_pokemon.hp = 11;
+    battle.enemy_pokemon.max_hp = 21;
+
+    // (10 - 11) wraps to 65535; (65535 * 25) / (21 >> 2) has low byte 251.
+    assert_eq!(
+        super::visible_player_withdraw_message(&runtime_shell, &snapshot, "CYNDAQUIL")
+            .expect("withdrawal message"),
+        "CYNDAQUIL, good! Come back!",
+    );
+}
+
+#[test]
+fn withdrawal_text_rejects_withdraw_mon_texts_nonterminating_divisor() {
+    let mut runtime_shell = route36_battle_shell_for_render_regression();
+    runtime_shell.battle_enemy_hp_at_player_send_out = Some(2);
+    let mut snapshot = runtime_shell.shell.snapshot().expect("battle snapshot");
+    let battle = snapshot.battle.as_mut().expect("active battle");
+    battle.enemy_pokemon.hp = 1;
+    battle.enemy_pokemon.max_hp = 3;
+
+    let error = super::visible_player_withdraw_message(&runtime_shell, &snapshot, "CYNDAQUIL")
+        .expect_err("the cartridge divide would never terminate");
+    assert!(
+        error
+            .to_string()
+            .contains("would not terminate with enemy max HP 3"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn battle_animation_loop_count_matches_asm_body_passes() {
     let key = ("BattleAnim_Test".to_string(), 4);
     let mut loops = std::collections::BTreeMap::new();
@@ -1595,6 +1712,8 @@ fn b_cancels_visible_evolution_before_success_and_restores_exact_pokemon() {
             defer_level_evolution: false,
         });
         state.sync_party_from_storage();
+        assert!(!state.pokedex.seen_species.contains("DRAGONITE"));
+        assert!(!state.pokedex.caught_species.contains("DRAGONITE"));
     }
     let evolving = "What? DRAGONAIR is evolving!".to_string();
     let evolved = "Congratulations! DRAGONAIR evolved into DRAGONITE!".to_string();
@@ -1628,6 +1747,7 @@ fn b_cancels_visible_evolution_before_success_and_restores_exact_pokemon() {
             evolved_message: evolved.clone(),
             pending_move_messages: vec![pending.clone()],
             report,
+            accepted: false,
         });
     finish_current_battle_message_for_regression(&mut runtime_shell);
 
@@ -1662,6 +1782,255 @@ fn b_cancels_visible_evolution_before_success_and_restores_exact_pokemon() {
     assert!(runtime_shell.battle_evolution_cancellations.is_empty());
     assert!(runtime_shell.battle_evolution_cries.is_empty());
     assert!(runtime_shell.battle_sounds_after_messages.is_empty());
+    assert!(
+        !runtime_shell
+            .shell
+            .session()
+            .state
+            .pokedex
+            .seen_species
+            .contains("DRAGONITE")
+    );
+    assert!(
+        !runtime_shell
+            .shell
+            .session()
+            .state
+            .pokedex
+            .caught_species
+            .contains("DRAGONITE")
+    );
+}
+
+#[test]
+fn completed_visible_evolution_registers_the_target_species() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell
+        .shell
+        .add_party_pokemon(
+            "DRAGONAIR",
+            55,
+            None,
+            None,
+            "EVOLUTION_POKEDEX_TEST",
+            1,
+            Dv::from_non_hp(10, 11, 12, 13),
+        )
+        .expect("add Dragonair");
+    let dragonite = runtime_shell.runtime.data.pokemon["DRAGONITE"].clone();
+    {
+        let state = runtime_shell.shell.session_mut().state_mut();
+        state.storage.party.pokemon[0]
+            .as_mut()
+            .expect("Dragonair in party")
+            .species = dragonite;
+        state.sync_party_from_storage();
+    }
+
+    record_visible_completed_evolution(&mut runtime_shell, 0)
+        .expect("commit completed evolution Pokedex state");
+
+    let pokedex = &runtime_shell.shell.session().state.pokedex;
+    assert!(pokedex.seen_species.contains("DRAGONITE"));
+    assert!(pokedex.caught_species.contains("DRAGONITE"));
+
+    runtime_shell.shell.session_mut().state_mut().pokedex = Default::default();
+    let intro = "DRAGONAIR is trying to learn WING ATTACK.".to_string();
+    runtime_shell
+        .battle_evolution_cancellations
+        .push_back(VisibleEvolutionCancellation {
+            party_index: 0,
+            trigger_message: "What? DRAGONAIR is evolving!".to_string(),
+            evolved_message: "Congratulations! DRAGONAIR evolved into DRAGONITE!".to_string(),
+            pending_move_messages: vec![intro],
+            report: EvolutionReport {
+                target_species: Some("DRAGONITE".to_string()),
+                events: Vec::new(),
+                pending_move_learns: vec![crate::core::models::LearnedMove {
+                    name: "WING_ATTACK".to_string(),
+                    current_pp: 35,
+                    pp_ups: 0,
+                }],
+                cancel_snapshot: None,
+            },
+            accepted: true,
+        });
+    complete_visible_accepted_evolution_after_special_boundary(
+        &mut runtime_shell,
+        "MoveForgotPoofText",
+    )
+    .expect("intermediate replacement boundary");
+    assert!(
+        !runtime_shell
+            .shell
+            .session()
+            .state
+            .pokedex
+            .seen_species
+            .contains("DRAGONITE")
+    );
+    complete_visible_accepted_evolution_after_special_boundary(
+        &mut runtime_shell,
+        "LearnedMoveText",
+    )
+    .expect("learned move completes evolution");
+    assert!(
+        runtime_shell
+            .shell
+            .session()
+            .state
+            .pokedex
+            .caught_species
+            .contains("DRAGONITE")
+    );
+}
+
+#[test]
+fn accepted_visible_evolution_registers_only_after_the_evolved_text() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell
+        .shell
+        .add_party_pokemon(
+            "DRAGONAIR",
+            55,
+            None,
+            None,
+            "EVOLUTION_POKEDEX_TIMING_TEST",
+            1,
+            Dv::from_non_hp(10, 11, 12, 13),
+        )
+        .expect("add Dragonair");
+    let original = runtime_shell.shell.session().state.storage.party.pokemon[0]
+        .as_ref()
+        .expect("Dragonair in party")
+        .clone();
+    let dragonite = runtime_shell.runtime.data.pokemon["DRAGONITE"].clone();
+    runtime_shell.shell.session_mut().state_mut().storage.party.pokemon[0]
+        .as_mut()
+        .expect("Dragonair in party")
+        .species = dragonite;
+    let evolving = "What? DRAGONAIR is evolving!".to_string();
+    let evolved = "Congratulations! DRAGONAIR evolved into DRAGONITE!".to_string();
+    runtime_shell.battle_messages = [evolving.clone(), evolved.clone()].into_iter().collect();
+    runtime_shell
+        .battle_evolution_cancellations
+        .push_back(VisibleEvolutionCancellation {
+            party_index: 0,
+            trigger_message: evolving,
+            evolved_message: evolved,
+            pending_move_messages: Vec::new(),
+            report: EvolutionReport {
+                target_species: Some("DRAGONITE".to_string()),
+                events: Vec::new(),
+                pending_move_learns: Vec::new(),
+                cancel_snapshot: Some(Box::new(original)),
+            },
+            accepted: false,
+        });
+
+    finish_current_battle_message_for_regression(&mut runtime_shell);
+    press_visible_a_button(&mut runtime_shell).expect("accept evolution");
+
+    assert!(runtime_shell.battle_evolution_cancellations[0].accepted);
+    assert!(
+        !runtime_shell
+            .shell
+            .session()
+            .state
+            .pokedex
+            .seen_species
+            .contains("DRAGONITE")
+    );
+
+    runtime_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .sync_party_from_storage();
+    finish_current_battle_message_for_regression(&mut runtime_shell);
+    press_visible_a_button(&mut runtime_shell).expect("dismiss evolved text");
+
+    assert!(runtime_shell.battle_evolution_cancellations.is_empty());
+    let pokedex = &runtime_shell.shell.session().state.pokedex;
+    assert!(pokedex.seen_species.contains("DRAGONITE"));
+    assert!(pokedex.caught_species.contains("DRAGONITE"));
+}
+
+#[test]
+fn accepted_evolution_with_a_move_registers_at_the_move_result_boundary() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell
+        .shell
+        .add_party_pokemon(
+            "DRAGONAIR",
+            55,
+            None,
+            None,
+            "EVOLUTION_MOVE_POKEDEX_TIMING_TEST",
+            1,
+            Dv::from_non_hp(10, 11, 12, 13),
+        )
+        .expect("add Dragonair");
+    let original = runtime_shell.shell.session().state.storage.party.pokemon[0]
+        .as_ref()
+        .expect("Dragonair in party")
+        .clone();
+    let dragonite = runtime_shell.runtime.data.pokemon["DRAGONITE"].clone();
+    {
+        let state = runtime_shell.shell.session_mut().state_mut();
+        state.storage.party.pokemon[0]
+            .as_mut()
+            .expect("Dragonair in party")
+            .species = dragonite;
+        state.sync_party_from_storage();
+    }
+    let intro = "DRAGONAIR is trying to learn WING ATTACK.".to_string();
+    let result = "DRAGONAIR did not learn WING ATTACK.".to_string();
+    runtime_shell
+        .battle_evolution_cancellations
+        .push_back(VisibleEvolutionCancellation {
+            party_index: 0,
+            trigger_message: "What? DRAGONAIR is evolving!".to_string(),
+            evolved_message: "Congratulations! DRAGONAIR evolved into DRAGONITE!".to_string(),
+            pending_move_messages: vec![intro.clone(), result.clone()],
+            report: EvolutionReport {
+                target_species: Some("DRAGONITE".to_string()),
+                events: Vec::new(),
+                pending_move_learns: vec![crate::core::models::LearnedMove {
+                    name: "WING_ATTACK".to_string(),
+                    current_pp: 35,
+                    pp_ups: 0,
+                }],
+                cancel_snapshot: Some(Box::new(original)),
+            },
+            accepted: true,
+        });
+
+    complete_visible_accepted_evolution_after_battle_message(
+        &mut runtime_shell,
+        Some(&intro),
+    )
+    .expect("intro is not completion");
+    assert!(
+        !runtime_shell
+            .shell
+            .session()
+            .state
+            .pokedex
+            .seen_species
+            .contains("DRAGONITE")
+    );
+
+    complete_visible_accepted_evolution_after_battle_message(
+        &mut runtime_shell,
+        Some(&result),
+    )
+    .expect("result completes evolution");
+
+    assert!(runtime_shell.battle_evolution_cancellations.is_empty());
+    let pokedex = &runtime_shell.shell.session().state.pokedex;
+    assert!(pokedex.seen_species.contains("DRAGONITE"));
+    assert!(pokedex.caught_species.contains("DRAGONITE"));
 }
 
 #[test]

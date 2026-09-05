@@ -3842,8 +3842,8 @@ fn mr_pokemon_visit_prints_every_asm_page_once_then_arms_the_rival_story() {
         "Oak/Mr. Pokemon scene did not arm SPECIALCALL_ROBBED"
     );
     assert_eq!(
-        state.last_spawn_identifier,
-        Some(15),
+        state.last_spawn_map_constant.as_deref(),
+        Some("CHERRYGROVE_CITY"),
         "Mr. Pokemon did not set SPAWN_CHERRYGROVE"
     );
     // Reproduce the real stale-accumulator failure without fabricating a

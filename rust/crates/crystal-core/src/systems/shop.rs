@@ -700,7 +700,6 @@ mod tests {
             battle_capture_ball: None,
             battle_focus_energy: None,
             battle_stat_drop_guard: None,
-            battle_stat_drop_guard_turns: None,
             confusion_heal: None,
             repel_steps: None,
             escape_rope_mode: None,

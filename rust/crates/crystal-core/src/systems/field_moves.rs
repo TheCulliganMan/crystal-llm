@@ -17,6 +17,13 @@ use crate::world::session::{
     OverworldObjectCoordinateError, OverworldSession, WarpTransition, warp_tile_position_checked,
 };
 
+pub const ESCAPE_ROPE_MODE_DIG_WARP: &str = "DIG_WARP";
+pub const ESCAPE_ROPE_KABUTO_CHAMBER_MAP: &str = "RuinsOfAlphKabutoChamber";
+pub const ESCAPE_ROPE_KABUTO_CHAMBER_FLAG: &str = "EVENT_WALL_OPENED_IN_KABUTO_CHAMBER";
+pub const FLASH_AERODACTYL_CHAMBER_MAP: &str = "RuinsOfAlphAerodactylChamber";
+pub const FLASH_AERODACTYL_CHAMBER_FLAG: &str = "EVENT_WALL_OPENED_IN_AERODACTYL_CHAMBER";
+pub const FLASH_DARK_MAP_PALETTE: &str = "dark";
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMoveCatalog {
@@ -590,10 +597,12 @@ fn validate_field_move_catalog_pack_tokens(catalog: &FieldMoveCatalog) -> Result
         "field_moves.escape_rope.item_id",
         &catalog.escape_rope.item_id,
     )?;
-    validate_exact_field_move_token(
-        "field_moves.escape_rope.escape_rope_mode",
-        &catalog.escape_rope.escape_rope_mode,
-    )?;
+    if catalog.escape_rope.escape_rope_mode != ESCAPE_ROPE_MODE_DIG_WARP {
+        return Err(format!(
+            "field_moves.escape_rope.escape_rope_mode must be {ESCAPE_ROPE_MODE_DIG_WARP}, found {}",
+            catalog.escape_rope.escape_rope_mode
+        ));
+    }
     validate_item_rule_pack_tokens("field_moves.bicycle", &catalog.bicycle)?;
     validate_item_rule_pack_tokens("field_moves.itemfinder", &catalog.itemfinder)?;
     validate_item_rule_pack_tokens("field_moves.squirtbottle", &catalog.squirtbottle)?;
@@ -805,7 +814,7 @@ fn collect_escape_item_rule_issues(
     issues: &mut Vec<FieldMoveCatalogIssue>,
 ) {
     let invalid_item_id = !is_exact_field_move_token(&rule.item_id);
-    let invalid_escape_rope_mode = !is_exact_field_move_token(&rule.escape_rope_mode);
+    let invalid_escape_rope_mode = rule.escape_rope_mode != ESCAPE_ROPE_MODE_DIG_WARP;
     if invalid_item_id {
         issues.push(FieldMoveCatalogIssue::InvalidEscapeItemId);
     }
@@ -1037,6 +1046,11 @@ pub enum FieldMoveError {
         region: String,
         badge_index: usize,
     },
+    #[error("FLASH cannot be used on map {map_name} with palette {palette:?}")]
+    FlashMapIsNotDark {
+        map_name: String,
+        palette: Option<String>,
+    },
     #[error("field escape item {item_id} expected configured item id {expected_item_id}")]
     InvalidEscapeItemId {
         item_id: String,
@@ -1052,8 +1066,15 @@ pub enum FieldMoveError {
     },
     #[error("field repel item {item_id} is missing repel_steps")]
     MissingRepelItemSteps { item_id: String },
-    #[error("field repel item {item_id} has invalid repel_steps 0")]
-    InvalidRepelItemSteps { item_id: String },
+    #[error("field repel item {item_id} has invalid repel_steps {steps}")]
+    InvalidRepelItemSteps { item_id: String, steps: u16 },
+    #[error(
+        "field repel item {item_id} cannot replace the active repel with {steps_remaining} steps remaining"
+    )]
+    RepelAlreadyActive {
+        item_id: String,
+        steps_remaining: u16,
+    },
     #[error("saved active_repel_item {item_id} is missing from compiled pack items")]
     MissingSavedActiveRepelItem { item_id: String },
     #[error(
@@ -1583,6 +1604,12 @@ pub fn validate_field_escape_item(
     let rule = &catalog.escape_rope;
     require_rule_field(&rule.item_id, "item_id")?;
     require_rule_field(&rule.escape_rope_mode, "escape_rope_mode")?;
+    if rule.escape_rope_mode != ESCAPE_ROPE_MODE_DIG_WARP {
+        return Err(FieldMoveError::InvalidRuleField {
+            field: "escape_rope_mode".to_string(),
+            value: rule.escape_rope_mode.clone(),
+        });
+    }
     if item.script_name != rule.item_id {
         return Err(FieldMoveError::InvalidEscapeItemId {
             item_id: item.script_name.clone(),
@@ -1606,9 +1633,10 @@ pub fn validate_repel_item(catalog: &FieldMoveCatalog, item: &Item) -> Result<u1
         .ok_or_else(|| FieldMoveError::MissingRepelItemSteps {
             item_id: item.script_name.clone(),
         })?;
-    if steps == 0 {
+    if !matches!(steps, 100 | 200 | 250) {
         return Err(FieldMoveError::InvalidRepelItemSteps {
             item_id: item.script_name.clone(),
+            steps,
         });
     }
     Ok(steps)
@@ -1638,19 +1666,28 @@ pub fn apply_repel_item_use(
     state: &mut GameState,
     item_id: impl Into<String>,
     steps: u16,
-) -> RepelItemUseOutcome {
+) -> Result<RepelItemUseOutcome, FieldMoveError> {
     let item_id = item_id.into();
+    if !matches!(steps, 100 | 200 | 250) {
+        return Err(FieldMoveError::InvalidRepelItemSteps { item_id, steps });
+    }
+    if state.repel_steps_remaining > 0 {
+        return Err(FieldMoveError::RepelAlreadyActive {
+            item_id,
+            steps_remaining: state.repel_steps_remaining,
+        });
+    }
     let repel_steps_before = state.repel_steps_remaining;
     let active_repel_item_before = state.active_repel_item.clone();
     state.repel_steps_remaining = steps;
     state.active_repel_item = Some(item_id.clone());
-    RepelItemUseOutcome {
+    Ok(RepelItemUseOutcome {
         item_id,
         repel_steps_before,
         repel_steps_after: state.repel_steps_remaining,
         active_repel_item_before,
         active_repel_item_after: state.active_repel_item.clone(),
-    }
+    })
 }
 
 pub fn validate_bicycle_item(
@@ -1751,6 +1788,39 @@ pub fn is_teleport_source_environment(environment: &str) -> bool {
     matches!(environment, "ROUTE" | "TOWN")
 }
 
+pub fn apply_escape_rope_chamber_effect(
+    state: &mut GameState,
+    source_map: &str,
+) -> Result<bool, FieldMoveError> {
+    if source_map != ESCAPE_ROPE_KABUTO_CHAMBER_MAP {
+        return Ok(false);
+    }
+    state
+        .flags
+        .set_event_flag(ESCAPE_ROPE_KABUTO_CHAMBER_FLAG, true)?;
+    Ok(true)
+}
+
+pub fn apply_flash_map_effect(
+    state: &mut GameState,
+    source_map: &str,
+    palette: Option<&str>,
+) -> Result<bool, FieldMoveError> {
+    if source_map == FLASH_AERODACTYL_CHAMBER_MAP {
+        state
+            .flags
+            .set_event_flag(FLASH_AERODACTYL_CHAMBER_FLAG, true)?;
+        return Ok(true);
+    }
+    if palette == Some(FLASH_DARK_MAP_PALETTE) {
+        return Ok(false);
+    }
+    Err(FieldMoveError::FlashMapIsNotDark {
+        map_name: source_map.to_string(),
+        palette: palette.map(str::to_string),
+    })
+}
+
 pub fn apply_dig_warp_memory_for_transition(
     state: &mut GameState,
     transition: &WarpTransition,
@@ -1789,12 +1859,12 @@ pub fn saved_dig_warp_destination(
             .ok_or_else(|| FieldMoveError::MissingSavedDigWarpMap {
                 context: context.to_string(),
             })?;
-    let warp_index =
-        state
-            .dig_warp_index
-            .ok_or_else(|| FieldMoveError::MissingSavedDigWarpIndex {
-                context: context.to_string(),
-            })?;
+    let warp_index = state
+        .dig_warp_index
+        .filter(|index| *index != 0)
+        .ok_or_else(|| FieldMoveError::MissingSavedDigWarpIndex {
+            context: context.to_string(),
+        })?;
     let warp = warps
         .iter()
         .find(|warp| warp.index == warp_index)
@@ -2441,7 +2511,6 @@ mod tests {
             battle_capture_ball: None,
             battle_focus_energy: None,
             battle_stat_drop_guard: None,
-            battle_stat_drop_guard_turns: None,
             confusion_heal: None,
             repel_steps: None,
             escape_rope_mode: mode.map(str::to_string),
@@ -2482,7 +2551,6 @@ mod tests {
             battle_capture_ball: None,
             battle_focus_energy: None,
             battle_stat_drop_guard: None,
-            battle_stat_drop_guard_turns: None,
             confusion_heal: None,
             repel_steps: steps,
             escape_rope_mode: None,
@@ -3287,6 +3355,14 @@ mod tests {
     fn saved_dig_warp_destination_requires_exact_saved_map_and_warp_index() {
         let warps = vec![
             WarpEvent {
+                index: 0,
+                x: 1,
+                y: 1,
+                target_map_constant: "DESTINATION".to_string(),
+                target_map: "DESTINATION".to_string(),
+                target_warp_id: 1,
+            },
+            WarpEvent {
                 index: 1,
                 x: 5,
                 y: 7,
@@ -3320,6 +3396,14 @@ mod tests {
             })
         );
 
+        state.dig_warp_index = Some(0);
+        assert_eq!(
+            saved_dig_warp_destination(&state, "DIG field move", &warps),
+            Err(FieldMoveError::MissingSavedDigWarpIndex {
+                context: "DIG field move".to_string(),
+            })
+        );
+
         state.dig_warp_index = Some(2);
         assert_eq!(
             saved_dig_warp_destination(&state, "DIG field move", &warps),
@@ -3338,6 +3422,57 @@ mod tests {
                 warp_index: 3,
                 tile: TilePosition::new(9, 11),
             })
+        );
+    }
+
+    #[test]
+    fn escape_rope_opens_only_the_kabuto_chamber_wall() {
+        let mut state = GameState::default();
+
+        assert!(!apply_escape_rope_chamber_effect(&mut state, "DarkCave").expect("other cave"));
+        assert!(
+            !state
+                .flags
+                .is_event_flag_set(ESCAPE_ROPE_KABUTO_CHAMBER_FLAG)
+                .expect("Kabuto wall flag")
+        );
+
+        assert!(
+            apply_escape_rope_chamber_effect(&mut state, ESCAPE_ROPE_KABUTO_CHAMBER_MAP)
+                .expect("Kabuto chamber")
+        );
+        assert!(
+            state
+                .flags
+                .is_event_flag_set(ESCAPE_ROPE_KABUTO_CHAMBER_FLAG)
+                .expect("Kabuto wall flag")
+        );
+    }
+
+    #[test]
+    fn flash_requires_darkness_except_in_the_aerodactyl_chamber() {
+        let mut state = GameState::default();
+
+        assert_eq!(
+            apply_flash_map_effect(&mut state, "UnionCave1F", Some("nite")),
+            Err(FieldMoveError::FlashMapIsNotDark {
+                map_name: "UnionCave1F".to_string(),
+                palette: Some("nite".to_string()),
+            })
+        );
+        assert!(
+            !apply_flash_map_effect(&mut state, "DarkCaveVioletEntrance", Some("dark"))
+                .expect("dark palette permits Flash")
+        );
+        assert!(
+            apply_flash_map_effect(&mut state, FLASH_AERODACTYL_CHAMBER_MAP, Some("nite"))
+                .expect("Aerodactyl chamber permits Flash")
+        );
+        assert!(
+            state
+                .flags
+                .is_event_flag_set(FLASH_AERODACTYL_CHAMBER_FLAG)
+                .expect("Aerodactyl wall flag")
         );
     }
 
@@ -3385,13 +3520,24 @@ mod tests {
     }
 
     #[test]
-    fn escape_rope_item_uses_catalog_item_id_and_mode_without_effect_join() {
+    fn escape_rope_item_uses_catalog_item_id_with_exact_dig_warp_mode() {
         let mut catalog = catalog();
         catalog.escape_rope.item_id = "MOD_ESCAPE_ROPE".to_string();
         catalog.escape_rope.escape_rope_mode = "MOD_WARP".to_string();
 
+        let mut unsupported_item = escape_item("UNRELATED_EFFECT", Some("MOD_WARP"));
+        unsupported_item.script_name = "MOD_ESCAPE_ROPE".to_string();
+        assert_eq!(
+            validate_field_escape_item(&catalog, &unsupported_item),
+            Err(FieldMoveError::InvalidRuleField {
+                field: "escape_rope_mode".to_string(),
+                value: "MOD_WARP".to_string(),
+            })
+        );
+
+        catalog.escape_rope.escape_rope_mode = "DIG_WARP".to_string();
         let wrong_item_id =
-            validate_field_escape_item(&catalog, &escape_item("ESCAPE_ROPE", Some("MOD_WARP")))
+            validate_field_escape_item(&catalog, &escape_item("ESCAPE_ROPE", Some("DIG_WARP")))
                 .expect_err("item id comes from catalog");
         assert_eq!(
             wrong_item_id,
@@ -3401,7 +3547,7 @@ mod tests {
             }
         );
 
-        let mut mod_escape_rope = escape_item("UNRELATED_EFFECT", Some("DIG_WARP"));
+        let mut mod_escape_rope = escape_item("UNRELATED_EFFECT", Some("MOD_WARP"));
         mod_escape_rope.script_name = "MOD_ESCAPE_ROPE".to_string();
         let wrong_mode = validate_field_escape_item(&catalog, &mod_escape_rope)
             .expect_err("mode comes from catalog");
@@ -3409,14 +3555,14 @@ mod tests {
             wrong_mode,
             FieldMoveError::InvalidEscapeItemMode {
                 item_id: "MOD_ESCAPE_ROPE".to_string(),
-                mode: Some("DIG_WARP".to_string()),
-                expected_mode: "MOD_WARP".to_string(),
+                mode: Some("MOD_WARP".to_string()),
+                expected_mode: "DIG_WARP".to_string(),
             }
         );
 
-        mod_escape_rope.escape_rope_mode = Some("MOD_WARP".to_string());
+        mod_escape_rope.escape_rope_mode = Some("DIG_WARP".to_string());
         validate_field_escape_item(&catalog, &mod_escape_rope)
-            .expect("catalog item id and mode accepted");
+            .expect("catalog item id with the exact implemented mode accepted");
     }
 
     #[test]
@@ -3456,9 +3602,16 @@ mod tests {
         );
 
         assert_eq!(
-            validate_repel_item(&catalog, &repel_item("ANY_PACK_EFFECT", Some(75)))
-                .expect("repel payload accepted"),
-            75
+            validate_repel_item(&catalog, &repel_item("ANY_PACK_EFFECT", Some(75))),
+            Err(FieldMoveError::InvalidRepelItemSteps {
+                item_id: "MOD_REPEL".to_string(),
+                steps: 75,
+            })
+        );
+        assert_eq!(
+            validate_repel_item(&catalog, &repel_item("MOD_REPEL", Some(100)))
+                .expect("source Repel duration accepted"),
+            100
         );
         assert_eq!(
             validate_saved_active_repel_item(&catalog, "MOD_REPEL", None, 10),
@@ -3470,38 +3623,42 @@ mod tests {
             validate_saved_active_repel_item(
                 &catalog,
                 "MOD_REPEL",
-                Some(&repel_item("MOD_REPEL", Some(75))),
-                76,
+                Some(&repel_item("MOD_REPEL", Some(100))),
+                101,
             ),
             Err(FieldMoveError::SavedRepelStepsExceedCompiledDuration {
                 item_id: "MOD_REPEL".to_string(),
-                steps_remaining: 76,
-                compiled_steps: 75,
+                steps_remaining: 101,
+                compiled_steps: 100,
             })
         );
     }
 
     #[test]
-    fn repel_item_use_commits_exact_item_and_replaces_existing_repel_state() {
+    fn repel_item_use_rejects_an_existing_repel_without_replacing_it() {
         let mut state = GameState::default();
         state.repel_steps_remaining = 3;
         state.active_repel_item = Some("OLD_REPEL".to_string());
 
-        let outcome = apply_repel_item_use(&mut state, "MOD_REPEL", 100);
+        assert_eq!(
+            apply_repel_item_use(&mut state, "MOD_REPEL", 100)
+                .expect_err("UseRepel rejects an existing effect"),
+            FieldMoveError::RepelAlreadyActive {
+                item_id: "MOD_REPEL".to_string(),
+                steps_remaining: 3,
+            }
+        );
 
-        assert_eq!(outcome.item_id, "MOD_REPEL");
-        assert_eq!(outcome.repel_steps_before, 3);
+        assert_eq!(state.repel_steps_remaining, 3);
+        assert_eq!(state.active_repel_item, Some("OLD_REPEL".to_string()));
+
+        let mut clean = GameState::default();
+        let outcome = apply_repel_item_use(&mut clean, "MOD_REPEL", 100)
+            .expect("source Repel duration starts from zero");
+        assert_eq!(outcome.repel_steps_before, 0);
         assert_eq!(outcome.repel_steps_after, 100);
-        assert_eq!(
-            outcome.active_repel_item_before,
-            Some("OLD_REPEL".to_string())
-        );
-        assert_eq!(
-            outcome.active_repel_item_after,
-            Some("MOD_REPEL".to_string())
-        );
-        assert_eq!(state.repel_steps_remaining, 100);
-        assert_eq!(state.active_repel_item, Some("MOD_REPEL".to_string()));
+        assert_eq!(clean.repel_steps_remaining, 100);
+        assert_eq!(clean.active_repel_item, Some("MOD_REPEL".to_string()));
     }
 
     #[test]
@@ -3741,11 +3898,11 @@ mod tests {
 
         let issues = field_move_catalog_issues(&catalog, &BTreeSet::new(), &items);
 
+        assert!(issues.contains(&FieldMoveCatalogIssue::InvalidEscapeItemMode));
         assert!(
-            issues.contains(&FieldMoveCatalogIssue::UnknownEscapeItemRule {
-                item_id: "MOD_ESCAPE_ROPE".to_string(),
-                escape_rope_mode: "MOD_WARP".to_string(),
-            })
+            !issues
+                .iter()
+                .any(|issue| matches!(issue, FieldMoveCatalogIssue::UnknownEscapeItemRule { .. }))
         );
         assert!(issues.contains(&FieldMoveCatalogIssue::MissingRepelItemPayload));
         assert!(issues.contains(&FieldMoveCatalogIssue::UnknownFieldItemId {

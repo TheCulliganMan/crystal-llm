@@ -5879,31 +5879,19 @@ fn load_visible_runtime_save(
         } else {
             anyhow::bail!("unsupported post-credits spawn marker {marker}");
         };
-        let spawn = snapshot
-            .spawn_points
-            .iter()
-            .find(|spawn| spawn.identifier == spawn_identifier)
-            .cloned()
-            .with_context(|| {
-                format!("compiled pack is missing post-credits spawn {spawn_identifier}")
-            })?;
-        let state = runtime_shell.shell.session_mut().state_mut();
-        state.last_spawn_identifier = Some(spawn_identifier);
-        state.hall_of_fame.spawn_after_champion = None;
-        state
-            .script_runtime
-            .variables
-            .insert("wLastSpawnMapGroup".to_string(), spawn.group_id.to_string());
-        state
-            .script_runtime
-            .variables
-            .insert("wLastSpawnMapNumber".to_string(), spawn.map_id.to_string());
-        let warped = runtime_shell.shell.warp_to_spawn_point()?;
-        runtime_shell.shell.execute_pending_script_warp()?;
+        runtime_shell
+            .shell
+            .session_mut()
+            .state_mut()
+            .hall_of_fame
+            .spawn_after_champion = None;
+        let checksum = runtime_shell
+            .shell
+            .transition_to_spawn_point(spawn_identifier, "MAPSETUP_WARP")?;
         post_credits_warped = true;
         runtime_shell.last_audio_events.push(format!(
-            "post-credits continue spawn={} outcome={:?} checksum={:?}",
-            spawn_identifier, warped.outcome.effect, warped.state_checksum
+            "post-credits continue spawn={} checksum={:?}",
+            spawn_identifier, checksum
         ));
     }
     runtime_shell.title_menu = None;
@@ -5941,6 +5929,7 @@ fn reset_visible_navigation_state(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.pending_mail_input = None;
     runtime_shell.pending_mail_read = None;
     runtime_shell.pending_name_choice = None;
+    runtime_shell.pending_player_name_return = None;
     runtime_shell.pokegear_phone_call = None;
     runtime_shell.incoming_phone_sequence = None;
     runtime_shell.pending_egg_hatch_nickname = None;

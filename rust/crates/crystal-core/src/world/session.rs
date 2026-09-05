@@ -459,8 +459,6 @@ pub struct EncounterCheckOptions {
     pub has_cleanse_tag: bool,
     pub active_repel_item: Option<String>,
     pub lead_party_level: Option<u8>,
-    #[serde(default)]
-    pub lead_ability: Option<String>,
     /// CAVE and DUNGEON environments permit encounters on ordinary land,
     /// except ice, without requiring a grass collision byte.
     #[serde(default)]
@@ -475,7 +473,6 @@ impl Default for EncounterCheckOptions {
             has_cleanse_tag: false,
             active_repel_item: None,
             lead_party_level: None,
-            lead_ability: None,
             land_encounters_on_any_land: false,
         }
     }
@@ -544,17 +541,6 @@ pub fn leading_usable_party_level(state: &GameState) -> Option<u8> {
         .flatten()
         .find(|pokemon| pokemon.hp > 0)
         .map(|pokemon| pokemon.level)
-}
-
-pub fn leading_usable_party_ability(state: &GameState) -> Option<String> {
-    state
-        .storage
-        .party
-        .pokemon
-        .iter()
-        .flatten()
-        .find(|pokemon| !pokemon.is_egg && pokemon.hp > 0)
-        .map(|pokemon| pokemon.species.ability.clone())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3201,16 +3187,11 @@ impl OverworldSession {
             // Random before the zero comparison fails.
             0
         };
-        let ability_threshold = match options.lead_ability.as_deref() {
-            Some("ILLUMINATE") => uncleaned_threshold.saturating_mul(2),
-            Some("STENCH") => uncleaned_threshold / 2,
-            _ => uncleaned_threshold,
-        };
-        let threshold = apply_cleanse_tag_effect(ability_threshold, options.has_cleanse_tag);
+        let threshold = apply_cleanse_tag_effect(uncleaned_threshold, options.has_cleanse_tag);
         // With no Cleanse Tag, the final failed party scan executes
         // `add hl,de`, whose canonical WRAM range cannot overflow. With a
         // Cleanse Tag, `srl b` supplies bit 0 of the pre-halved rate.
-        let rate_carry = options.has_cleanse_tag && ability_threshold & 1 != 0;
+        let rate_carry = options.has_cleanse_tag && uncleaned_threshold & 1 != 0;
         let rate_output = rng
             .random(rate_carry)
             .map_err(ExactEncounterError::Divider)?;
@@ -7287,7 +7268,7 @@ mod tests {
     }
 
     #[test]
-    fn illuminate_and_stench_modify_the_final_walking_encounter_rate() {
+    fn walking_encounter_rate_has_no_species_ability_modifier() {
         let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
         let mut encounters = encounter_data();
         for rate in encounters
@@ -7306,33 +7287,27 @@ mod tests {
             unlocked_unown_sets: u8::MAX,
         };
 
-        let threshold_for = |ability: &str| {
-            let mut divider = crate::random::ReplayDivider::new([0, 0]);
-            let mut rng = CrystalRandom::new(
-                // Keep the rate roll above both thresholds so this fixture
-                // stops before ChooseWildEncounter's slot/level RNG.
-                CrystalRandomState { add: 0, sub: 0xff },
-                &mut divider,
-            );
-            session
-                .check_wild_encounter_exact(
-                    Some(&encounters),
-                    &encounter_slot_tables(),
-                    &encounter_music_modifiers(),
-                    &mut rng,
-                    EncounterCheckOptions {
-                        lead_ability: Some(ability.to_string()),
-                        ..EncounterCheckOptions::default()
-                    },
-                    context,
-                )
-                .expect("ability encounter roll")
-                .expect("grass encounter check")
-                .threshold
-        };
+        let mut divider = crate::random::ReplayDivider::new([0, 0]);
+        let mut rng = CrystalRandom::new(
+            // Keep the rate roll above the threshold so this fixture stops
+            // before ChooseWildEncounter's slot/level RNG.
+            CrystalRandomState { add: 0, sub: 0xff },
+            &mut divider,
+        );
+        let threshold = session
+            .check_wild_encounter_exact(
+                Some(&encounters),
+                &encounter_slot_tables(),
+                &encounter_music_modifiers(),
+                &mut rng,
+                EncounterCheckOptions::default(),
+                context,
+            )
+            .expect("walking encounter roll")
+            .expect("grass encounter check")
+            .threshold;
 
-        assert_eq!(threshold_for("ILLUMINATE"), 102);
-        assert_eq!(threshold_for("STENCH"), 25);
+        assert_eq!(threshold, 51);
     }
 
     #[test]

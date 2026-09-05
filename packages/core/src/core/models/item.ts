@@ -27,7 +27,6 @@ export const ItemSchema = z.object({
   battle_escape_mode: z.string().nullable(),
   battle_focus_energy: z.boolean().nullable(),
   battle_stat_drop_guard: z.boolean().nullable(),
-  battle_stat_drop_guard_turns: z.number().int().min(0).max(0xFF).nullable(),
   confusion_heal: z.boolean().nullable(),
   repel_steps: z.number().int().min(0).max(0xFFFF).nullable(),
   escape_rope_mode: z.string().nullable(),

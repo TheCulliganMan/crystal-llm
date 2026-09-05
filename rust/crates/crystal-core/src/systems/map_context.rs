@@ -25,8 +25,6 @@ pub struct MapContextOutcome {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SpawnMemoryUpdate {
     Preserve,
-    Set(u16),
-    Clear,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -115,12 +113,6 @@ pub fn commit_overworld_snapshot(
     state.frame_counter = snapshot.frame;
     match spawn_update {
         SpawnMemoryUpdate::Preserve => {}
-        SpawnMemoryUpdate::Set(identifier) => {
-            state.last_spawn_identifier = Some(identifier);
-        }
-        SpawnMemoryUpdate::Clear => {
-            state.last_spawn_identifier = None;
-        }
     }
 }
 
@@ -493,9 +485,9 @@ mod tests {
     }
 
     #[test]
-    fn commit_overworld_snapshot_updates_frame_map_and_explicit_spawn_memory() {
+    fn commit_overworld_snapshot_updates_frame_map_and_preserves_spawn_memory() {
         let mut state = GameState::default();
-        state.last_spawn_identifier = Some(21);
+        state.last_spawn_map_constant = Some("GOLDENROD_CITY".to_string());
         let snapshot = OverworldSnapshot {
             frame: 42,
             map_name: "Route29".to_string(),
@@ -507,15 +499,18 @@ mod tests {
         commit_overworld_snapshot(&mut state, &snapshot, SpawnMemoryUpdate::Preserve);
         assert_eq!(state.frame_counter, 42);
         assert_eq!(state.time.game_time_frames, 0);
-        assert_eq!(state.last_spawn_identifier, Some(21));
+        assert_eq!(
+            state.last_spawn_map_constant.as_deref(),
+            Some("GOLDENROD_CITY")
+        );
         assert_eq!(state.overworld.snapshot_identity().unwrap().0, "Route29");
 
-        commit_overworld_snapshot(&mut state, &snapshot, SpawnMemoryUpdate::Set(14));
+        commit_overworld_snapshot(&mut state, &snapshot, SpawnMemoryUpdate::Preserve);
         assert_eq!(state.time.game_time_frames, 0);
-        assert_eq!(state.last_spawn_identifier, Some(14));
-
-        commit_overworld_snapshot(&mut state, &snapshot, SpawnMemoryUpdate::Clear);
-        assert_eq!(state.last_spawn_identifier, None);
+        assert_eq!(
+            state.last_spawn_map_constant.as_deref(),
+            Some("GOLDENROD_CITY")
+        );
     }
 
     #[test]

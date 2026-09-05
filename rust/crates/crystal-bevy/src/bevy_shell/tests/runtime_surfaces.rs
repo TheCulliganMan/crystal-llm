@@ -182,8 +182,18 @@ fn native_title_main_menu_keeps_game_timer_counting_clear() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     runtime_shell.intro_screen = None;
     let title = runtime_shell.title_menu.as_mut().expect("title menu");
-    title.phase = VisibleTitlePhase::MainMenu;
-    title.scx = 0;
+    title
+        .presentation_machine
+        .memory
+        .insert("wJumptableIndex".to_string(), 0x82);
+    title
+        .presentation_machine
+        .memory
+        .insert("wTitleScreenSelectedOption".to_string(), 0);
+    title
+        .presentation_machine
+        .memory
+        .insert("hSCX".to_string(), 0);
     let mut app = integrated_shell_test_app(runtime_shell);
 
     app.update();
@@ -886,7 +896,7 @@ fn retained_fullscreen_lcd_survives_title_setup_and_hands_off_to_complete_overwo
 
     {
         let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
-        finish_visible_intro_screen(&mut runtime_shell, "retained-lcd-regression")
+        finish_and_drain_visible_intro_for_test(&mut runtime_shell, "retained-lcd-regression")
             .expect("handoff intro to title");
     }
     app.update();
@@ -895,10 +905,18 @@ fn retained_fullscreen_lcd_survives_title_setup_and_hands_off_to_complete_overwo
     {
         let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
         let title = runtime_shell.title_menu.as_mut().expect("title menu");
-        title.phase = VisibleTitlePhase::PressStart;
-        title.scx = 0;
-        title.frame = 0;
-        title.title_timer = 10_000;
+        title
+            .presentation_machine
+            .memory
+            .insert("hSCX".to_string(), 0);
+        title
+            .presentation_machine
+            .values
+            .insert("title_suicune_frame".to_string(), 0);
+        title
+            .presentation_machine
+            .memory
+            .insert("wTitleScreenTimer".to_string(), 10_000);
         title
             .presentation_machine
             .memory
@@ -1391,6 +1409,11 @@ fn retained_field_fullscreen_ownership_distinguishes_new_game_and_capture_name_c
     runtime_shell.pending_name_choice = Some(VisibleNameChoice {
         options: vec!["YES".to_string(), "NO".to_string()],
         selected: 0,
+        player_menu: None,
+        player_phase: None,
+        motion_step: 0,
+        motion_frames_remaining: 0,
+        pending_player_name: None,
     });
     assert!(
         retained_field_fullscreen_active(&runtime_shell),
@@ -1444,20 +1467,14 @@ fn retained_field_fullscreen_ownership_distinguishes_new_game_and_capture_name_c
 }
 
 #[test]
-fn new_game_name_choice_covers_the_complete_lcd_with_white() {
+fn new_game_name_choice_uses_source_menu_over_player_portrait_lcd() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     runtime_shell.intro_screen = None;
     runtime_shell.title_menu = None;
-    runtime_shell.pending_name_choice = Some(VisibleNameChoice {
-        options: vec![
-            "NEW NAME".to_string(),
-            "CHRIS".to_string(),
-            "MAT".to_string(),
-            "ALLAN".to_string(),
-            "JON".to_string(),
-        ],
-        selected: 0,
-    });
+    open_visible_name_choice(&mut runtime_shell).expect("open source player-name menu");
+    for _ in 0..40 {
+        tick_visible_player_name_choice(&mut runtime_shell).expect("finish MovePlayerPicRight");
+    }
     mark_runtime_snapshot_dirty(&mut runtime_shell);
     let mut app = integrated_shell_test_app(runtime_shell);
 
@@ -1470,8 +1487,8 @@ fn new_game_name_choice_covers_the_complete_lcd_with_white() {
         .filter_map(|sprite| sprite.custom_size)
         .collect::<Vec<_>>();
     assert!(
-        menu_sizes.contains(&Vec2::new(12.0 * TILE_SIZE, 14.0 * TILE_SIZE)),
-        "preset-name menu must be wide enough for NEW NAME and no taller than its five choices; sizes={menu_sizes:?}"
+        menu_sizes.contains(&Vec2::new(11.0 * TILE_SIZE, 12.0 * TILE_SIZE)),
+        "preset-name menu must use the exact menu_coords 0,0,10,11 extent; sizes={menu_sizes:?}"
     );
 
     let retained = retained_fullscreen_surface(app.world_mut());
@@ -1479,12 +1496,91 @@ fn new_game_name_choice_covers_the_complete_lcd_with_white() {
     let image = images
         .get(&retained.texture)
         .expect("retained name-choice backdrop image");
+    assert!(image.data.chunks_exact(4).all(|pixel| pixel[3] == 255));
     assert!(
         image
             .data
             .chunks_exact(4)
+            .any(|pixel| pixel != [255, 255, 255, 255]),
+        "NamePlayer must retain the shifted player portrait and OakText6 behind its menu"
+    );
+    let top_right = (19 * SOURCE_TILE_SIZE) * 4;
+    assert_eq!(
+        &image.data[top_right..top_right + 4],
+        &[255, 255, 255, 255],
+        "the untouched LCD background must remain source-white"
+    );
+}
+
+#[test]
+fn custom_player_name_return_retains_naming_then_clears_and_redraws_portrait() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.intro_screen = None;
+    runtime_shell.title_menu = None;
+    open_visible_name_choice(&mut runtime_shell).expect("open source player-name menu");
+    for _ in 0..40 {
+        tick_visible_player_name_choice(&mut runtime_shell).expect("finish MovePlayerPicRight");
+    }
+    confirm_visible_name_choice(&mut runtime_shell).expect("choose NEW NAME");
+    runtime_shell.pending_name_input.as_mut().expect("NamingScreen").value = "GOLD".to_string();
+    mark_runtime_snapshot_dirty(&mut runtime_shell);
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+    let naming_texture = retained_fullscreen_surface(app.world_mut()).texture;
+
+    {
+        let mut shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        confirm_visible_player_name_input(&mut shell).expect("finish NamingScreen");
+    }
+    app.update();
+    assert_eq!(
+        retained_fullscreen_surface(app.world_mut()).texture,
+        naming_texture,
+        "RotateThreePalettesRight must fade the retained NamingScreen"
+    );
+
+    {
+        let mut shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        for _ in 0..24 {
+            tick_visible_player_name_choice(&mut shell).expect("finish fade out");
+        }
+    }
+    app.update();
+    let blank_texture = retained_fullscreen_surface(app.world_mut()).texture;
+    let images = app.world().resource::<Assets<Image>>();
+    assert!(
+        images
+            .get(&blank_texture)
+            .expect("cleared custom-name LCD")
+            .data
+            .chunks_exact(4)
             .all(|pixel| pixel == [255, 255, 255, 255]),
-        "the uncovered half of the preset-name screen must be white, not retained overworld pixels"
+        "ClearTilemap and WaitBGMap must expose the source-white LCD beneath the white palette"
+    );
+
+    {
+        let mut shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        for _ in 0..4 {
+            tick_visible_player_name_choice(&mut shell).expect("finish WaitBGMap");
+        }
+    }
+    app.update();
+    let portrait_texture = retained_fullscreen_surface(app.world_mut()).texture;
+    let images = app.world().resource::<Assets<Image>>();
+    let image = images.get(&portrait_texture).expect("redrawn player LCD");
+    assert!(
+        image
+            .data
+            .chunks_exact(4)
+            .any(|pixel| pixel != [255, 255, 255, 255]),
+        "DrawIntroPlayerPic must redraw the source player portrait before fade-in"
+    );
+    let textbox_start = OAK_INTRO_TEXTBOX_Y * SOURCE_TILE_SIZE * 160 * 4;
+    assert!(
+        image.data[textbox_start..]
+            .chunks_exact(4)
+            .all(|pixel| pixel == [255, 255, 255, 255]),
+        "ClearTilemap means OakText6 must not be invented after custom naming"
     );
 }
 

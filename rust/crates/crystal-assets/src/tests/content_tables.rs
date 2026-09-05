@@ -2821,6 +2821,7 @@
         bad_repel.repel_steps = Some(0);
         let mut bad_rope = test_item("BAD_ESCAPE_ROPE");
         bad_rope.effect = "ESCAPE_ROPE".to_string();
+        bad_rope.escape_rope_mode = Some("MOD_WARP".to_string());
         let mut exact_poke_doll = test_item("POKE_DOLL");
         exact_poke_doll.effect = "MOD_ESCAPE_ITEM".to_string();
         exact_poke_doll.battle_escape_mode = Some("WILD_BATTLE".to_string());
@@ -2829,7 +2830,7 @@
         exact_repel.repel_steps = Some(100);
         let mut exact_rope = test_item("ESCAPE_ROPE");
         exact_rope.effect = "MOD_ESCAPE_ROPE".to_string();
-        exact_rope.escape_rope_mode = Some("MOD_WARP".to_string());
+        exact_rope.escape_rope_mode = Some("DIG_WARP".to_string());
         let data = GameDataSet {
             items: [
                 ("BAD_POKE_DOLL".to_string(), bad_poke_doll),
@@ -2853,6 +2854,7 @@
         for (code, subject) in [
             ("invalid_item_battle_escape_mode", "BAD_POKE_DOLL"),
             ("invalid_item_repel_steps", "BAD_REPEL"),
+            ("invalid_item_escape_rope_mode", "BAD_ESCAPE_ROPE"),
         ] {
             assert!(
                 report
@@ -2984,14 +2986,7 @@
         bad_x_item.battle_stat_boost_stages = Some(7);
         let mut bad_guard_spec = test_item("BAD_GUARD_SPEC");
         bad_guard_spec.effect = "MOD_GUARD".to_string();
-        bad_guard_spec.battle_stat_drop_guard = Some(true);
-        let mut bad_guard_spec_turns = test_item("BAD_GUARD_SPEC_TURNS");
-        bad_guard_spec_turns.effect = "MOD_GUARD".to_string();
-        bad_guard_spec_turns.battle_stat_drop_guard = Some(true);
-        bad_guard_spec_turns.battle_stat_drop_guard_turns = Some(0);
-        let mut bad_guard_spec_flag = test_item("BAD_GUARD_SPEC_FLAG");
-        bad_guard_spec_flag.effect = "MOD_GUARD".to_string();
-        bad_guard_spec_flag.battle_stat_drop_guard_turns = Some(5);
+        bad_guard_spec.battle_stat_drop_guard = Some(false);
         let mut bad_dire_hit = test_item("BAD_DIRE_HIT");
         bad_dire_hit.effect = "MOD_FOCUS".to_string();
         bad_dire_hit.battle_focus_energy = Some(false);
@@ -3036,7 +3031,6 @@
         let mut exact_guard_spec = test_item("EXACT_GUARD_SPEC");
         exact_guard_spec.effect = "MOD_GUARD".to_string();
         exact_guard_spec.battle_stat_drop_guard = Some(true);
-        exact_guard_spec.battle_stat_drop_guard_turns = Some(5);
         let mut exact_dire_hit = test_item("EXACT_DIRE_HIT");
         exact_dire_hit.effect = "MOD_FOCUS".to_string();
         exact_dire_hit.battle_focus_energy = Some(true);
@@ -3056,8 +3050,6 @@
                 ("BAD_RARE_CANDY".to_string(), bad_rare_candy),
                 ("BAD_X_ITEM".to_string(), bad_x_item),
                 ("BAD_GUARD_SPEC".to_string(), bad_guard_spec),
-                ("BAD_GUARD_SPEC_TURNS".to_string(), bad_guard_spec_turns),
-                ("BAD_GUARD_SPEC_FLAG".to_string(), bad_guard_spec_flag),
                 ("BAD_DIRE_HIT".to_string(), bad_dire_hit),
                 ("BAD_BITTER_BERRY".to_string(), bad_bitter_berry),
                 ("BAD_BATTLE_PAYLOAD".to_string(), bad_battle_payload),
@@ -3099,15 +3091,7 @@
             ("invalid_item_rare_candy_level_gain", "BAD_RARE_CANDY"),
             ("invalid_item_battle_stat_boost_stat", "BAD_X_ITEM"),
             ("invalid_item_battle_stat_boost_stages", "BAD_X_ITEM"),
-            (
-                "missing_item_battle_stat_drop_guard_turns",
-                "BAD_GUARD_SPEC",
-            ),
-            (
-                "invalid_item_battle_stat_drop_guard_turns",
-                "BAD_GUARD_SPEC_TURNS",
-            ),
-            ("missing_item_battle_stat_drop_guard", "BAD_GUARD_SPEC_FLAG"),
+            ("invalid_item_battle_stat_drop_guard", "BAD_GUARD_SPEC"),
             ("invalid_item_battle_focus_energy", "BAD_DIRE_HIT"),
             ("invalid_item_confusion_heal", "BAD_BITTER_BERRY"),
             ("missing_item_battle_payload", "BAD_BATTLE_PAYLOAD"),
@@ -3181,8 +3165,8 @@
                             EvolutionEntry::item("new_form", "thunderstone"),
                             EvolutionEntry::happiness("NEW_FORM", " MORNINGISH"),
                             EvolutionEntry::happiness("NEW_FORM", "MORNINGISH"),
-                            EvolutionEntry::trade("NEW_FORM", Some(" THUNDERSTONE")),
-                            EvolutionEntry::trade("NEW_FORM", Some("thunderstone")),
+                            EvolutionEntry::trade("NEW_FORM", " THUNDERSTONE"),
+                            EvolutionEntry::trade("NEW_FORM", "thunderstone"),
                             EvolutionEntry::stat("NEW_FORM", 20, " ATTACKIER"),
                             EvolutionEntry::stat("NEW_FORM", 20, "ATTACKIER"),
                             EvolutionEntry {
